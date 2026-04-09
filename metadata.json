@@ -1,0 +1,8 @@
+{
+  "name": "Remix: GymAp V 1.1.9",
+  "description": "",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
