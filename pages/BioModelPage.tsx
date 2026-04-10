@@ -396,6 +396,7 @@ const BioModelPage: React.FC = () => {
   const [hybridConstraints, setHybridConstraints] = useState<Record<string, PlanarConstraint[]>>({});
   const [bypassConstraints, setBypassConstraints] = useState(false);
 
+
   const calculateKinematics = (currentPosture: Posture, currentTwists: Record<string, number>) => {
     const locations: Record<string, Vector3> = {};
     const boneEndPoints: Record<string, Vector3> = {};
@@ -613,7 +614,7 @@ const BioModelPage: React.FC = () => {
       let correctedTwists = { ...currentTwists };
       let changed = false;
 
-      // Iterative solver for multiple planes (10 passes for better convergence)
+      // Iterative solver — 10 passes balances convergence quality with real-time performance
       for (let i = 0; i < 10; i++) {
           BONE_ORDER.forEach(boneId => {
               if (lockedBoneIds?.includes(boneId)) return; // Skip the bones being actively moved
@@ -866,9 +867,9 @@ const BioModelPage: React.FC = () => {
                 const vRef = sub(tipRef, c.center);
                 const distRef = dotProduct(vRef, N);
                 
-                // Bilateral Violation: Block if we are moving further away from the plane
-                // Threshold 0.05 for contact.
-                if (Math.abs(distProp) > 0.05 && Math.abs(distProp) > Math.abs(distRef) + 0.001) {
+                // Bilateral Violation: Block if we are moving further away from the plane.
+                // Threshold 0.1 gives the solver enough room to converge without false rejections.
+                if (Math.abs(distProp) > 0.1 && Math.abs(distProp) > Math.abs(distRef) + 0.001) {
                     return true;
                 }
             }
@@ -1033,38 +1034,41 @@ const BioModelPage: React.FC = () => {
       targetVal: number,
       checkFn: (val: number) => boolean
   ): number => {
-      // 1. Optimistic check
-      if (checkFn(targetVal)) return targetVal;
+      // Phase 1: Linear scan from start toward target.
+      // This prevents "jumping": a binary search with an upfront optimistic check
+      // can skip over invalid regions and land in a valid island beyond them, causing
+      // the model to snap past disallowed positions. The linear scan stops at the
+      // first invalid step, guaranteeing the returned value is continuously reachable.
+      const SCAN_STEPS = 20;
+      let lastValid = startVal;
+      let firstInvalidVal: number | null = null;
 
-      // 2. Binary search for the closest valid value
-      let low = startVal;
-      let high = targetVal;
-      let safe = startVal;
-      let foundValid = false;
-
-      // Even if startVal is invalid, we try to find a valid point in the range
-      if (checkFn(startVal)) {
-          foundValid = true;
-          safe = startVal;
+      for (let i = 1; i <= SCAN_STEPS; i++) {
+          const t = i / SCAN_STEPS;
+          const val = startVal + (targetVal - startVal) * t;
+          if (checkFn(val)) {
+              lastValid = val;
+          } else {
+              firstInvalidVal = val;
+              break;
+          }
       }
 
-      for (let i = 0; i < 10; i++) {
+      // If the whole range is valid, return target directly.
+      if (firstInvalidVal === null) return targetVal;
+
+      // Phase 2: Binary search between lastValid and firstInvalidVal for precision.
+      let low = lastValid;
+      let high = firstInvalidVal;
+      for (let i = 0; i < 8; i++) {
           const mid = low + (high - low) / 2;
           if (checkFn(mid)) {
-              safe = mid;
-              foundValid = true;
-              // If we are moving from invalid to valid, we want the one closest to target
-              // If we are moving from valid to invalid, we want the one closest to target
               low = mid;
           } else {
               high = mid;
           }
       }
-
-      // If we never found a valid value, we have to stay at startVal (or try to move anyway?)
-      // But staying at startVal is what causes "stuck" if startVal is also invalid.
-      // However, if solveConstraints is robust, startVal should rarely be invalid.
-      return safe;
+      return low;
   };
 
   const checkConstraintViolationLegacy = (boneId: string, proposedLocalVec: Vector3) => {
@@ -1112,21 +1116,10 @@ const BioModelPage: React.FC = () => {
       const current = posture[selectedBone];
       let newVec = { ...current };
       if (axis === 'elevation') newVec.y = -val;
-      else if (axis === 'protraction') newVec.z = -val; 
-      
+      else if (axis === 'protraction') newVec.z = -val;
       newVec = applyConstraints(selectedBone, newVec);
-
-      const startVec = posture[selectedBone];
-      const safeT = findSafeInteractionValue(0, 1, (t) => {
-          const testVec = interpolateVector(startVec, newVec, t);
-          const resolved = resolveKinematics(selectedBone, testVec, posture, twists);
-          return resolved !== null;
-      });
-
-      const finalSafeVec = interpolateVector(startVec, newVec, safeT);
-      const resolved = resolveKinematics(selectedBone, finalSafeVec, posture, twists);
-      if (!resolved) return; 
-
+      const resolved = resolveKinematics(selectedBone, newVec, posture, twists);
+      if (!resolved) return;
       updatePostureState(resolved.posture, resolved.twists);
   };
 
@@ -1134,37 +1127,31 @@ const BioModelPage: React.FC = () => {
       if (!selectedBone || isNaN(val)) return;
       if (isPlaying) setIsPlaying(false);
 
-      const currentP = poseMode === 'start' ? startPosture : endPosture;
-      const currentT = poseMode === 'start' ? startTwists : endTwists;
+      // Use posture/twists directly (always in sync with poseMode via updatePostureState).
+      const currentVec = posture[selectedBone];
+      if (!currentVec) return;
 
+      // Apply an incremental rotation in the YZ plane from the current angle so the
+      // x-component set by the constraint solver is preserved — exactly like the Z-slider.
       const currentAngle = getCurrentHingeAngle(selectedBone);
-      const safeAngle = findSafeInteractionValue(currentAngle, val, (testAngle) => {
-          const rad = (testAngle * Math.PI) / 180;
-          let testVec = { x: 0, y: 0, z: 0 };
-          if (selectedBone.includes('Foot')) {
-              testVec = { x: 0, y: Math.sin(rad), z: -Math.cos(rad) };
-          } else if (selectedBone.includes('Tibia')) {
-              // Knees bend backwards (negative Z)
-              testVec = { x: 0, y: Math.cos(rad), z: -Math.sin(rad) };
-          } else {
-              // Elbows bend forwards (positive Z)
-              testVec = { x: 0, y: Math.cos(rad), z: Math.sin(rad) };
-          }
-          
-          const resolved = resolveKinematics(selectedBone, testVec, currentP, currentT);
-          return resolved !== null;
-      });
+      const deltaRad = (val - currentAngle) * Math.PI / 180;
+      const { x, y, z } = currentVec;
+      const cosD = Math.cos(deltaRad);
+      const sinD = Math.sin(deltaRad);
 
-      const rad = (safeAngle * Math.PI) / 180;
-      let newVec = { x: 0, y: 0, z: 0 };
-      if (selectedBone.includes('Foot')) {
-          newVec = { x: 0, y: Math.sin(rad), z: -Math.cos(rad) };
+      let newVec: Vector3;
+      if (selectedBone.includes('Tibia')) {
+          // Tibia: y=cos(θ), z=-sin(θ). Increasing angle rotates toward -z direction,
+          // which is the opposite sense from forearm, so negate sinD.
+          newVec = normalize({ x, y: y * cosD + z * sinD, z: -y * sinD + z * cosD });
       } else {
-          newVec = { x: 0, y: Math.cos(rad), z: Math.sin(rad) };
+          // Forearm: y=cos(θ), z=sin(θ)  |  Foot: y=sin(θ), z=-cos(θ)
+          // Both share the same rotation direction in the YZ plane.
+          newVec = normalize({ x, y: y * cosD - z * sinD, z: y * sinD + z * cosD });
       }
-      
+
       const constrainedVec = applyConstraints(selectedBone, newVec);
-      const resolved = resolveKinematics(selectedBone, constrainedVec, currentP, currentT);
+      const resolved = resolveKinematics(selectedBone, constrainedVec, posture, twists);
       if (!resolved) return;
 
       updatePostureState(resolved.posture, resolved.twists);
@@ -1178,64 +1165,29 @@ const BioModelPage: React.FC = () => {
         const newVec = { ...posture[selectedBone], [axis]: newValue };
         const constrained = applyConstraints(selectedBone, newVec);
         setTargetPos(constrained);
-        
-        const startVec = posture[selectedBone];
-        const safeT = findSafeInteractionValue(0, 1, (t) => {
-            const testVec = interpolateVector(startVec, constrained, t);
-            const resolved = resolveKinematics(selectedBone, testVec, posture, twists);
-            return resolved !== null;
-        });
-
-        const finalSafeVec = interpolateVector(startVec, constrained, safeT);
-        const resolved = resolveKinematics(selectedBone, finalSafeVec, posture, twists);
-        if (resolved) {
-            updatePostureState(resolved.posture, resolved.twists);
-        }
+        const resolved = resolveKinematics(selectedBone, constrained, posture, twists);
+        if (resolved) updatePostureState(resolved.posture, resolved.twists);
         return;
     }
 
-    const internalVal = -newValue; 
-    
+    const internalVal = -newValue;
+
     if (targetReferenceBone) {
         const newTarget = { ...targetPos, [axis]: internalVal };
-        setTargetPos(newTarget); 
+        setTargetPos(newTarget);
         const rootBone = targetReferenceBone;
         const childBone = selectedBone;
         const len1 = BONE_LENGTHS[rootBone];
         const len2 = BONE_LENGTHS[childBone];
-        
-        const kinematics = calculateKinematics(posture, twists);
-        const startTip = kinematics.boneEndPoints[childBone];
-
-        const safeT = findSafeInteractionValue(0, 1, (t) => {
-            const testTarget = interpolateVector(startTip, newTarget, t);
-            const currentPole = mul(posture[rootBone], len1); 
-            const solution = solveTwoBoneIK({x:0,y:0,z:0}, testTarget, len1, len2, currentPole);
-            if (!solution) return false;
-            
-            const rootFrame = createRootFrame({x:0, y:1, z:0});
-            const transported = transportFrame(rootFrame, solution.vec1);
-            const childVecLocal = worldToLocal(transported, solution.vec2);
-            
-            const nextPosture = { ...posture, [rootBone]: solution.vec1, [childBone]: childVecLocal };
-            const resolved = resolveFullPosture(nextPosture, twists, [rootBone, childBone], rootBone);
-            return resolved !== null;
-        });
-
-        const finalTarget = interpolateVector(startTip, newTarget, safeT);
-        const currentPole = mul(posture[rootBone], len1); 
-        const solution = solveTwoBoneIK({x:0,y:0,z:0}, finalTarget, len1, len2, currentPole);
-        
+        const currentPole = mul(posture[rootBone], len1);
+        const solution = solveTwoBoneIK({x:0,y:0,z:0}, newTarget, len1, len2, currentPole);
         if (solution) {
             const rootFrame = createRootFrame({x:0, y:1, z:0});
             const transported = transportFrame(rootFrame, solution.vec1);
             const childVecLocal = worldToLocal(transported, solution.vec2);
-            
             const nextPosture = { ...posture, [rootBone]: solution.vec1, [childBone]: childVecLocal };
             const resolved = resolveFullPosture(nextPosture, twists, [rootBone, childBone], rootBone);
-            if (resolved) {
-                updatePostureState(resolved.posture, resolved.twists);
-            }
+            if (resolved) updatePostureState(resolved.posture, resolved.twists);
         }
         return;
     }
@@ -1247,54 +1199,28 @@ const BioModelPage: React.FC = () => {
     let direction = normalize(constrainedTarget);
     const bounds = BONE_CONSTRAINTS[selectedBone] || {};
     let constrained = { ...direction };
-    
-    // Pass 1: Initial clamp to joint limits
     if (bounds.x) constrained.x = Math.max(bounds.x[0], Math.min(bounds.x[1], constrained.x));
     if (bounds.y) constrained.y = Math.max(bounds.y[0], Math.min(bounds.y[1], constrained.y));
     if (bounds.z) constrained.z = Math.max(bounds.z[0], Math.min(bounds.z[1], constrained.z));
-    
-    // Normalize to unit vector
     let finalVector = normalize(constrained);
-    
-    // Pass 2: Final clamp to ensure strict adherence (fixes normalization overshoot)
     if (bounds.x) finalVector.x = Math.max(bounds.x[0], Math.min(bounds.x[1], finalVector.x));
     if (bounds.y) finalVector.y = Math.max(bounds.y[0], Math.min(bounds.y[1], finalVector.y));
     if (bounds.z) finalVector.z = Math.max(bounds.z[0], Math.min(bounds.z[1], finalVector.z));
-
-    const startVec = posture[selectedBone] || { x: 0, y: 1, z: 0 };
-    const safeT = findSafeInteractionValue(0, 1, (t) => {
-        const testVec = normalize(interpolateVector(startVec, finalVector, t));
-        const resolved = resolveKinematics(selectedBone, testVec, posture, twists);
-        return resolved !== null;
-    });
-
-    const finalSafeVec = normalize(interpolateVector(startVec, finalVector, safeT));
-    const resolved = resolveKinematics(selectedBone, finalSafeVec, posture, twists);
-    if (!resolved) return; 
-
+    const resolved = resolveKinematics(selectedBone, finalVector, posture, twists);
+    if (!resolved) return;
     updatePostureState(resolved.posture, resolved.twists);
   };
 
   const handleRotationChange = (val: number) => {
     if (!selectedBone || isNaN(val)) return;
     if (isPlaying) setIsPlaying(false);
-    
-    const currentP = poseMode === 'start' ? startPosture : endPosture;
-    const currentT = poseMode === 'start' ? startTwists : endTwists;
 
     let allowedVal = val;
     if (ROTATION_LIMITS[selectedBone]) {
         allowedVal = clamp(val, ROTATION_LIMITS[selectedBone].min, ROTATION_LIMITS[selectedBone].max);
     }
 
-    const startVal = currentT[selectedBone] || 0;
-
-    const safeTwist = findSafeInteractionValue(startVal, allowedVal, (testTwist) => {
-        const resolved = resolveRotation(selectedBone, testTwist, currentP, currentT);
-        return resolved !== null;
-    });
-
-    const resolved = resolveRotation(selectedBone, safeTwist, currentP, currentT);
+    const resolved = resolveRotation(selectedBone, allowedVal, posture, twists);
     if (!resolved) return;
 
     updatePostureState(resolved.posture, resolved.twists);
@@ -1572,6 +1498,7 @@ const BioModelPage: React.FC = () => {
     }
   }, [selectedBone, poseMode, startPosture, endPosture, targetReferenceBone, skeletalData, hybridConstraints]);
 
+
   // DEFINED HERE TO FIX REFERENCE ERROR
   const intentCoords = useMemo(() => {
     if (!targetPos) return { x: 0, y: 0, z: 0 };
@@ -1761,13 +1688,13 @@ const BioModelPage: React.FC = () => {
                                     <label className="font-bold text-gray-700 text-xs flex items-center gap-2"><RefreshCw className="w-3 h-3 text-orange-500" />Rotation (Int/Ext)</label>
                                     <span className="font-mono text-gray-500 font-bold text-xs">{displayTwist}°</span>
                                 </div>
-                                <input 
-                                    type="range" 
-                                    min={ROTATION_LIMITS[selectedBone]?.min ?? -90} 
-                                    max={ROTATION_LIMITS[selectedBone]?.max ?? 90} 
-                                    step="1" 
-                                    value={displayTwist} 
-                                    onChange={(e) => handleRotationChange(parseFloat(e.target.value))} 
+                                <input
+                                    type="range"
+                                    min={ROTATION_LIMITS[selectedBone]?.min ?? -90}
+                                    max={ROTATION_LIMITS[selectedBone]?.max ?? 90}
+                                    step="1"
+                                    value={displayTwist}
+                                    onChange={(e) => handleRotationChange(parseFloat(e.target.value))}
                                     className="bio-range w-full text-orange-500"
                                 />
                                 {ROTATION_LIMITS[selectedBone] && (
