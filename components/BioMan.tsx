@@ -426,11 +426,10 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
         });
     }
     
-    // Draw Planes (Unchanged)
     if (planes) {
         planes.forEach(plane => {
             const camCenter = applyCamera(plane.center);
-            let tangent = { x: 1, y: 0, z: 0 };
+            let tangent: Vector3 = { x: 1, y: 0, z: 0 };
             if (Math.abs(dotProduct(plane.normal, tangent)) > 0.9) tangent = { x: 0, y: 1, z: 0 };
             const bitangent = normalize(crossProduct(plane.normal, tangent));
             tangent = normalize(crossProduct(bitangent, plane.normal));
@@ -447,11 +446,10 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
             const isSelected = plane.boneId === selectedBone;
             const opacity = isSelected ? 0.25 : 0.05;
             const strokeOpacity = isSelected ? 0.6 : 0.15;
-            
             items.push({
                 type: 'path',
                 id: plane.id,
-                z: camCenter.z - 50, 
+                z: camCenter.z - 50,
                 props: {
                     d: dPath,
                     fill: plane.color ? plane.color.replace(/[\d.]+\)$/, `${opacity})`) : `rgba(139, 92, 246, ${opacity})`,

@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import BioMan, { Posture, Vector3, VisualForce, VisualPlane } from '../components/BioMan';
-import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, BrainCircuit, Axis3d, Plus, Trash2, Globe2 } from 'lucide-react';
+import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, BrainCircuit, Axis3d, Plus, Trash2 } from 'lucide-react';
 
 const DEFAULT_POSTURE: Posture = {
   lClavicle: { x: -25, y: 0, z: 0 },
@@ -104,8 +104,8 @@ interface ForceConfig {
 interface PlanarConstraint {
     id: string;
     active: boolean;
-    normal: Vector3;
-    center: Vector3;
+    normal: Vector3; // direction the limb CANNOT move in — tip is locked to the plane perpendicular to this
+    center: Vector3; // world-space point the plane passes through (distal tip at time of creation)
 }
 
 interface Frame {
@@ -358,7 +358,7 @@ const mirrorTwists = (twists: Record<string, number>, sourceBoneId: string): Rec
 };
 
 const BioModelPage: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'capacities' | 'dof'>('kinematics');
+  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'capacities' | 'constraints'>('kinematics');
   const [poseMode, setPoseMode] = useState<'start' | 'end'>('start');
   const [startPosture, setStartPosture] = useState<Posture>(DEFAULT_POSTURE);
   const [endPosture, setEndPosture] = useState<Posture>(DEFAULT_POSTURE);
@@ -381,10 +381,7 @@ const BioModelPage: React.FC = () => {
   const [calculatedTorques, setCalculatedTorques] = useState<Record<string, Vector3>>({});
   const [neuralCosts, setNeuralCosts] = useState<Record<string, number>>({});
 
-  // UPDATED: Support array of constraints per bone
-  const [hybridConstraints, setHybridConstraints] = useState<Record<string, PlanarConstraint[]>>({});
-  const [bypassConstraints, setBypassConstraints] = useState(false);
-
+  const [constraints, setConstraints] = useState<Record<string, PlanarConstraint[]>>({});
 
   const calculateKinematics = (currentPosture: Posture, currentTwists: Record<string, number>) => {
     const locations: Record<string, Vector3> = {};
@@ -481,73 +478,123 @@ const BioModelPage: React.FC = () => {
     return { locations, boneEndPoints, boneStartPoints, jointFrames };
   };
 
-  // Compute lockedPlanes for visualization
-  const lockedPlanes = useMemo(() => {
-    const planes: VisualPlane[] = [];
-    const kinematics = calculateKinematics(posture, twists);
-    (Object.entries(hybridConstraints) as [string, PlanarConstraint[]][]).forEach(([boneId, constraints]) => {
-        if (!constraints) return;
-        constraints.forEach(c => {
-            if (c.active) {
-                // Place the plane at the distal end of the bone
-                const distalEnd = kinematics.boneEndPoints[boneId] || c.center;
-                planes.push({
-                    id: c.id,
-                    center: distalEnd,
-                    normal: c.normal,
-                    size: 100, 
-                    color: 'rgba(139, 92, 246, 0.2)',
-                    boneId: boneId
-                });
-            }
-        });
-    });
-    return planes;
-  }, [hybridConstraints, posture, twists]);
+  // --- CONSTRAINT HELPERS ---
+  // Project a proposed local direction for a bone onto the intersection of all
+  // active planar constraints for that bone. A constraint is a plane (normal N,
+  // center C) that the bone's distal tip must lie on. Since the tip is
+  // start + dir*len, the constraint reduces to a fixed value of dir·N in world
+  // space. We do a small number of Gauss-Seidel projections when multiple
+  // constraints are present (exact for one constraint, approximate for many).
+  const projectDirOntoConstraints = (
+      boneId: string,
+      proposedLocalDir: Vector3,
+      basePosture: Posture,
+      baseTwists: Record<string, number>
+  ): Vector3 => {
+      const cons = (constraints[boneId] || []).filter(c => c.active);
+      if (cons.length === 0) return proposedLocalDir;
+      const kin = calculateKinematics(basePosture, baseTwists);
+      const startPos = kin.boneStartPoints[boneId];
+      const parentFrame = kin.jointFrames[boneId];
+      if (!startPos || !parentFrame) return proposedLocalDir;
+      const L = BONE_LENGTHS[boneId] || 0;
+      if (L <= 0) return proposedLocalDir;
 
-  // --- HELPER FUNCTIONS FOR CONSTRAINTS ---
-  const addHybridConstraint = (boneId: string) => {
-    const kinematics = calculateKinematics(posture, twists);
-    const currentTip = kinematics.boneEndPoints[boneId];
-    const currentStart = kinematics.boneStartPoints[boneId];
-    
-    // Default normal is the bone's current direction in world space
-    let initialNormal = { x: 1, y: 0, z: 0 };
-    if (currentTip && currentStart) {
-        initialNormal = normalize(sub(currentTip, currentStart));
-    }
+      const currentLocalDir = basePosture[boneId];
+      const currentWorldDir = currentLocalDir ? normalize(localToWorld(parentFrame, currentLocalDir)) : null;
+      const proposedWorldDir = normalize(localToWorld(parentFrame, proposedLocalDir));
+      let worldDir = proposedWorldDir;
 
-    setHybridConstraints(prev => {
-        const list = prev[boneId] || [];
-        const newConstraint: PlanarConstraint = {
-            id: Date.now().toString(),
-            active: true,
-            normal: initialNormal,
-            center: currentTip || { x: 0, y: 0, z: 0 } 
-        };
-        return { ...prev, [boneId]: [...list, newConstraint] };
-    });
+      const projectOne = (N: Vector3, C: Vector3) => {
+          const dTarget = dotProduct(sub(C, startPos), N) / L;
+          if (Math.abs(dTarget) >= 1) {
+              // Plane out of reach; clamp direction toward the plane side.
+              const sign = dTarget >= 0 ? 1 : -1;
+              worldDir = mul(N, sign);
+              return;
+          }
+          const axial = dotProduct(worldDir, N);
+          if (Math.abs(axial - dTarget) < 1e-5) return;
+          let lateral = sub(worldDir, mul(N, axial));
+          let latMag = magnitude(lateral);
+          if (latMag < 1e-5) {
+              let arbitrary: Vector3 = { x: 1, y: 0, z: 0 };
+              if (Math.abs(dotProduct(arbitrary, N)) > 0.9) arbitrary = { x: 0, y: 1, z: 0 };
+              lateral = sub(arbitrary, mul(N, dotProduct(arbitrary, N)));
+              latMag = magnitude(lateral);
+              if (latMag < 1e-5) return;
+          }
+          const latUnit = mul(lateral, 1 / latMag);
+          const latScale = Math.sqrt(Math.max(0, 1 - dTarget * dTarget));
+          worldDir = normalize(add(mul(N, dTarget), mul(latUnit, latScale)));
+      };
+
+      const iters = cons.length === 1 ? 1 : 8;
+      for (let i = 0; i < iters; i++) {
+          for (const c of cons) projectOne(normalize(c.normal), c.center);
+      }
+      // Reject 180° flips: if the projection landed further from the current
+      // direction than the proposal was, the projection crossed to the opposite
+      // hemisphere — hard-stop the limb at its current direction instead.
+      if (currentWorldDir && currentLocalDir) {
+          const currentToProjected = dotProduct(worldDir, currentWorldDir);
+          const currentToProposed = dotProduct(proposedWorldDir, currentWorldDir);
+          if (currentToProjected < currentToProposed - 0.01) {
+              return currentLocalDir;
+          }
+      }
+      return worldToLocal(parentFrame, worldDir);
   };
 
-  const updatePlanarConstraint = (boneId: string, id: string, updates: Partial<PlanarConstraint>) => {
-    setHybridConstraints(prev => {
-        const list = prev[boneId] || [];
-        return {
-            ...prev,
-            [boneId]: list.map(c => c.id === id ? { ...c, ...updates } : c)
-        };
-    });
+  const addConstraint = (boneId: string) => {
+      const kin = calculateKinematics(posture, twists);
+      const tip = kin.boneEndPoints[boneId];
+      if (!tip) return;
+      const newC: PlanarConstraint = {
+          id: Date.now().toString() + Math.random().toString(36).slice(2, 6),
+          active: true,
+          normal: { x: 0, y: 0, z: 1 }, // default: frontal plane
+          center: tip
+      };
+      setConstraints(prev => ({ ...prev, [boneId]: [...(prev[boneId] || []), newC] }));
   };
 
-  const removePlanarConstraint = (boneId: string, id: string) => {
-    setHybridConstraints(prev => {
-        const list = prev[boneId] || [];
-        return {
-            ...prev,
-            [boneId]: list.filter(c => c.id !== id)
-        };
-    });
+  const updateConstraint = (boneId: string, id: string, updates: Partial<PlanarConstraint>) => {
+      setConstraints(prev => ({
+          ...prev,
+          [boneId]: (prev[boneId] || []).map(c => c.id === id ? { ...c, ...updates } : c)
+      }));
   };
+
+  const removeConstraint = (boneId: string, id: string) => {
+      setConstraints(prev => ({
+          ...prev,
+          [boneId]: (prev[boneId] || []).filter(c => c.id !== id)
+      }));
+  };
+
+  const visualConstraintPlanes = useMemo<VisualPlane[]>(() => {
+      const out: VisualPlane[] = [];
+      const kin = calculateKinematics(posture, twists);
+      (Object.entries(constraints) as [string, PlanarConstraint[]][]).forEach(([boneId, list]) => {
+          list.forEach(c => {
+              if (!c.active) return;
+              // Center follows the current distal tip so the visible square
+              // always sits where the bone ends — not where it was when the
+              // constraint was first added.
+              const tip = kin.boneEndPoints[boneId] || c.center;
+              out.push({
+                  id: c.id,
+                  center: tip,
+                  normal: c.normal,
+                  size: 80,
+                  color: 'rgba(139, 92, 246, 0.2)',
+                  boneId
+              });
+          });
+      });
+      return out;
+  }, [constraints, posture, twists]);
 
   const getVisualVector = (f: ForceConfig): Vector3 => {
       return { x: f.x * f.magnitude, y: f.y * f.magnitude, z: f.z * f.magnitude };
@@ -557,20 +604,35 @@ const BioModelPage: React.FC = () => {
       if (!selectedBone) return [];
       const list: Measurement[] = [];
       const vec = posture[selectedBone];
-      if (vec) {
-        if (selectedBone.includes('Femur')) {
-            const angle = Math.round(Math.acos(vec.y) * 180 / Math.PI);
-            list.push({ label: 'Hip Angle', value: `${angle}°`, subtext: 'Relative' });
-            
-            const absRot = getAbsoluteRotation(selectedBone, posture, twists);
-            list.push({ label: 'Rotation', value: `${absRot}°`, subtext: 'Int/Ext' });
-        } else if (selectedBone.includes('Humerus')) {
-             const angle = Math.round(Math.acos(vec.y) * 180 / Math.PI);
-             list.push({ label: 'Shoulder Angle', value: `${angle}°`, subtext: 'Relative' });
-             
-             const absRot = getAbsoluteRotation(selectedBone, posture, twists);
-             list.push({ label: 'Rotation', value: `${absRot}°`, subtext: 'Int/Ext' });
-        }
+      if (!vec) return list;
+
+      const fmt = (n: number) => (Math.abs(n) < 0.0005 ? '0.000' : n.toFixed(3));
+      const clampedY = Math.max(-1, Math.min(1, vec.y));
+
+      if (/Forearm|Tibia/.test(selectedBone)) {
+          // Pure hinge: single flexion angle.
+          const angle = Math.round(Math.acos(clampedY) * 180 / Math.PI) || 0;
+          const label = selectedBone.includes('Forearm') ? 'Elbow Flexion' : 'Knee Flexion';
+          list.push({ label, value: `${angle}°`, subtext: '0° = straight' });
+      } else if (/Foot/.test(selectedBone)) {
+          // Ankle: single dorsi/plantar angle.
+          const angle = Math.round(Math.asin(clampedY) * 180 / Math.PI) || 0;
+          list.push({ label: 'Ankle Angle', value: `${angle}°`, subtext: 'Dorsi (+) / Plantar (-)' });
+      } else if (selectedBone.includes('Clavicle')) {
+          // Scapula: two single-value actions.
+          list.push({ label: 'Elevation', value: `${Math.round(-vec.y)}`, subtext: 'Elevate (+) / Depress (-)' });
+          list.push({ label: 'Protraction', value: `${Math.round(-vec.z)}`, subtext: 'Protract (+) / Retract (-)' });
+      } else {
+          // Ball-and-socket (hip/shoulder): raw unit direction vector.
+          list.push({ label: 'Dir X', value: fmt(vec.x), subtext: 'Right (+) / Left (-)' });
+          list.push({ label: 'Dir Y', value: fmt(vec.y), subtext: 'Down (+) / Up (-)' });
+          list.push({ label: 'Dir Z', value: fmt(vec.z), subtext: 'Back (+) / Forward (-)' });
+
+          const hasTwist = /Humerus|Femur/.test(selectedBone);
+          if (hasTwist) {
+              const absRot = getAbsoluteRotation(selectedBone, posture, twists);
+              list.push({ label: 'Rotation', value: `${absRot}°`, subtext: 'Int/Ext (separate axis)' });
+          }
       }
       return list;
   }, [selectedBone, posture, twists]);
@@ -590,377 +652,6 @@ const BioModelPage: React.FC = () => {
     rTibia: 'rFemur',
     lFoot: 'lTibia',
     rFoot: 'rTibia'
-  };
-
-  const solveConstraints = (tempPosture: Posture, currentTwists: Record<string, number>, lockedBoneIds?: string[]): { posture: Posture, twists: Record<string, number> } => {
-      let correctedPosture = { ...tempPosture };
-      let correctedTwists = { ...currentTwists };
-
-      // Iterative solver. Caps at 50 passes for hard coupled cases (e.g. humerus's
-      // own plane + forearm's planes via the isChild branch), but exits early once
-      // a pass produces no meaningful change. Easy poses settle in 1–3 passes,
-      // keeping the cost low for smooth real-time dragging.
-      const CONVERGENCE_EPS = 1e-4;
-      for (let i = 0; i < 50; i++) {
-          let maxDelta = 0;
-          BONE_ORDER.forEach(boneId => {
-              if (lockedBoneIds?.includes(boneId)) return; // Skip the bones being actively moved
-
-              const activeConstraints: (PlanarConstraint & { isChild?: boolean; childId?: string })[] = [];
-              const directConstraints = hybridConstraints[boneId] || [];
-              directConstraints.forEach(c => { if (c.active) activeConstraints.push(c); });
-
-              if (symmetryMode) {
-                  const oppositeBone = getOppositeBone(boneId);
-                  if (oppositeBone) {
-                      const oppositeConstraints = hybridConstraints[oppositeBone] || [];
-                      oppositeConstraints.forEach(c => {
-                          if (c.active) {
-                              activeConstraints.push({
-                                  ...c,
-                                  id: c.id + '_mirrored',
-                                  normal: { x: -c.normal.x, y: c.normal.y, z: c.normal.z },
-                                  center: { x: -c.center.x, y: c.center.y, z: c.center.z }
-                              });
-                          }
-                      });
-                  }
-              }
-
-              const childBoneId = BONE_ORDER.find(b => BONE_PARENTS[b] === boneId);
-              if (childBoneId && lockedBoneIds?.includes(childBoneId)) {
-                  const directChildConstraints = hybridConstraints[childBoneId] || [];
-                  directChildConstraints.forEach(c => {
-                      if (c.active) activeConstraints.push({ ...c, isChild: true, childId: childBoneId });
-                  });
-
-                  if (symmetryMode) {
-                      const oppositeChild = getOppositeBone(childBoneId);
-                      if (oppositeChild) {
-                          const oppositeChildConstraints = hybridConstraints[oppositeChild] || [];
-                          oppositeChildConstraints.forEach(c => {
-                              if (c.active) {
-                                  activeConstraints.push({
-                                      ...c,
-                                      id: c.id + '_mirrored',
-                                      isChild: true,
-                                      childId: childBoneId,
-                                      normal: { x: -c.normal.x, y: c.normal.y, z: c.normal.z },
-                                      center: { x: -c.center.x, y: c.center.y, z: c.center.z }
-                                  });
-                              }
-                          });
-                      }
-                  }
-              }
-              
-              if (activeConstraints.length === 0) return;
-
-              const kinematics = calculateKinematics(correctedPosture, correctedTwists);
-              const startPos = kinematics.boneStartPoints[boneId];
-              const parentFrame = kinematics.jointFrames[boneId];
-              
-              if (!startPos || !parentFrame) return;
-
-              let proposedLocal = correctedPosture[boneId];
-              let proposedTwist = correctedTwists[boneId] || 0;
-
-              activeConstraints.forEach(config => {
-                  const N = normalize(config.normal);
-                  const P_lock = config.center;
-
-                  let currentTip: Vector3;
-                  let len: number;
-
-                  if (config.isChild && config.childId) {
-                      // Recompute the child's world position from the current proposedLocal rather than
-                      // using stale kinematics. This ensures push and pull directions are treated
-                      // identically, fixing the one-direction asymmetry in bench-press-style constraints.
-                      const currentWorldParentDir = normalize(localToWorld(parentFrame, proposedLocal));
-                      const currentChildStart = add(startPos, mul(currentWorldParentDir, BONE_LENGTHS[boneId] || 0));
-
-                      // Reconstruct the child frame exactly as calculateChain does
-                      let currentChildFrame: Frame;
-                      if (boneId.includes('Humerus')) {
-                          const u = currentWorldParentDir;
-                          const right = applyShortestArcRotation({ x: 0, y: 1, z: 0 }, u, { x: 1, y: 0, z: 0 });
-                          const back = applyShortestArcRotation({ x: 0, y: 1, z: 0 }, u, { x: 0, y: 0, z: 1 });
-                          currentChildFrame = twistFrame({ x: mul(right, -1), y: u, z: mul(back, -1) }, proposedTwist);
-                      } else if (boneId.includes('Femur')) {
-                          currentChildFrame = twistFrame(createRootFrame(currentWorldParentDir), proposedTwist);
-                      } else {
-                          currentChildFrame = twistFrame(transportFrame(parentFrame, currentWorldParentDir), proposedTwist);
-                      }
-
-                      const childLocalDir = correctedPosture[config.childId];
-                      const childWorldDir = normalize(localToWorld(currentChildFrame, childLocalDir));
-                      currentTip = add(currentChildStart, mul(childWorldDir, BONE_LENGTHS[config.childId] || 0));
-                      len = magnitude(sub(currentTip, startPos));
-                  } else {
-                      len = BONE_LENGTHS[boneId] || 0;
-                      const worldDir = localToWorld(parentFrame, proposedLocal);
-                      currentTip = add(startPos, mul(worldDir, len));
-                  }
-
-                  const vToTip = sub(currentTip, P_lock);
-                  const dist = dotProduct(vToTip, N);
-
-                  // Bilateral enforcement: solve if we are off the plane in either direction
-                  if (Math.abs(dist) < 0.01) return; 
-
-                  const vToStart = sub(startPos, P_lock);
-                  const distStart = dotProduct(vToStart, N);
-                  const circleCenter = sub(startPos, mul(N, distStart));
-
-                  const radSq = (len * len) - (distStart * distStart);
-                  let finalTip: Vector3;
-
-                  if (radSq < 0) {
-                      const dirToPlane = mul(N, -Math.sign(distStart));
-                      finalTip = add(startPos, mul(dirToPlane, len));
-                  } else {
-                      const radius = Math.sqrt(radSq);
-                      const vToProposed = sub(currentTip, P_lock);
-                      const distProposed = dotProduct(vToProposed, N);
-                      const proposedOnPlane = sub(currentTip, mul(N, distProposed));
-                      const vCenterToProposed = sub(proposedOnPlane, circleCenter);
-                      const mag = magnitude(vCenterToProposed);
-                      
-                      if (mag < 0.001) {
-                          let arbitrary = crossProduct(N, {x:1, y:0, z:0});
-                          if (magnitude(arbitrary) < 0.01) arbitrary = crossProduct(N, {x:0, y:1, z:0});
-                          finalTip = add(circleCenter, mul(normalize(arbitrary), radius));
-                      } else {
-                          finalTip = add(circleCenter, mul(vCenterToProposed, radius / mag));
-                      }
-                  }
-
-                  // 1. Adjust Posture (Direction)
-                  const finalWorldDir = normalize(sub(finalTip, startPos));
-                  const currentWorldDir = normalize(sub(currentTip, startPos));
-                  
-                  const worldDir = localToWorld(parentFrame, proposedLocal);
-                  const rotatedWorldDir = applyShortestArcRotation(currentWorldDir, finalWorldDir, worldDir);
-                  let nextLocal = worldToLocal(parentFrame, rotatedWorldDir);
-
-                  // Enforce Joint Limits during solving (Two-pass clamping to fix normalization overshoot)
-                  const bounds = BONE_CONSTRAINTS[boneId];
-                  if (bounds) {
-                      // Pass 1: Initial clamp to bounds
-                      if (bounds.x) nextLocal.x = Math.max(bounds.x[0], Math.min(bounds.x[1], nextLocal.x));
-                      if (bounds.y) nextLocal.y = Math.max(bounds.y[0], Math.min(bounds.y[1], nextLocal.y));
-                      if (bounds.z) nextLocal.z = Math.max(bounds.z[0], Math.min(bounds.z[1], nextLocal.z));
-                      
-                      // Normalize to unit vector
-                      nextLocal = normalize(nextLocal);
-                      
-                      // Pass 2: Final clamp to ensure strict adherence (fixes normalization overshoot)
-                      if (bounds.x) nextLocal.x = Math.max(bounds.x[0], Math.min(bounds.x[1], nextLocal.x));
-                      if (bounds.y) nextLocal.y = Math.max(bounds.y[0], Math.min(bounds.y[1], nextLocal.y));
-                      if (bounds.z) nextLocal.z = Math.max(bounds.z[0], Math.min(bounds.z[1], nextLocal.z));
-                  }
-                  proposedLocal = nextLocal;
-
-                  // 2. Adjust Twist (Internal/External Rotation)
-                  if (config.isChild && config.childId) {
-                      const axis = normalize(localToWorld(parentFrame, proposedLocal));
-                      const vTip = sub(currentTip, startPos);
-                      const vTarget = sub(finalTip, startPos);
-                      
-                      const vTipProj = sub(vTip, mul(axis, dotProduct(vTip, axis)));
-                      const vTargetProj = sub(vTarget, mul(axis, dotProduct(vTarget, axis)));
-                      
-                      if (magnitude(vTipProj) > 0.1 && magnitude(vTargetProj) > 0.1) {
-                          const nTip = normalize(vTipProj);
-                          const nTarget = normalize(vTargetProj);
-                          
-                          let angle = Math.acos(Math.max(-1, Math.min(1, dotProduct(nTip, nTarget))));
-                          const cross = crossProduct(nTip, nTarget);
-                          if (dotProduct(cross, axis) < 0) angle = -angle;
-                          
-                          const twistDelta = (angle * 180) / Math.PI;
-                          proposedTwist += twistDelta * 0.4; // Slightly lower damping for better reach
-                          
-                          if (ROTATION_LIMITS[boneId]) {
-                              proposedTwist = clamp(proposedTwist, ROTATION_LIMITS[boneId].min, ROTATION_LIMITS[boneId].max);
-                          }
-                      }
-                  }
-
-              });
-
-              const prevLocal = correctedPosture[boneId];
-              const prevTwist = correctedTwists[boneId] || 0;
-              if (prevLocal) {
-                  const dx = Math.abs(prevLocal.x - proposedLocal.x);
-                  const dy = Math.abs(prevLocal.y - proposedLocal.y);
-                  const dz = Math.abs(prevLocal.z - proposedLocal.z);
-                  const dt = Math.abs(prevTwist - proposedTwist) * 0.01;
-                  const d = Math.max(dx, dy, dz, dt);
-                  if (d > maxDelta) maxDelta = d;
-              }
-              correctedPosture[boneId] = proposedLocal;
-              correctedTwists[boneId] = proposedTwist;
-          });
-          if (maxDelta < CONVERGENCE_EPS) break;
-      }
-
-      return { posture: correctedPosture, twists: correctedTwists };
-  };
-
-  // Improved Planar and Joint Violation Check
-  const checkConstraintViolation = (
-        proposedTwists: Record<string, number>,
-        proposedPosture: Posture,
-        referenceTwists: Record<string, number>,
-        referencePosture: Posture,
-        lockedBoneIds?: string[]
-    ) => {
-        const kProp = calculateKinematics(proposedPosture, proposedTwists);
-        const kRef = calculateKinematics(referencePosture, referenceTwists);
-        
-        // 1. Planar Constraints
-        for (const boneId of BONE_ORDER) {
-            // Note: do NOT skip locked bones here. Even when a bone is being directly
-            // controlled, its tip is still subject to its planar constraints — the
-            // iterative solver is expected to rotate the *parent* (via the isChild
-            // branch) to bring the locked tip back onto the planes. Skipping this
-            // check would let the user move the locked bone freely through walls.
-            const direct = hybridConstraints[boneId] || [];
-            const active = direct.filter(c => c.active);
-            
-            if (symmetryMode) {
-                const opposite = getOppositeBone(boneId);
-                if (opposite) {
-                    const oppConstraints = hybridConstraints[opposite] || [];
-                    oppConstraints.forEach(c => {
-                        if (c.active) {
-                            active.push({
-                                ...c,
-                                id: c.id + '_mirrored',
-                                normal: { x: -c.normal.x, y: c.normal.y, z: c.normal.z },
-                                center: { x: -c.center.x, y: c.center.y, z: c.center.z }
-                            });
-                        }
-                    });
-                }
-            }
-
-            if (!active.length) continue;
-            
-            const tipProp = kProp.boneEndPoints[boneId];
-            const tipRef = kRef.boneEndPoints[boneId];
-            if (!tipProp || !tipRef) continue;
-            
-            for (const c of active) {
-                const N = normalize(c.normal);
-                const vProp = sub(tipProp, c.center);
-                const distProp = dotProduct(vProp, N);
-                
-                const vRef = sub(tipRef, c.center);
-                const distRef = dotProduct(vRef, N);
-                
-                // Bilateral Violation: Block if we are moving further away from the plane.
-                // Threshold 0.1 gives the solver enough room to converge without false rejections.
-                if (Math.abs(distProp) > 0.1 && Math.abs(distProp) > Math.abs(distRef) + 0.001) {
-                    return true;
-                }
-            }
-        }
-
-        // 2. Joint Limits
-        for (const boneId of BONE_ORDER) {
-            const vecProp = proposedPosture[boneId];
-            const vecRef = referencePosture[boneId];
-            const bounds = BONE_CONSTRAINTS[boneId];
-            if (bounds && vecProp && vecRef) {
-                if (bounds.x) {
-                    if (vecProp.x < bounds.x[0] && vecProp.x < vecRef.x - 0.01) return true;
-                    if (vecProp.x > bounds.x[1] && vecProp.x > vecRef.x + 0.01) return true;
-                }
-                if (bounds.y) {
-                    if (vecProp.y < bounds.y[0] && vecProp.y < vecRef.y - 0.01) return true;
-                    if (vecProp.y > bounds.y[1] && vecProp.y > vecRef.y + 0.01) return true;
-                }
-                if (bounds.z) {
-                    if (vecProp.z < bounds.z[0] && vecProp.z < vecRef.z - 0.01) return true;
-                    if (vecProp.z > bounds.z[1] && vecProp.z > vecRef.z + 0.01) return true;
-                }
-            }
-            
-            const twistProp = proposedTwists[boneId];
-            const twistRef = referenceTwists[boneId];
-            const rotBounds = ROTATION_LIMITS[boneId];
-            if (rotBounds && twistProp !== undefined && twistRef !== undefined) {
-                if (twistProp < rotBounds.min && twistProp < twistRef - 0.1) return true;
-                if (twistProp > rotBounds.max && twistProp > twistRef + 0.1) return true;
-            }
-        }
-
-        return false;
-    };
-
-  const validateConfiguration = (p: Posture, t: Record<string, number>): boolean => {
-      const k = calculateKinematics(p, t);
-      
-      // 1. Check Planar Constraints (with slight tolerance)
-      for (const boneId of BONE_ORDER) {
-          const direct = hybridConstraints[boneId] || [];
-          const active = direct.filter(c => c.active);
-          
-          if (symmetryMode) {
-              const opposite = getOppositeBone(boneId);
-              if (opposite) {
-                  const oppConstraints = hybridConstraints[opposite] || [];
-                  oppConstraints.forEach(c => {
-                      if (c.active) {
-                          active.push({
-                              ...c,
-                              id: c.id + '_mirrored',
-                              normal: { x: -c.normal.x, y: c.normal.y, z: c.normal.z },
-                              center: { x: -c.center.x, y: c.center.y, z: c.center.z }
-                          });
-                      }
-                  });
-              }
-          }
-
-          if (!active.length) continue;
-          const tip = k.boneEndPoints[boneId];
-          if (!tip) continue;
-          
-          for (const config of active) {
-              const N = normalize(config.normal);
-              const v = sub(tip, config.center);
-              const dist = Math.abs(dotProduct(v, N));
-              
-              // Use a slightly more generous threshold for validation than solving
-              if (dist > 2.0) return false;
-          }
-      }
-
-      // 2. Check Joint Limits
-      for (const boneId of BONE_ORDER) {
-          const vec = p[boneId];
-          const bounds = BONE_CONSTRAINTS[boneId];
-          if (bounds && vec) {
-              if (bounds.x && (vec.x < bounds.x[0] - 0.05 || vec.x > bounds.x[1] + 0.05)) return false;
-              if (bounds.y && (vec.y < bounds.y[0] - 0.05 || vec.y > bounds.y[1] + 0.05)) return false;
-              if (bounds.z && (vec.z < bounds.z[0] - 0.05 || vec.z > bounds.z[1] + 0.05)) return false;
-          }
-          
-          const twist = t[boneId];
-          const rotBounds = ROTATION_LIMITS[boneId];
-          if (rotBounds && twist !== undefined) {
-              if (twist < rotBounds.min - 1 || twist > rotBounds.max + 1) return false;
-          }
-      }
-
-      return true;
-  };
-
-  const validatePosture = (p: Posture, t?: Record<string, number>): boolean => {
-      return validateConfiguration(p, t || twists);
   };
 
   const updatePostureState = (p: Posture, t: Record<string, number>) => {
@@ -984,81 +675,23 @@ const BioModelPage: React.FC = () => {
     return calculateKinematics(posture, twists);
   }, [posture, twists]);
 
-  const applyConstraints = (_boneId: string, proposedVec: Vector3): Vector3 => proposedVec;
-
-  const findSafeInteractionValue = (
-      startVal: number,
-      targetVal: number,
-      checkFn: (val: number) => boolean
-  ): number => {
-      // Phase 1: Linear scan from start toward target.
-      // This prevents "jumping": a binary search with an upfront optimistic check
-      // can skip over invalid regions and land in a valid island beyond them, causing
-      // the model to snap past disallowed positions. The linear scan stops at the
-      // first invalid step, guaranteeing the returned value is continuously reachable.
-      const SCAN_STEPS = 20;
-      let lastValid = startVal;
-      let firstInvalidVal: number | null = null;
-
-      for (let i = 1; i <= SCAN_STEPS; i++) {
-          const t = i / SCAN_STEPS;
-          const val = startVal + (targetVal - startVal) * t;
-          if (checkFn(val)) {
-              lastValid = val;
-          } else {
-              firstInvalidVal = val;
-              break;
-          }
-      }
-
-      // If the whole range is valid, return target directly.
-      if (firstInvalidVal === null) return targetVal;
-
-      // Phase 2: Binary search between lastValid and firstInvalidVal for precision.
-      let low = lastValid;
-      let high = firstInvalidVal;
-      for (let i = 0; i < 8; i++) {
-          const mid = low + (high - low) / 2;
-          if (checkFn(mid)) {
-              low = mid;
-          } else {
-              high = mid;
-          }
-      }
-      return low;
-  };
-
-  const resolveFullPosture = (p: Posture, t: Record<string, number>, locked: string[], source: string): { posture: Posture, twists: Record<string, number> } | null => {
+  const resolveFullPosture = (p: Posture, t: Record<string, number>, source: string): { posture: Posture, twists: Record<string, number> } => {
       let nextP = p;
       let nextT = t;
       if (symmetryMode) {
           nextP = mirrorPosture(nextP, source);
           nextT = mirrorTwists(nextT, source);
       }
-      const lockedIds = symmetryMode ? [...locked, ...locked.map(getOppositeBone).filter(Boolean) as string[]] : locked;
-      const solvedResult = solveConstraints(nextP, nextT, lockedIds);
-      let finalP = solvedResult.posture;
-      let finalT = solvedResult.twists;
-      if (symmetryMode) {
-          finalP = mirrorPosture(finalP, source);
-          finalT = mirrorTwists(finalT, source);
-      }
-      
-      // Use the smarter violation check instead of a strict static validation.
-      // Pass lockedIds so actively-controlled bones are skipped — their endpoints
-      // moved intentionally and shouldn't be treated as violations.
-      if (!checkConstraintViolation(finalT, finalP, twists, posture, lockedIds)) {
-          return { posture: finalP, twists: finalT };
-      }
-      return null;
+      return { posture: nextP, twists: nextT };
   };
 
-  const resolveKinematics = (boneId: string, proposedVector: Vector3, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } | null => {
-      return resolveFullPosture({ ...currentPosture, [boneId]: proposedVector }, currentTwists, [boneId], boneId);
+  const resolveKinematics = (boneId: string, proposedVector: Vector3, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } => {
+      const projected = projectDirOntoConstraints(boneId, proposedVector, currentPosture, currentTwists);
+      return resolveFullPosture({ ...currentPosture, [boneId]: projected }, currentTwists, boneId);
   };
 
-  const resolveRotation = (boneId: string, proposedTwist: number, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } | null => {
-      return resolveFullPosture(currentPosture, { ...currentTwists, [boneId]: proposedTwist }, [boneId], boneId);
+  const resolveRotation = (boneId: string, proposedTwist: number, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } => {
+      return resolveFullPosture(currentPosture, { ...currentTwists, [boneId]: proposedTwist }, boneId);
   };
 
   const handleScapulaChange = (axis: 'elevation' | 'protraction', val: number) => {
@@ -1068,9 +701,7 @@ const BioModelPage: React.FC = () => {
       let newVec = { ...current };
       if (axis === 'elevation') newVec.y = -val;
       else if (axis === 'protraction') newVec.z = -val;
-      newVec = applyConstraints(selectedBone, newVec);
       const resolved = resolveKinematics(selectedBone, newVec, posture, twists);
-      if (!resolved) return;
       updatePostureState(resolved.posture, resolved.twists);
   };
 
@@ -1082,39 +713,14 @@ const BioModelPage: React.FC = () => {
       if (!currentVec) return;
 
       const currentAngle = getCurrentHingeAngle(selectedBone);
+      const deltaRad = (val - currentAngle) * Math.PI / 180;
+      const { x, y, z } = currentVec;
+      const cosD = Math.cos(deltaRad);
+      const sinD = Math.sin(deltaRad);
+      const finalVec = normalize({ x, y: y * cosD - z * sinD, z: y * sinD + z * cosD });
 
-      // Compute the forearm/tibia direction for a given target angle, rotating
-      // incrementally from the current angle so x (varus/valgus) is preserved.
-      const computeVecForAngle = (targetAngle: number): Vector3 => {
-          const deltaRad = (targetAngle - currentAngle) * Math.PI / 180;
-          const { x, y, z } = currentVec;
-          const cosD = Math.cos(deltaRad);
-          const sinD = Math.sin(deltaRad);
-          if (selectedBone.includes('Tibia')) {
-              return normalize({ x, y: y * cosD + z * sinD, z: -y * sinD + z * cosD });
-          } else {
-              return normalize({ x, y: y * cosD - z * sinD, z: y * sinD + z * cosD });
-          }
-      };
-
-      // Use a safe-scan so that if constraints block the full requested angle we
-      // still advance as far as possible rather than silently doing nothing.
-      // This also guarantees updatePostureState is always called so React reconciles
-      // the slider to the true achieved angle (prevents display drift).
-      const safeAngle = findSafeInteractionValue(
-          currentAngle,
-          val,
-          (angle) => {
-              const vec = computeVecForAngle(angle);
-              const constrained = applyConstraints(selectedBone, vec);
-              return resolveKinematics(selectedBone, constrained, posture, twists) !== null;
-          }
-      );
-
-      const finalVec = computeVecForAngle(safeAngle);
-      const constrainedVec = applyConstraints(selectedBone, finalVec);
-      const resolved = resolveKinematics(selectedBone, constrainedVec, posture, twists);
-      if (resolved) updatePostureState(resolved.posture, resolved.twists);
+      const resolved = resolveKinematics(selectedBone, finalVec, posture, twists);
+      updatePostureState(resolved.posture, resolved.twists);
   };
 
   const handlePointChange = (axis: keyof Vector3, newValue: number) => {
@@ -1123,10 +729,9 @@ const BioModelPage: React.FC = () => {
 
     if (selectedBone.includes('Clavicle')) {
         const newVec = { ...posture[selectedBone], [axis]: newValue };
-        const constrained = applyConstraints(selectedBone, newVec);
-        setTargetPos(constrained);
-        const resolved = resolveKinematics(selectedBone, constrained, posture, twists);
-        if (resolved) updatePostureState(resolved.posture, resolved.twists);
+        setTargetPos(newVec);
+        const resolved = resolveKinematics(selectedBone, newVec, posture, twists);
+        updatePostureState(resolved.posture, resolved.twists);
         return;
     }
 
@@ -1146,49 +751,16 @@ const BioModelPage: React.FC = () => {
             const transported = transportFrame(rootFrame, solution.vec1);
             const childVecLocal = worldToLocal(transported, solution.vec2);
             const nextPosture = { ...posture, [rootBone]: solution.vec1, [childBone]: childVecLocal };
-            const resolved = resolveFullPosture(nextPosture, twists, [rootBone, childBone], rootBone);
-            if (resolved) updatePostureState(resolved.posture, resolved.twists);
+            const resolved = resolveFullPosture(nextPosture, twists, rootBone);
+            updatePostureState(resolved.posture, resolved.twists);
         }
         return;
     }
 
-    // Default: Single bone rotation or non-IK
-    const bounds = BONE_CONSTRAINTS[selectedBone] || {};
-    const startVal = (targetPos as any)[axis] as number;
-
-    // Helper that computes the final clamped/normalized direction for a given axis value
-    const computeForVal = (v: number) => {
-        const tgt = { ...targetPos, [axis]: v };
-        const ct = applyConstraints(selectedBone, tgt);
-        let dir = normalize(ct);
-        if (bounds.x) dir.x = Math.max(bounds.x[0], Math.min(bounds.x[1], dir.x));
-        if (bounds.y) dir.y = Math.max(bounds.y[0], Math.min(bounds.y[1], dir.y));
-        if (bounds.z) dir.z = Math.max(bounds.z[0], Math.min(bounds.z[1], dir.z));
-        let fv = normalize(dir);
-        if (bounds.x) fv.x = Math.max(bounds.x[0], Math.min(bounds.x[1], fv.x));
-        if (bounds.y) fv.y = Math.max(bounds.y[0], Math.min(bounds.y[1], fv.y));
-        if (bounds.z) fv.z = Math.max(bounds.z[0], Math.min(bounds.z[1], fv.z));
-        return { tgt: ct, fv };
-    };
-
-    // Sub-step from current axis value toward requested. The iterative constraint solver
-    // converges much better on small jumps than on large ones, so scanning from the
-    // current value lets us advance as far as constraints allow rather than rejecting
-    // the entire move when a single big step happens to land in a bad basin.
-    const safeVal = findSafeInteractionValue(
-        startVal,
-        internalVal,
-        (v) => resolveKinematics(selectedBone, computeForVal(v).fv, posture, twists) !== null
-    );
-
-    const { tgt: finalTarget, fv: finalVector } = computeForVal(safeVal);
-    setTargetPos(finalTarget);
+    const newTarget = { ...targetPos, [axis]: internalVal };
+    const finalVector = normalize(newTarget);
+    setTargetPos(newTarget);
     const resolved = resolveKinematics(selectedBone, finalVector, posture, twists);
-    if (!resolved) {
-        // Force re-render so the slider snaps back to the actual stored axis value.
-        updatePostureState({ ...posture }, { ...twists });
-        return;
-    }
     updatePostureState(resolved.posture, resolved.twists);
   };
 
@@ -1198,28 +770,9 @@ const BioModelPage: React.FC = () => {
 
     const limits = ROTATION_LIMITS[selectedBone];
     const clampedVal = limits ? clamp(val, limits.min, limits.max) : val;
-    const currentTwist = twists[selectedBone] ?? 0;
 
-    // Scan from the current twist toward the requested value and stop at the
-    // furthest allowed position.  This means:
-    //   • The slider always advances as far as constraints permit (never silent no-op).
-    //   • updatePostureState is always called, so React reconciles the range input
-    //     back to the true achieved value — fixing the display drift where the browser
-    //     keeps the dragged position while the state holds a different value.
-    const safeVal = findSafeInteractionValue(
-        currentTwist,
-        clampedVal,
-        (v) => resolveRotation(selectedBone, v, posture, twists) !== null
-    );
-
-    const resolved = resolveRotation(selectedBone, safeVal, posture, twists);
-    if (resolved) {
-        updatePostureState(resolved.posture, resolved.twists);
-    } else {
-        // Even if blocked entirely, force a re-render so the slider snaps back
-        // to the actual stored twist value instead of staying at the dragged position.
-        updatePostureState({ ...posture }, { ...twists });
-    }
+    const resolved = resolveRotation(selectedBone, clampedVal, posture, twists);
+    updatePostureState(resolved.posture, resolved.twists);
   };
 
   const isScapula = selectedBone ? selectedBone.includes('Clavicle') : false;
@@ -1275,7 +828,7 @@ const BioModelPage: React.FC = () => {
     setForces([]);
     setSymmetryMode(false);
     setIsPlaying(false);
-    setHybridConstraints({});
+    setConstraints({});
   };
 
   const handleBoneSelect = (boneId: string) => {
@@ -1440,7 +993,7 @@ const BioModelPage: React.FC = () => {
              }
         }
     }
-  }, [selectedBone, poseMode, startPosture, endPosture, targetReferenceBone, skeletalData, hybridConstraints]);
+  }, [selectedBone, poseMode, startPosture, endPosture, targetReferenceBone, skeletalData]);
 
 
   // DEFINED HERE TO FIX REFERENCE ERROR
@@ -1520,8 +1073,8 @@ const BioModelPage: React.FC = () => {
                 color: '#ef4444'
             }))}
             reactionForces={reactionForces}
-            planes={lockedPlanes}
-            selectedBone={selectedBone} 
+            planes={visualConstraintPlanes}
+            selectedBone={selectedBone}
             onSelectBone={handleBoneSelect} 
             targetPos={targetPos} 
             targetReferenceBone={targetReferenceBone} 
@@ -1537,7 +1090,7 @@ const BioModelPage: React.FC = () => {
         <div className="w-96 bg-white p-6 rounded-[2rem] border border-gray-200 shadow-sm overflow-y-auto shrink-0 flex flex-col">
           <div className="flex bg-gray-100 p-1 rounded-xl mb-6 flex-wrap gap-1">
             <button onClick={() => setActiveTab('kinematics')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'kinematics' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Motion"><ArrowDownUp className="w-5 h-5" /></button>
-            <button onClick={() => setActiveTab('dof')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'dof' ? 'bg-white text-violet-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Degrees of Freedom"><Axis3d className="w-5 h-5" /></button>
+            <button onClick={() => setActiveTab('constraints')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'constraints' ? 'bg-white text-violet-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Constraints"><Axis3d className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('kinetics')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'kinetics' ? 'bg-white text-orange-500 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="External Forces"><Zap className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('torque')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'torque' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Analysis"><Scale className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('capacities')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'capacities' ? 'bg-white text-purple-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Strength Capacity"><Gauge className="w-5 h-5" /></button>
@@ -1545,13 +1098,13 @@ const BioModelPage: React.FC = () => {
 
           <div className="flex items-center gap-3 mb-6 shrink-0">
             {activeTab === 'kinematics' && <Settings2 className="w-5 h-5 text-indigo-600" />}
-            {activeTab === 'dof' && <Axis3d className="w-5 h-5 text-violet-600" />}
+            {activeTab === 'constraints' && <Axis3d className="w-5 h-5 text-violet-600" />}
             {activeTab === 'kinetics' && <Zap className="w-5 h-5 text-orange-500" />}
             {activeTab === 'torque' && <Scale className="w-5 h-5 text-gray-800" />}
             {activeTab === 'capacities' && <Gauge className="w-5 h-5 text-purple-600" />}
             <h3 className="text-lg font-bold text-gray-900">
-                {activeTab === 'kinematics' ? 'Motion Editor' : 
-                 activeTab === 'dof' ? 'Degrees of Freedom' :
+                {activeTab === 'kinematics' ? 'Motion Editor' :
+                 activeTab === 'constraints' ? 'Constraints' :
                  activeTab === 'kinetics' ? 'External Forces' :
                  activeTab === 'capacities' ? 'Joint Capacities' : 'Joint Analysis'}
             </h3>
@@ -1638,7 +1191,7 @@ const BioModelPage: React.FC = () => {
                         </>
                         )}
                         <div className="mt-4 pt-6 border-t border-gray-100 space-y-4">
-                            <div className="flex items-center gap-2"><Globe2 className="w-4 h-4 text-indigo-500" /><h4 className="font-bold text-gray-900 text-xs uppercase tracking-wider">Clinical Angles</h4></div>
+                            <div className="flex items-center gap-2"><Axis3d className="w-4 h-4 text-indigo-500" /><h4 className="font-bold text-gray-900 text-xs uppercase tracking-wider">Joint State</h4></div>
                             <div className="space-y-2">
                                 {measurements.map((m, idx) => (
                                     <div key={idx} className={`flex items-center justify-between p-3 rounded-xl border ${m.isDim ? 'bg-gray-50 border-gray-100 opacity-60' : 'bg-white border-gray-100'}`}><div className="flex items-center gap-2">{m.isDim && <AlertCircle className="w-3 h-3 text-gray-400" />}<span className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">{m.label}</span></div><div className="text-right"><span className="block text-lg font-black text-gray-900 leading-none">{m.value}</span><span className={`text-[10px] font-bold uppercase tracking-wider ${m.highlight ? 'text-indigo-600' : 'text-gray-400'}`}>{m.subtext}</span></div></div>
@@ -1650,71 +1203,73 @@ const BioModelPage: React.FC = () => {
              </div>
           )}
 
-          {activeTab === 'dof' && (
+          {activeTab === 'constraints' && (
               <div className="flex-1 flex flex-col h-full animate-in fade-in slide-in-from-right-4 duration-300">
                   <div className="bg-violet-50 p-4 rounded-xl border border-violet-100 mb-6">
                       <p className="text-xs text-violet-900 font-medium leading-relaxed">
-                          Define custom planar constraints to restrict joint movement to specific axes.
+                          Each constraint blocks motion in a chosen direction. The limb's distal end is locked to the plane perpendicular to that direction.
                       </p>
                   </div>
-                  {!selectedBone ? (
+                  {!selectedBone || selectedBone === 'spine' ? (
                       <div className="flex-1 flex flex-col items-center justify-center text-center opacity-50 border-2 border-dashed border-gray-100 rounded-3xl min-h-[150px]">
                           <MousePointerClick className="w-10 h-10 text-gray-300 mb-3" />
-                          <p className="text-gray-500 font-bold text-sm">Select a joint to<br/>configure degrees of freedom.</p>
+                          <p className="text-gray-500 font-bold text-sm">Select a limb to<br/>configure constraints.</p>
                       </div>
                   ) : (
                       <div className="flex-1 space-y-4 overflow-y-auto pr-2">
-                          <button onClick={() => addHybridConstraint(selectedBone)} className="w-full py-3 bg-violet-600 text-white font-bold rounded-xl shadow-lg shadow-violet-200 hover:bg-violet-700 transition-all flex items-center justify-center gap-2 mb-2">
-                              <Plus className="w-4 h-4" /> Add Plane
+                          <div className="flex items-center justify-between">
+                              <span className="font-bold text-gray-900 text-sm">{BONE_NAMES[selectedBone]}</span>
+                              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{(constraints[selectedBone] || []).length} Active</span>
+                          </div>
+                          <button onClick={() => addConstraint(selectedBone)} className="w-full py-3 bg-violet-600 text-white font-bold rounded-xl shadow-lg shadow-violet-200 hover:bg-violet-700 transition-all flex items-center justify-center gap-2">
+                              <Plus className="w-4 h-4" /> Add Constraint
                           </button>
-                          
-                          {hybridConstraints[selectedBone]?.map((config, index) => (
-                              <div key={config.id} className={`bg-white border rounded-2xl p-4 transition-all duration-300 ${config.active ? 'border-violet-200 shadow-sm' : 'border-gray-100 opacity-70'}`}>
+
+                          {(constraints[selectedBone] || []).map((c, idx) => (
+                              <div key={c.id} className={`bg-white border rounded-2xl p-4 transition-all ${c.active ? 'border-violet-200 shadow-sm' : 'border-gray-100 opacity-70'}`}>
                                   <div className="flex items-center justify-between mb-4">
                                       <div className="flex items-center gap-3">
-                                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs ${config.active ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-500'}`}>
-                                              {index + 1}
-                                          </div>
-                                          <span className="font-bold text-gray-900 text-sm">Plane {index + 1}</span>
+                                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs ${c.active ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-500'}`}>{idx + 1}</div>
+                                          <span className="font-bold text-gray-900 text-sm">Constraint {idx + 1}</span>
                                       </div>
                                       <div className="flex items-center gap-2">
-                                          <button 
-                                              onClick={() => updatePlanarConstraint(selectedBone, config.id, { active: !config.active })}
-                                              className={`relative w-10 h-6 rounded-full transition-colors duration-200 ${config.active ? 'bg-violet-500' : 'bg-gray-200'}`}
+                                          <button
+                                              onClick={() => updateConstraint(selectedBone, c.id, { active: !c.active })}
+                                              className={`relative w-10 h-6 rounded-full transition-colors duration-200 ${c.active ? 'bg-violet-500' : 'bg-gray-200'}`}
                                           >
-                                              <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${config.active ? 'translate-x-4' : 'translate-x-0'}`} />
+                                              <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${c.active ? 'translate-x-4' : 'translate-x-0'}`} />
                                           </button>
-                                          <button onClick={() => removePlanarConstraint(selectedBone, config.id)} className="p-2 text-gray-400 hover:text-red-500 transition-colors">
+                                          <button onClick={() => removeConstraint(selectedBone, c.id)} className="p-2 text-gray-400 hover:text-red-500 transition-colors">
                                               <Trash2 className="w-4 h-4" />
                                           </button>
                                       </div>
                                   </div>
 
-                                  {config.active && (
-                                      <div className="space-y-4 animate-in fade-in slide-in-from-top-1">
+                                  {c.active && (
+                                      <div className="space-y-4">
                                           <div>
-                                              <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Quick Presets</label>
+                                              <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Plane Presets</label>
                                               <div className="flex gap-1">
-                                                  <button onClick={() => updatePlanarConstraint(selectedBone, config.id, { normal: { x: 0, y: 0, z: 1 } })} className="flex-1 py-1.5 bg-gray-50 hover:bg-violet-50 text-[10px] font-bold text-gray-600 rounded-lg border border-transparent hover:border-violet-200 transition-colors">Frontal</button>
-                                                  <button onClick={() => updatePlanarConstraint(selectedBone, config.id, { normal: { x: 1, y: 0, z: 0 } })} className="flex-1 py-1.5 bg-gray-50 hover:bg-violet-50 text-[10px] font-bold text-gray-600 rounded-lg border border-transparent hover:border-violet-200 transition-colors">Sagittal</button>
-                                                  <button onClick={() => updatePlanarConstraint(selectedBone, config.id, { normal: { x: 0, y: 1, z: 0 } })} className="flex-1 py-1.5 bg-gray-50 hover:bg-violet-50 text-[10px] font-bold text-gray-600 rounded-lg border border-transparent hover:border-violet-200 transition-colors">Transverse</button>
+                                                  <button onClick={() => updateConstraint(selectedBone, c.id, { normal: { x: 0, y: 0, z: 1 } })} className="flex-1 py-1.5 bg-gray-50 hover:bg-violet-50 text-[10px] font-bold text-gray-600 rounded-lg border border-transparent hover:border-violet-200 transition-colors">Frontal</button>
+                                                  <button onClick={() => updateConstraint(selectedBone, c.id, { normal: { x: 1, y: 0, z: 0 } })} className="flex-1 py-1.5 bg-gray-50 hover:bg-violet-50 text-[10px] font-bold text-gray-600 rounded-lg border border-transparent hover:border-violet-200 transition-colors">Sagittal</button>
+                                                  <button onClick={() => updateConstraint(selectedBone, c.id, { normal: { x: 0, y: 1, z: 0 } })} className="flex-1 py-1.5 bg-gray-50 hover:bg-violet-50 text-[10px] font-bold text-gray-600 rounded-lg border border-transparent hover:border-violet-200 transition-colors">Transverse</button>
                                               </div>
                                           </div>
-                                          
+
                                           <div>
                                               <div className="flex justify-between items-center mb-2">
-                                                  <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400">Normal Vector</label>
-                                                  <span className="font-mono text-[9px] text-violet-500 bg-violet-50 px-1.5 py-0.5 rounded">[{config.normal.x.toFixed(1)}, {config.normal.y.toFixed(1)}, {config.normal.z.toFixed(1)}]</span>
+                                                  <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400">Blocked Direction</label>
+                                                  <span className="font-mono text-[9px] text-violet-500 bg-violet-50 px-1.5 py-0.5 rounded">[{c.normal.x.toFixed(1)}, {c.normal.y.toFixed(1)}, {c.normal.z.toFixed(1)}]</span>
                                               </div>
                                               <div className="space-y-3">
                                                   {(['x', 'y', 'z'] as const).map(axis => (
                                                       <div key={axis} className="flex items-center gap-3">
                                                           <span className="text-[10px] font-bold text-gray-400 w-2 uppercase">{axis}</span>
-                                                          <input 
-                                                              type="range" 
-                                                              min="-1" max="1" step="0.1" 
-                                                              value={config.normal[axis]} 
-                                                              onChange={(e) => updatePlanarConstraint(selectedBone, config.id, { normal: { ...config.normal, [axis]: parseFloat(e.target.value) } })}
+                                                          <input
+                                                              type="range"
+                                                              min="-1" max="1" step="0.1"
+                                                              value={c.normal[axis]}
+                                                              onChange={(e) => updateConstraint(selectedBone, c.id, { normal: { ...c.normal, [axis]: parseFloat(e.target.value) } })}
                                                               className="bio-range w-full text-violet-500"
                                                           />
                                                       </div>
@@ -1725,11 +1280,9 @@ const BioModelPage: React.FC = () => {
                                   )}
                               </div>
                           ))}
-                          
-                          {(!hybridConstraints[selectedBone] || hybridConstraints[selectedBone].length === 0) && (
-                              <div className="text-center py-8 text-gray-400 text-xs">
-                                  No constraints added yet.
-                              </div>
+
+                          {(!constraints[selectedBone] || constraints[selectedBone].length === 0) && (
+                              <div className="text-center py-8 text-gray-400 text-xs">No constraints yet.</div>
                           )}
                       </div>
                   )}
