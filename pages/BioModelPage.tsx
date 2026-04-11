@@ -612,10 +612,14 @@ const BioModelPage: React.FC = () => {
   const solveConstraints = (tempPosture: Posture, currentTwists: Record<string, number>, lockedBoneIds?: string[]): { posture: Posture, twists: Record<string, number> } => {
       let correctedPosture = { ...tempPosture };
       let correctedTwists = { ...currentTwists };
-      let changed = false;
 
-      // Iterative solver — 10 passes balances convergence quality with real-time performance
-      for (let i = 0; i < 10; i++) {
+      // Iterative solver. Caps at 50 passes for hard coupled cases (e.g. humerus's
+      // own plane + forearm's planes via the isChild branch), but exits early once
+      // a pass produces no meaningful change. Easy poses settle in 1–3 passes,
+      // keeping the cost low for smooth real-time dragging.
+      const CONVERGENCE_EPS = 1e-4;
+      for (let i = 0; i < 50; i++) {
+          let maxDelta = 0;
           BONE_ORDER.forEach(boneId => {
               if (lockedBoneIds?.includes(boneId)) return; // Skip the bones being actively moved
               
@@ -656,7 +660,7 @@ const BioModelPage: React.FC = () => {
                   directChildConstraints.forEach(c => {
                       if (c.active) activeConstraints.push({ ...c, isChild: true, childId: childBoneId });
                   });
-                  
+
                   if (symmetryMode) {
                       const oppositeChild = getOppositeBone(childBoneId);
                       if (oppositeChild) {
@@ -810,12 +814,22 @@ const BioModelPage: React.FC = () => {
                       }
                   }
 
-                  changed = true;
               });
-              
+
+              const prevLocal = correctedPosture[boneId];
+              const prevTwist = correctedTwists[boneId] || 0;
+              if (prevLocal) {
+                  const dx = Math.abs(prevLocal.x - proposedLocal.x);
+                  const dy = Math.abs(prevLocal.y - proposedLocal.y);
+                  const dz = Math.abs(prevLocal.z - proposedLocal.z);
+                  const dt = Math.abs(prevTwist - proposedTwist) * 0.01;
+                  const d = Math.max(dx, dy, dz, dt);
+                  if (d > maxDelta) maxDelta = d;
+              }
               correctedPosture[boneId] = proposedLocal;
               correctedTwists[boneId] = proposedTwist;
           });
+          if (maxDelta < CONVERGENCE_EPS) break;
       }
 
       return { posture: correctedPosture, twists: correctedTwists };
@@ -823,16 +837,22 @@ const BioModelPage: React.FC = () => {
 
   // Improved Planar and Joint Violation Check
   const checkConstraintViolation = (
-        proposedTwists: Record<string, number>, 
+        proposedTwists: Record<string, number>,
         proposedPosture: Posture,
         referenceTwists: Record<string, number>,
-        referencePosture: Posture
+        referencePosture: Posture,
+        lockedBoneIds?: string[]
     ) => {
         const kProp = calculateKinematics(proposedPosture, proposedTwists);
         const kRef = calculateKinematics(referencePosture, referenceTwists);
         
         // 1. Planar Constraints
         for (const boneId of BONE_ORDER) {
+            // Note: do NOT skip locked bones here. Even when a bone is being directly
+            // controlled, its tip is still subject to its planar constraints — the
+            // iterative solver is expected to rotate the *parent* (via the isChild
+            // branch) to bring the locked tip back onto the planes. Skipping this
+            // check would let the user move the locked bone freely through walls.
             const direct = hybridConstraints[boneId] || [];
             const active = direct.filter(c => c.active);
             
@@ -1095,8 +1115,9 @@ const BioModelPage: React.FC = () => {
       }
       
       // Use the smarter violation check instead of a strict static validation.
-      // This allows moving OUT of invalid states while preventing moving DEEPER into them.
-      if (!checkConstraintViolation(finalT, finalP, twists, posture)) {
+      // Pass lockedIds so actively-controlled bones are skipped — their endpoints
+      // moved intentionally and shouldn't be treated as violations.
+      if (!checkConstraintViolation(finalT, finalP, twists, posture, lockedIds)) {
           return { posture: finalP, twists: finalT };
       }
       return null;
@@ -1127,34 +1148,43 @@ const BioModelPage: React.FC = () => {
       if (!selectedBone || isNaN(val)) return;
       if (isPlaying) setIsPlaying(false);
 
-      // Use posture/twists directly (always in sync with poseMode via updatePostureState).
       const currentVec = posture[selectedBone];
       if (!currentVec) return;
 
-      // Apply an incremental rotation in the YZ plane from the current angle so the
-      // x-component set by the constraint solver is preserved — exactly like the Z-slider.
       const currentAngle = getCurrentHingeAngle(selectedBone);
-      const deltaRad = (val - currentAngle) * Math.PI / 180;
-      const { x, y, z } = currentVec;
-      const cosD = Math.cos(deltaRad);
-      const sinD = Math.sin(deltaRad);
 
-      let newVec: Vector3;
-      if (selectedBone.includes('Tibia')) {
-          // Tibia: y=cos(θ), z=-sin(θ). Increasing angle rotates toward -z direction,
-          // which is the opposite sense from forearm, so negate sinD.
-          newVec = normalize({ x, y: y * cosD + z * sinD, z: -y * sinD + z * cosD });
-      } else {
-          // Forearm: y=cos(θ), z=sin(θ)  |  Foot: y=sin(θ), z=-cos(θ)
-          // Both share the same rotation direction in the YZ plane.
-          newVec = normalize({ x, y: y * cosD - z * sinD, z: y * sinD + z * cosD });
-      }
+      // Compute the forearm/tibia direction for a given target angle, rotating
+      // incrementally from the current angle so x (varus/valgus) is preserved.
+      const computeVecForAngle = (targetAngle: number): Vector3 => {
+          const deltaRad = (targetAngle - currentAngle) * Math.PI / 180;
+          const { x, y, z } = currentVec;
+          const cosD = Math.cos(deltaRad);
+          const sinD = Math.sin(deltaRad);
+          if (selectedBone.includes('Tibia')) {
+              return normalize({ x, y: y * cosD + z * sinD, z: -y * sinD + z * cosD });
+          } else {
+              return normalize({ x, y: y * cosD - z * sinD, z: y * sinD + z * cosD });
+          }
+      };
 
-      const constrainedVec = applyConstraints(selectedBone, newVec);
+      // Use a safe-scan so that if constraints block the full requested angle we
+      // still advance as far as possible rather than silently doing nothing.
+      // This also guarantees updatePostureState is always called so React reconciles
+      // the slider to the true achieved angle (prevents display drift).
+      const safeAngle = findSafeInteractionValue(
+          currentAngle,
+          val,
+          (angle) => {
+              const vec = computeVecForAngle(angle);
+              const constrained = applyConstraints(selectedBone, vec);
+              return resolveKinematics(selectedBone, constrained, posture, twists) !== null;
+          }
+      );
+
+      const finalVec = computeVecForAngle(safeAngle);
+      const constrainedVec = applyConstraints(selectedBone, finalVec);
       const resolved = resolveKinematics(selectedBone, constrainedVec, posture, twists);
-      if (!resolved) return;
-
-      updatePostureState(resolved.posture, resolved.twists);
+      if (resolved) updatePostureState(resolved.posture, resolved.twists);
   };
 
   const handlePointChange = (axis: keyof Vector3, newValue: number) => {
@@ -1193,21 +1223,42 @@ const BioModelPage: React.FC = () => {
     }
 
     // Default: Single bone rotation or non-IK
-    let newTarget = { ...targetPos, [axis]: internalVal };
-    const constrainedTarget = applyConstraints(selectedBone, newTarget);
-    setTargetPos(constrainedTarget);
-    let direction = normalize(constrainedTarget);
     const bounds = BONE_CONSTRAINTS[selectedBone] || {};
-    let constrained = { ...direction };
-    if (bounds.x) constrained.x = Math.max(bounds.x[0], Math.min(bounds.x[1], constrained.x));
-    if (bounds.y) constrained.y = Math.max(bounds.y[0], Math.min(bounds.y[1], constrained.y));
-    if (bounds.z) constrained.z = Math.max(bounds.z[0], Math.min(bounds.z[1], constrained.z));
-    let finalVector = normalize(constrained);
-    if (bounds.x) finalVector.x = Math.max(bounds.x[0], Math.min(bounds.x[1], finalVector.x));
-    if (bounds.y) finalVector.y = Math.max(bounds.y[0], Math.min(bounds.y[1], finalVector.y));
-    if (bounds.z) finalVector.z = Math.max(bounds.z[0], Math.min(bounds.z[1], finalVector.z));
+    const startVal = (targetPos as any)[axis] as number;
+
+    // Helper that computes the final clamped/normalized direction for a given axis value
+    const computeForVal = (v: number) => {
+        const tgt = { ...targetPos, [axis]: v };
+        const ct = applyConstraints(selectedBone, tgt);
+        let dir = normalize(ct);
+        if (bounds.x) dir.x = Math.max(bounds.x[0], Math.min(bounds.x[1], dir.x));
+        if (bounds.y) dir.y = Math.max(bounds.y[0], Math.min(bounds.y[1], dir.y));
+        if (bounds.z) dir.z = Math.max(bounds.z[0], Math.min(bounds.z[1], dir.z));
+        let fv = normalize(dir);
+        if (bounds.x) fv.x = Math.max(bounds.x[0], Math.min(bounds.x[1], fv.x));
+        if (bounds.y) fv.y = Math.max(bounds.y[0], Math.min(bounds.y[1], fv.y));
+        if (bounds.z) fv.z = Math.max(bounds.z[0], Math.min(bounds.z[1], fv.z));
+        return { tgt: ct, fv };
+    };
+
+    // Sub-step from current axis value toward requested. The iterative constraint solver
+    // converges much better on small jumps than on large ones, so scanning from the
+    // current value lets us advance as far as constraints allow rather than rejecting
+    // the entire move when a single big step happens to land in a bad basin.
+    const safeVal = findSafeInteractionValue(
+        startVal,
+        internalVal,
+        (v) => resolveKinematics(selectedBone, computeForVal(v).fv, posture, twists) !== null
+    );
+
+    const { tgt: finalTarget, fv: finalVector } = computeForVal(safeVal);
+    setTargetPos(finalTarget);
     const resolved = resolveKinematics(selectedBone, finalVector, posture, twists);
-    if (!resolved) return;
+    if (!resolved) {
+        // Force re-render so the slider snaps back to the actual stored axis value.
+        updatePostureState({ ...posture }, { ...twists });
+        return;
+    }
     updatePostureState(resolved.posture, resolved.twists);
   };
 
@@ -1215,15 +1266,30 @@ const BioModelPage: React.FC = () => {
     if (!selectedBone || isNaN(val)) return;
     if (isPlaying) setIsPlaying(false);
 
-    let allowedVal = val;
-    if (ROTATION_LIMITS[selectedBone]) {
-        allowedVal = clamp(val, ROTATION_LIMITS[selectedBone].min, ROTATION_LIMITS[selectedBone].max);
+    const limits = ROTATION_LIMITS[selectedBone];
+    const clampedVal = limits ? clamp(val, limits.min, limits.max) : val;
+    const currentTwist = twists[selectedBone] ?? 0;
+
+    // Scan from the current twist toward the requested value and stop at the
+    // furthest allowed position.  This means:
+    //   • The slider always advances as far as constraints permit (never silent no-op).
+    //   • updatePostureState is always called, so React reconciles the range input
+    //     back to the true achieved value — fixing the display drift where the browser
+    //     keeps the dragged position while the state holds a different value.
+    const safeVal = findSafeInteractionValue(
+        currentTwist,
+        clampedVal,
+        (v) => resolveRotation(selectedBone, v, posture, twists) !== null
+    );
+
+    const resolved = resolveRotation(selectedBone, safeVal, posture, twists);
+    if (resolved) {
+        updatePostureState(resolved.posture, resolved.twists);
+    } else {
+        // Even if blocked entirely, force a re-render so the slider snaps back
+        // to the actual stored twist value instead of staying at the dragged position.
+        updatePostureState({ ...posture }, { ...twists });
     }
-
-    const resolved = resolveRotation(selectedBone, allowedVal, posture, twists);
-    if (!resolved) return;
-
-    updatePostureState(resolved.posture, resolved.twists);
   };
 
   const isScapula = selectedBone ? selectedBone.includes('Clavicle') : false;

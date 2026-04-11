@@ -283,6 +283,7 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, co
           strokeWidth: width,
           strokeLinecap: 'round',
           cursor: isSelectable ? 'pointer' : 'default',
+          'data-bone-id': id,
           onPointerDown: isSelectable ? (e) => {
             e.stopPropagation();
             onSelectBone(id);
