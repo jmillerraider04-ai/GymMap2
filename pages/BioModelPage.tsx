@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import BioMan, { Posture, Vector3, VisualForce, VisualConstraint, VisualPlane } from '../components/BioMan';
-import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Anchor, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, BrainCircuit, Axis3d, Plus, Trash2, Globe2, X, CheckCircle2 } from 'lucide-react';
+import BioMan, { Posture, Vector3, VisualForce, VisualPlane } from '../components/BioMan';
+import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, BrainCircuit, Axis3d, Plus, Trash2, Globe2 } from 'lucide-react';
 
 const DEFAULT_POSTURE: Posture = {
   lClavicle: { x: -25, y: 0, z: 0 },
@@ -99,15 +99,6 @@ interface ForceConfig {
     z: number;
     magnitude: number;
     mirrorId?: string;
-}
-
-interface ConstraintConfig {
-    id: string;
-    type: 'vector' | 'path';
-    boneId: string;
-    position: number;
-    mirrorId?: string;
-    restrictions: Vector3[];
 }
 
 interface PlanarConstraint {
@@ -367,7 +358,7 @@ const mirrorTwists = (twists: Record<string, number>, sourceBoneId: string): Rec
 };
 
 const BioModelPage: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'constraints' | 'torque' | 'capacities' | 'dof'>('kinematics');
+  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'capacities' | 'dof'>('kinematics');
   const [poseMode, setPoseMode] = useState<'start' | 'end'>('start');
   const [startPosture, setStartPosture] = useState<Posture>(DEFAULT_POSTURE);
   const [endPosture, setEndPosture] = useState<Posture>(DEFAULT_POSTURE);
@@ -384,8 +375,6 @@ const BioModelPage: React.FC = () => {
   const animationRef = useRef<number | null>(null);
   const [forces, setForces] = useState<ForceConfig[]>([]);
   const [editingForceId, setEditingForceId] = useState<string | null>(null);
-  const [constraints, setConstraints] = useState<ConstraintConfig[]>([]);
-  const [editingConstraintId, setEditingConstraintId] = useState<string | null>(null);
   const [jointCapacities, setJointCapacities] = useState<Record<JointGroup, JointCapacityProfile>>(DEFAULT_CAPACITIES);
   
   const [reactionForces, setReactionForces] = useState<VisualForce[]>([]);
@@ -516,12 +505,6 @@ const BioModelPage: React.FC = () => {
     return planes;
   }, [hybridConstraints, posture, twists]);
 
-  const selectedBoneConstraint = useMemo(() => 
-    constraints.find(c => c.boneId === selectedBone), 
-  [constraints, selectedBone]);
-
-  const hasConstraint = (boneId: string) => constraints.some(c => c.boneId === boneId);
-
   // --- HELPER FUNCTIONS FOR CONSTRAINTS ---
   const addHybridConstraint = (boneId: string) => {
     const kinematics = calculateKinematics(posture, twists);
@@ -622,17 +605,7 @@ const BioModelPage: React.FC = () => {
           let maxDelta = 0;
           BONE_ORDER.forEach(boneId => {
               if (lockedBoneIds?.includes(boneId)) return; // Skip the bones being actively moved
-              
-              // Also skip if bone is locked by a vector constraint
-              let isLocked = constraints.some(c => c.boneId === boneId && c.type === 'vector' && c.restrictions.length > 0);
-              if (!isLocked && symmetryMode) {
-                  const opposite = getOppositeBone(boneId);
-                  if (opposite) {
-                      isLocked = constraints.some(c => c.boneId === opposite && c.type === 'vector' && c.restrictions.length > 0);
-                  }
-              }
-              if (isLocked) return;
-              
+
               const activeConstraints: (PlanarConstraint & { isChild?: boolean; childId?: string })[] = [];
               const directConstraints = hybridConstraints[boneId] || [];
               directConstraints.forEach(c => { if (c.active) activeConstraints.push(c); });
@@ -897,23 +870,6 @@ const BioModelPage: React.FC = () => {
 
         // 2. Joint Limits
         for (const boneId of BONE_ORDER) {
-            // Check Vector Constraints (as locks)
-            let constraint = constraints.find(c => c.boneId === boneId);
-            if (!constraint && symmetryMode) {
-                const opposite = getOppositeBone(boneId);
-                if (opposite) {
-                    constraint = constraints.find(c => c.boneId === opposite);
-                }
-            }
-            
-            if (constraint && constraint.type === 'vector' && constraint.restrictions.length > 0) {
-                const vecProp = proposedPosture[boneId];
-                const vecRef = referencePosture[boneId];
-                if (vecProp && vecRef) {
-                    if (magnitude(sub(vecProp, vecRef)) > 0.001) return true;
-                }
-            }
-
             const vecProp = proposedPosture[boneId];
             const vecRef = referencePosture[boneId];
             const bounds = BONE_CONSTRAINTS[boneId];
@@ -1028,26 +984,7 @@ const BioModelPage: React.FC = () => {
     return calculateKinematics(posture, twists);
   }, [posture, twists]);
 
-  const applyConstraints = (boneId: string, proposedVec: Vector3): Vector3 => {
-      let filtered = proposedVec;
-      let constraint = constraints.find(c => c.boneId === boneId);
-      
-      if (!constraint && symmetryMode) {
-          const opposite = getOppositeBone(boneId);
-          if (opposite) {
-              const oppConstraint = constraints.find(c => c.boneId === opposite);
-              if (oppConstraint) {
-                  // For 'vector' type, it just blocks movement.
-                  constraint = oppConstraint;
-              }
-          }
-      }
-
-      if (constraint && constraint.type === 'vector' && constraint.restrictions.length > 0) {
-           filtered = posture[boneId]; 
-      }
-      return filtered;
-  };
+  const applyConstraints = (_boneId: string, proposedVec: Vector3): Vector3 => proposedVec;
 
   const findSafeInteractionValue = (
       startVal: number,
@@ -1089,13 +1026,6 @@ const BioModelPage: React.FC = () => {
           }
       }
       return low;
-  };
-
-  const checkConstraintViolationLegacy = (boneId: string, proposedLocalVec: Vector3) => {
-      if (bypassConstraints) return false;
-      const constraint = constraints.find(c => c.boneId === boneId);
-      if (!constraint || !skeletalData) return false;
-      return false; 
   };
 
   const resolveFullPosture = (p: Posture, t: Record<string, number>, locked: string[], source: string): { posture: Posture, twists: Record<string, number> } | null => {
@@ -1296,10 +1226,9 @@ const BioModelPage: React.FC = () => {
   const isHinge = selectedBone ? /Forearm|Tibia|Foot/.test(selectedBone) : false;
 
   const getHingeConfig = (bone: string) => {
-      const isConstrained = hasConstraint(bone);
       if (bone.includes('Forearm')) return { label: 'Elbow Flexion', min: 0, max: 160, default: 0 };
       if (bone.includes('Tibia')) return { label: 'Knee Flexion', min: 0, max: 160, default: 0 };
-      if (bone.includes('Foot')) return { label: 'Ankle Dorsi/Plantar', min: isConstrained ? -50 : -90, max: isConstrained ? 50 : 90, default: 0 };
+      if (bone.includes('Foot')) return { label: 'Ankle Dorsi/Plantar', min: -90, max: 90, default: 0 };
       return null;
   };
 
@@ -1331,56 +1260,6 @@ const BioModelPage: React.FC = () => {
   
   const deleteForce = (id: string) => { setForces(prev => prev.filter(f => f.id !== id)); };
 
-  const addNewConstraint = () => {
-    const boneId = selectedBone || 'rForearm';
-    const currentLocal = posture[boneId];
-    if (!currentLocal) return;
-    const capturedVector = { ...currentLocal };
-
-    const newConstraint: ConstraintConfig = { 
-        id: Date.now().toString(), 
-        type: 'vector', 
-        boneId: boneId, 
-        position: 1, 
-        restrictions: [capturedVector] 
-    };
-    setConstraints([...constraints, newConstraint]);
-    setEditingConstraintId(newConstraint.id);
-  };
-  
-  const updateConstraint = (id: string, field: keyof ConstraintConfig, value: any) => {
-    setConstraints(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
-  };
-
-  const updateConstraintRestriction = (id: string, index: number, axis: keyof Vector3, value: number) => {
-      if (isNaN(value)) return;
-      setConstraints(prev => prev.map(c => {
-          if (c.id !== id) return c;
-          const newRestrictions = [...c.restrictions];
-          if (newRestrictions[index]) {
-              newRestrictions[index] = { ...newRestrictions[index], [axis]: value };
-          }
-          return { ...c, restrictions: newRestrictions };
-      }));
-  };
-
-  const addConstraintRestriction = (id: string) => {
-      setConstraints(prev => prev.map(c => {
-          if (c.id !== id) return c;
-          const currentLocal = posture[c.boneId] || {x:0, y:1, z:0};
-          return { ...c, restrictions: [...c.restrictions, {...currentLocal}] };
-      }));
-  };
-
-  const removeConstraintRestriction = (id: string, index: number) => {
-      setConstraints(prev => prev.map(c => {
-          if (c.id !== id) return c;
-          return { ...c, restrictions: c.restrictions.filter((_, i) => i !== index) };
-      }));
-  };
-  
-  const deleteConstraint = (id: string) => { setConstraints(prev => prev.filter(c => c.id !== id)); };
-
   const toggleSymmetry = () => setSymmetryMode(prev => !prev);
 
   const resetModel = () => {
@@ -1394,7 +1273,6 @@ const BioModelPage: React.FC = () => {
     setTargetPos(null);
     setTargetReferenceBone(null);
     setForces([]);
-    setConstraints([]);
     setSymmetryMode(false);
     setIsPlaying(false);
     setHybridConstraints({});
@@ -1641,8 +1519,7 @@ const BioModelPage: React.FC = () => {
                 vector: getVisualVector(f),
                 color: '#ef4444'
             }))}
-            reactionForces={reactionForces} 
-            constraints={constraints} 
+            reactionForces={reactionForces}
             planes={lockedPlanes}
             selectedBone={selectedBone} 
             onSelectBone={handleBoneSelect} 
@@ -1662,7 +1539,6 @@ const BioModelPage: React.FC = () => {
             <button onClick={() => setActiveTab('kinematics')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'kinematics' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Motion"><ArrowDownUp className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('dof')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'dof' ? 'bg-white text-violet-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Degrees of Freedom"><Axis3d className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('kinetics')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'kinetics' ? 'bg-white text-orange-500 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="External Forces"><Zap className="w-5 h-5" /></button>
-            <button onClick={() => setActiveTab('constraints')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'constraints' ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Constraints"><Anchor className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('torque')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'torque' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Analysis"><Scale className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('capacities')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'capacities' ? 'bg-white text-purple-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Strength Capacity"><Gauge className="w-5 h-5" /></button>
           </div>
@@ -1671,14 +1547,12 @@ const BioModelPage: React.FC = () => {
             {activeTab === 'kinematics' && <Settings2 className="w-5 h-5 text-indigo-600" />}
             {activeTab === 'dof' && <Axis3d className="w-5 h-5 text-violet-600" />}
             {activeTab === 'kinetics' && <Zap className="w-5 h-5 text-orange-500" />}
-            {activeTab === 'constraints' && <Anchor className="w-5 h-5 text-emerald-600" />}
             {activeTab === 'torque' && <Scale className="w-5 h-5 text-gray-800" />}
             {activeTab === 'capacities' && <Gauge className="w-5 h-5 text-purple-600" />}
             <h3 className="text-lg font-bold text-gray-900">
                 {activeTab === 'kinematics' ? 'Motion Editor' : 
                  activeTab === 'dof' ? 'Degrees of Freedom' :
-                 activeTab === 'kinetics' ? 'External Forces' : 
-                 activeTab === 'constraints' ? 'Kinematic Constraints' : 
+                 activeTab === 'kinetics' ? 'External Forces' :
                  activeTab === 'capacities' ? 'Joint Capacities' : 'Joint Analysis'}
             </h3>
           </div>
@@ -1703,19 +1577,10 @@ const BioModelPage: React.FC = () => {
                 ) : (
                     <div className="flex-1 space-y-8 overflow-y-auto pr-1">
                         <div className="flex items-center justify-between"><span className="font-bold text-gray-900 text-sm">{BONE_NAMES[selectedBone]}</span><span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{poseMode === 'start' ? 'Start' : 'End'} Editing</span></div>
-                        
-                        {selectedBoneConstraint && (
-                            <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3 flex items-center gap-3 mb-2">
-                                <Anchor className="w-4 h-4 text-emerald-500" />
-                                <span className="text-xs font-bold text-emerald-700">
-                                    {selectedBoneConstraint.type === 'path' ? 'Direction Locked' : 'Movement Constrained'}
-                                </span>
-                            </div>
-                        )}
-                        
+
                         {selectedBone === 'spine' ? (
                             <div className="flex flex-col items-center justify-center border-2 border-dashed border-gray-100 rounded-xl py-8">
-                                <Anchor className="w-8 h-8 text-gray-300 mb-2" />
+                                <Lock className="w-8 h-8 text-gray-300 mb-2" />
                                 <p className="text-xs font-bold text-gray-400 text-center uppercase tracking-wide">Static Root Segment</p>
                                 <p className="text-[10px] text-gray-300 text-center mt-1">Movement not supported</p>
                             </div>
@@ -1902,56 +1767,6 @@ const BioModelPage: React.FC = () => {
               </div>
           )}
           
-          {activeTab === 'constraints' && (
-              <div className="flex-1 flex flex-col h-full animate-in fade-in slide-in-from-right-4 duration-300">
-                  {editingConstraintId ? (
-                      <div className="flex-1 flex flex-col">
-                         <div className="flex items-center gap-2 mb-6"><button onClick={() => setEditingConstraintId(null)} className="p-2 hover:bg-gray-100 rounded-lg"><ChevronLeft className="w-5 h-5 text-gray-600" /></button><h4 className="font-bold text-gray-900">Edit Constraint</h4></div>
-                         <div className="space-y-6 flex-1 overflow-y-auto pr-2">
-                             {(() => {
-                                 const c = constraints.find(c => c.id === editingConstraintId);
-                                 if (!c) return null;
-                                 return (
-                                     <>
-                                        <div className="bg-emerald-50 border border-emerald-100 p-4 rounded-xl mb-4"><p className="text-xs text-emerald-800 font-medium leading-relaxed">
-                                            {c.type === 'vector' ? 'Defined vectors are BLOCKED. Useful for limiting ROM (e.g. Stop extension at 0°).' : 'Defined vectors are the PATH. The joint is LOCKED to this direction.'}
-                                        </p></div>
-                                        <div>
-                                            <label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Constraint Type</label>
-                                            <div className="flex bg-gray-100 p-1 rounded-xl">
-                                                <button onClick={() => updateConstraint(c.id, 'type', 'vector')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${c.type === 'vector' ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-500'}`}>Block Direction</button>
-                                                <button onClick={() => updateConstraint(c.id, 'type', 'path')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${c.type === 'path' ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-500'}`}>Lock Path</button>
-                                            </div>
-                                        </div>
-                                        <div><label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Constrained Bone</label><div className="relative"><select value={c.boneId} onChange={(e) => updateConstraint(c.id, 'boneId', e.target.value)} className="w-full appearance-none bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-medium text-gray-700 outline-none focus:border-emerald-500">{Object.entries(BONE_NAMES).map(([id, name]) => (<option key={id} value={id}>{name}</option>))}</select><ChevronLeft className="w-4 h-4 text-gray-400 absolute right-4 top-1/2 -translate-y-1/2 -rotate-90 pointer-events-none" /></div></div>
-                                        <div>
-                                            <div className="flex justify-between items-center mb-2"><label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 block">Constraint Vectors</label><button onClick={() => addConstraintRestriction(c.id)} className="text-emerald-600 text-xs font-bold hover:underline">+ Add Current</button></div>
-                                            <div className="space-y-3">
-                                                {c.restrictions.map((r, idx) => (
-                                                    <div key={idx} className="bg-gray-50 border border-gray-200 rounded-xl p-3">
-                                                        <div className="flex justify-between items-center mb-2"><span className="text-[10px] font-bold text-gray-500 uppercase">Vector {idx + 1}</span><button onClick={() => removeConstraintRestriction(c.id, idx)} className="text-red-400 hover:text-red-500"><X className="w-3 h-3" /></button></div>
-                                                        <div className="grid grid-cols-3 gap-2">
-                                                            {(['x', 'y', 'z'] as const).map(axis => (<div key={axis} className="bg-white rounded border border-gray-100 p-1"><input type="number" step="0.1" value={isNaN(r[axis]) ? 0 : r[axis]} onChange={(e) => updateConstraintRestriction(c.id, idx, axis, parseFloat(e.target.value))} className="w-full text-center text-xs font-mono outline-none text-gray-600" /></div>))}
-                                                        </div>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </div>
-                                        <div className="pt-8"><button onClick={() => deleteConstraint(c.id)} className="w-full py-3 bg-red-50 text-red-500 font-bold rounded-xl hover:bg-red-100 transition-colors flex items-center justify-center gap-2"><Trash2 className="w-4 h-4" /> Delete Constraint</button></div>
-                                     </>
-                                 );
-                             })()}
-                         </div>
-                      </div>
-                  ) : (
-                      <div className="flex-1 flex flex-col">
-                          {constraints.length === 0 ? (<div className="flex-1 flex flex-col items-center justify-center text-center opacity-50 border-2 border-dashed border-gray-100 rounded-3xl mb-4"><Anchor className="w-8 h-8 text-emerald-300 mb-2" /><p className="text-gray-400 font-bold text-sm">No constraints active.</p></div>) : (<div className="flex-1 overflow-y-auto space-y-3 pr-2 mb-4">{constraints.map(c => (<button key={c.id} onClick={() => setEditingConstraintId(c.id)} className="w-full flex items-center justify-between p-4 rounded-2xl border transition-all duration-200 group text-left bg-white border-gray-100 shadow-sm hover:shadow-md hover:border-emerald-200"><div className="flex items-center gap-3"><div className="p-2 rounded-xl bg-emerald-500 text-white"><Anchor className="w-5 h-5" /></div><div><span className="block font-bold text-sm text-gray-900">{BONE_NAMES[c.boneId]}</span><span className="text-[10px] font-bold uppercase tracking-wide text-gray-400">{c.type === 'vector' ? 'Block Vector' : 'Lock Path'}</span></div></div><div className="text-right"><ChevronRight className="w-5 h-5 text-gray-300 group-hover:text-emerald-400 ml-auto" /></div></button>))}</div>)}
-                          <div className="space-y-3"><button onClick={addNewConstraint} className="w-full py-4 bg-emerald-500 text-white font-bold rounded-2xl shadow-lg shadow-emerald-200 hover:bg-emerald-600 transition-all flex items-center justify-center gap-2"><Plus className="w-5 h-5" /> Add Constraint</button></div>
-                      </div>
-                  )}
-              </div>
-          )}
-
           {activeTab === 'torque' && (
                <div className="flex-1 flex flex-col items-center justify-center text-center opacity-50 border-2 border-dashed border-gray-100 rounded-3xl min-h-[150px] animate-in fade-in slide-in-from-right-4 duration-300">
                    <BrainCircuit className="w-10 h-10 text-gray-300 mb-3" />

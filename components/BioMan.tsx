@@ -18,15 +18,6 @@ export interface VisualForce {
   color?: string;
 }
 
-export interface VisualConstraint {
-  id: string;
-  type: 'vector' | 'path'; // 'vector' = directional block, 'path' = sliding rail
-  boneId: string;
-  position: number; // 0 (Start) to 1 (End)
-  restrictions: Vector3[]; // Directions where movement is BLOCKED (for vector) or ALLOWED (for path)
-  mirrorId?: string;
-}
-
 export interface VisualPlane {
   id: string;
   center: Vector3;
@@ -41,8 +32,7 @@ interface BioManProps {
   twists?: Record<string, number>;
   externalForces?: VisualForce[];
   reactionForces?: VisualForce[];
-  constraints?: VisualConstraint[];
-  planes?: VisualPlane[]; 
+  planes?: VisualPlane[];
   selectedBone: string | null;
   onSelectBone: (boneId: string) => void;
   targetPos?: Vector3 | null;
@@ -128,7 +118,7 @@ const applyShortestArcRotation = (src: Vector3, dst: Vector3, toRotate: Vector3)
     return rotateAroundAxis(toRotate, axis, angleDeg);
 };
 
-const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, constraints, planes, selectedBone, onSelectBone, targetPos, targetReferenceBone }: BioManProps) => {
+const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, planes, selectedBone, onSelectBone, targetPos, targetReferenceBone }: BioManProps) => {
   // --- CONFIGURATION ---
   const CONFIG = {
     TORSO_LEN: 60,
@@ -473,47 +463,6 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, co
         });
     }
 
-    if (constraints) {
-        constraints.forEach(c => {
-            const pos = getPointOnBone(c.boneId, c.position);
-            if (pos) {
-                const camOrigin = applyCamera(pos);
-                const p = project(camOrigin);
-                const isSelected = c.boneId === selectedBone;
-                const opacity = isSelected ? 0.6 : 0.15;
-                const fillOpacity = isSelected ? 1 : 0.2;
-
-                if (c.type === 'path') {
-                    const railVec = c.restrictions[0] || { x: 0, y: 1, z: 0 }; 
-                    const len = 300; 
-                    const rStart = { x: pos.x - railVec.x * len, y: pos.y - railVec.y * len, z: pos.z - railVec.z * len };
-                    const rEnd = { x: pos.x + railVec.x * len, y: pos.y + railVec.y * len, z: pos.z + railVec.z * len };
-                    const p1 = project(applyCamera(rStart));
-                    const p2 = project(applyCamera(rEnd));
-                    items.push({
-                        type: 'line',
-                        id: `${c.id}-rail`,
-                        z: camOrigin.z - 20, 
-                        props: { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, stroke: '#10b981', strokeWidth: 2, strokeDasharray: '8 8', opacity: opacity }
-                    });
-                     items.push({
-                        type: 'rect',
-                        id: `${c.id}-slider`,
-                        z: camOrigin.z - 5,
-                        props: { x: p.x - 12, y: p.y - 8, width: 24, height: 16, fill: 'none', stroke: '#10b981', strokeWidth: 3, rx: 4, opacity: opacity }
-                    });
-                } else {
-                    items.push({
-                        type: 'rect',
-                        id: `${c.id}-anchor`,
-                        z: camOrigin.z - 5,
-                        props: { x: p.x - 10, y: p.y - 10, width: 20, height: 20, fill: '#10b981', stroke: '#065f46', strokeWidth: 2, rx: 4, opacity: fillOpacity }
-                    });
-                }
-            }
-        });
-    }
-
     if (reactionForces) {
         reactionForces.forEach((f, idx) => {
             const pos = getPointOnBone(f.boneId, f.position);
@@ -587,7 +536,7 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, co
         return a.z - b.z;
     });
 
-  }, [posture, twists, externalForces, reactionForces, constraints, planes, camera, selectedBone, targetPos, targetReferenceBone]);
+  }, [posture, twists, externalForces, reactionForces, planes, camera, selectedBone, targetPos, targetReferenceBone]);
 
   const handlePointerDown = (e: React.PointerEvent) => {
     e.currentTarget.setPointerCapture(e.pointerId);
