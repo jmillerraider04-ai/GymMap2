@@ -485,65 +485,71 @@ const BioModelPage: React.FC = () => {
   // start + dir*len, the constraint reduces to a fixed value of dir·N in world
   // space. We do a small number of Gauss-Seidel projections when multiple
   // constraints are present (exact for one constraint, approximate for many).
+  // Pure validity guard: applies the proposed bone direction (and its mirror,
+  // if symmetry is on) to a hypothetical posture, recomputes the entire
+  // kinematic chain, and checks EVERY active constraint on EVERY bone — not
+  // just the moved bone. If any constraint would be violated at the proposal
+  // OR anywhere along the slerp arc from current to proposed, the motion is
+  // rejected and the bone stays put. No projection, no sliding, no IK.
   const projectDirOntoConstraints = (
       boneId: string,
       proposedLocalDir: Vector3,
       basePosture: Posture,
       baseTwists: Record<string, number>
   ): Vector3 => {
-      const cons = (constraints[boneId] || []).filter(c => c.active);
-      if (cons.length === 0) return proposedLocalDir;
-      const kin = calculateKinematics(basePosture, baseTwists);
-      const startPos = kin.boneStartPoints[boneId];
-      const parentFrame = kin.jointFrames[boneId];
-      if (!startPos || !parentFrame) return proposedLocalDir;
-      const L = BONE_LENGTHS[boneId] || 0;
-      if (L <= 0) return proposedLocalDir;
+      // Collect all active constraints across all bones.
+      const allCons: { boneId: string; c: PlanarConstraint }[] = [];
+      (Object.entries(constraints) as [string, PlanarConstraint[]][]).forEach(([bid, list]) => {
+          for (const c of list) if (c.active) allCons.push({ boneId: bid, c });
+      });
+      if (allCons.length === 0) return proposedLocalDir;
 
       const currentLocalDir = basePosture[boneId];
-      const currentWorldDir = currentLocalDir ? normalize(localToWorld(parentFrame, currentLocalDir)) : null;
-      const proposedWorldDir = normalize(localToWorld(parentFrame, proposedLocalDir));
-      let worldDir = proposedWorldDir;
+      if (!currentLocalDir) return proposedLocalDir;
 
-      const projectOne = (N: Vector3, C: Vector3) => {
-          const dTarget = dotProduct(sub(C, startPos), N) / L;
-          if (Math.abs(dTarget) >= 1) {
-              // Plane out of reach; clamp direction toward the plane side.
-              const sign = dTarget >= 0 ? 1 : -1;
-              worldDir = mul(N, sign);
-              return;
-          }
-          const axial = dotProduct(worldDir, N);
-          if (Math.abs(axial - dTarget) < 1e-5) return;
-          let lateral = sub(worldDir, mul(N, axial));
-          let latMag = magnitude(lateral);
-          if (latMag < 1e-5) {
-              let arbitrary: Vector3 = { x: 1, y: 0, z: 0 };
-              if (Math.abs(dotProduct(arbitrary, N)) > 0.9) arbitrary = { x: 0, y: 1, z: 0 };
-              lateral = sub(arbitrary, mul(N, dotProduct(arbitrary, N)));
-              latMag = magnitude(lateral);
-              if (latMag < 1e-5) return;
-          }
-          const latUnit = mul(lateral, 1 / latMag);
-          const latScale = Math.sqrt(Math.max(0, 1 - dTarget * dTarget));
-          worldDir = normalize(add(mul(N, dTarget), mul(latUnit, latScale)));
+      const buildPosture = (dir: Vector3): Posture => {
+          let p: Posture = { ...basePosture, [boneId]: dir };
+          if (symmetryMode) p = mirrorPosture(p, boneId);
+          return p;
       };
 
-      const iters = cons.length === 1 ? 1 : 8;
-      for (let i = 0; i < iters; i++) {
-          for (const c of cons) projectOne(normalize(c.normal), c.center);
-      }
-      // Reject 180° flips: if the projection landed further from the current
-      // direction than the proposal was, the projection crossed to the opposite
-      // hemisphere — hard-stop the limb at its current direction instead.
-      if (currentWorldDir && currentLocalDir) {
-          const currentToProjected = dotProduct(worldDir, currentWorldDir);
-          const currentToProposed = dotProduct(proposedWorldDir, currentWorldDir);
-          if (currentToProjected < currentToProposed - 0.01) {
-              return currentLocalDir;
+      const violates = (samplePosture: Posture): boolean => {
+          const kin = calculateKinematics(samplePosture, baseTwists);
+          for (const { boneId: bid, c } of allCons) {
+              const tip = kin.boneEndPoints[bid];
+              if (!tip) continue;
+              const L = BONE_LENGTHS[bid] || 0;
+              const TOL = Math.max(0.5, L * 0.02);
+              const N = normalize(c.normal);
+              if (Math.abs(dotProduct(sub(tip, c.center), N)) > TOL) return true;
           }
+          return false;
+      };
+
+      // Slerp between current and proposed local directions and sample the
+      // arc. Local-frame slerp is fine here because at every sample we rebuild
+      // the full posture and recompute world-space kinematics for the check.
+      const a = currentLocalDir;
+      const b = proposedLocalDir;
+      const dotAB = Math.max(-1, Math.min(1, dotProduct(a, b)));
+      const theta = Math.acos(dotAB);
+      const N_SAMPLES = 24;
+      if (theta < 1e-5) {
+          return violates(buildPosture(b)) ? a : b;
       }
-      return worldToLocal(parentFrame, worldDir);
+      const sinT = Math.sin(theta);
+      for (let i = 1; i <= N_SAMPLES; i++) {
+          const s = i / N_SAMPLES;
+          const wa = Math.sin((1 - s) * theta) / sinT;
+          const wb = Math.sin(s * theta) / sinT;
+          const d = normalize({
+              x: wa * a.x + wb * b.x,
+              y: wa * a.y + wb * b.y,
+              z: wa * a.z + wb * b.z
+          });
+          if (violates(buildPosture(d))) return a;
+      }
+      return b;
   };
 
   const addConstraint = (boneId: string) => {
@@ -685,13 +691,369 @@ const BioModelPage: React.FC = () => {
       return { posture: nextP, twists: nextT };
   };
 
+  // ---------- Constraint accommodation solver (v2) ----------
+  //
+  // Goal: given a tentative posture in which some bones are locked to a user
+  // input, find the smallest perturbation of the free bones that satisfies
+  // every active constraint (every constrained bone tip lies on its plane).
+  //
+  // Strategy:
+  //  1. Each free bone is a unit direction vector; we parameterise its
+  //     perturbation in the 2-D tangent plane to the unit sphere at its
+  //     current direction. This kills the wasted radial DOF that the previous
+  //     solver had and avoids normalisation drift.
+  //  2. Cost = sum of squared signed distances from each constrained tip to
+  //     its plane.
+  //  3. Numerical gradient via central differences in tangent coordinates.
+  //  4. Step direction: -gradient. Step size: chosen by Armijo backtracking
+  //     line search, which guarantees the cost STRICTLY decreases each
+  //     iteration. If no acceptable step exists, we declare an impasse and
+  //     return null.
+  //  5. Because each accepted step is a small descent from the previous
+  //     solved pose, the solver cannot leap to a far basin of attraction.
+  //     This is what enforces "minimum local accommodation" and prevents
+  //     the snapping behaviour we saw before.
+
+  const SOLVER_TOL_SCALE = 0.02;
+  const SOLVER_MIN_TOL = 0.5;
+
+  const collectActiveConstraints = (): { boneId: string; c: PlanarConstraint }[] => {
+      const out: { boneId: string; c: PlanarConstraint }[] = [];
+      (Object.entries(constraints) as [string, PlanarConstraint[]][]).forEach(([bid, list]) => {
+          for (const c of list) if (c.active) out.push({ boneId: bid, c });
+      });
+      return out;
+  };
+
+  const computeConstraintCost = (
+      p: Posture,
+      t: Record<string, number>,
+      cons: { boneId: string; c: PlanarConstraint }[]
+  ): { cost: number; maxAbs: number } => {
+      const kin = calculateKinematics(p, t);
+      let cost = 0;
+      let maxAbs = 0;
+      for (const { boneId: bid, c } of cons) {
+          const tip = kin.boneEndPoints[bid];
+          if (!tip) continue;
+          const N = normalize(c.normal);
+          const sd = dotProduct(sub(tip, c.center), N);
+          cost += sd * sd;
+          if (Math.abs(sd) > maxAbs) maxAbs = Math.abs(sd);
+      }
+      return { cost, maxAbs };
+  };
+
+  // Build an orthonormal tangent basis (e1, e2) at unit vector d.
+  const tangentBasis = (d: Vector3): { e1: Vector3; e2: Vector3 } => {
+      const ref: Vector3 = Math.abs(d.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+      const refDot = dotProduct(d, ref);
+      const e1 = normalize({
+          x: ref.x - refDot * d.x,
+          y: ref.y - refDot * d.y,
+          z: ref.z - refDot * d.z
+      });
+      // e2 = d × e1
+      const e2 = normalize({
+          x: d.y * e1.z - d.z * e1.y,
+          y: d.z * e1.x - d.x * e1.z,
+          z: d.x * e1.y - d.y * e1.x
+      });
+      return { e1, e2 };
+  };
+
+  // Apply small tangent-space coordinates (t1, t2) to direction d, then
+  // renormalise back onto the unit sphere. For small (t1, t2), this is
+  // equivalent to a rotation through angle sqrt(t1^2 + t2^2) in the plane
+  // spanned by (e1, e2).
+  const applyTangentDelta = (d: Vector3, e1: Vector3, e2: Vector3, t1: number, t2: number): Vector3 => {
+      return normalize({
+          x: d.x + t1 * e1.x + t2 * e2.x,
+          y: d.y + t1 * e1.y + t2 * e2.y,
+          z: d.z + t1 * e1.z + t2 * e2.z
+      });
+  };
+
+  // Axis-locked direction: unit vector with one Cartesian component fixed at
+  // `c` and the remaining two coordinates parameterised by a single angle θ
+  // sweeping the circle of radius r = √(1−c²) in the perpendicular plane.
+  const axisLockedDir = (axis: 'x' | 'y' | 'z', c: number, theta: number): Vector3 => {
+      const r = Math.sqrt(Math.max(0, 1 - c * c));
+      const co = Math.cos(theta);
+      const si = Math.sin(theta);
+      if (axis === 'x') return { x: c, y: r * co, z: r * si };
+      if (axis === 'y') return { x: r * co, y: c, z: r * si };
+      return { x: r * co, y: r * si, z: c };
+  };
+
+  // Recover θ on the axis-locked circle from a current direction by reading
+  // the two free Cartesian components. Used so the solver starts each
+  // micro-step at the bone's current angular position rather than snapping.
+  const initialThetaForAxis = (axis: 'x' | 'y' | 'z', d: Vector3): number => {
+      if (axis === 'x') return Math.atan2(d.z, d.y);
+      if (axis === 'y') return Math.atan2(d.z, d.x);
+      return Math.atan2(d.y, d.x);
+  };
+
+  type AxisLock = { boneId: string; axis: 'x' | 'y' | 'z'; value: number };
+
+  // Hinge bones (forearm/tibia/foot) live on a 1-DOF arc in the parent's local
+  // y-z plane — anatomically the elbow/knee/ankle bend in a single plane fixed
+  // by the parent bone, so x in parent-local frame is always 0. We parameterise
+  // by a single angle θ:
+  //   forearm/tibia: dir = (0, cos θ, sin θ)   — θ=0 is straight along parent
+  //   foot:          dir = (0, sin θ, -cos θ)  — θ=0 is pointing back (-z)
+  // The solver MUST treat hinge bones this way; if they were 2-DOF, gradient
+  // descent could push them off the hinge plane and the slider's flexion angle
+  // (acos(y) / asin(y)) would no longer match the actual geometry.
+  const isHingeBone = (b: string) => /Forearm|Tibia|Foot/.test(b);
+  const hingeAngleToDir = (b: string, theta: number): Vector3 => {
+      if (b.includes('Foot')) return { x: 0, y: Math.sin(theta), z: -Math.cos(theta) };
+      return { x: 0, y: Math.cos(theta), z: Math.sin(theta) };
+  };
+  const dirToHingeAngle = (b: string, d: Vector3): number => {
+      if (b.includes('Foot')) return Math.atan2(d.y, -d.z);
+      return Math.atan2(d.z, d.y);
+  };
+
+  const solveConstraintsAccommodating = (
+      tentative: Posture,
+      lockedBoneIds: Set<string>,
+      t: Record<string, number>,
+      axisLocks: AxisLock[] = []
+  ): Posture | null => {
+      const cons = collectActiveConstraints();
+      if (cons.length === 0) return tentative;
+
+      // Per-bone tolerance, take the loosest as global early-exit threshold.
+      let globalTol = SOLVER_MIN_TOL;
+      for (const { boneId: bid } of cons) {
+          const L = BONE_LENGTHS[bid] || 0;
+          globalTol = Math.max(globalTol, Math.max(SOLVER_MIN_TOL, L * SOLVER_TOL_SCALE));
+      }
+
+      let posture: Posture = { ...tentative };
+
+      // Defensive snap: every hinge bone (whether locked or free) MUST live on
+      // its 1-DOF arc. If a previous solver run or state restore left it with
+      // a nonzero parent-local x, project it back onto the hinge plane now so
+      // the rest of the solver and the renderer agree about its angle.
+      for (const bid of Object.keys(posture)) {
+          if (!isHingeBone(bid)) continue;
+          const d = posture[bid];
+          if (!d) continue;
+          posture[bid] = hingeAngleToDir(bid, dirToHingeAngle(bid, d));
+      }
+
+      // Axis-lock setup: for each axis-locked bone, snap its direction onto
+      // the locked circle (preserving its current angular position) before
+      // any optimization runs. Axis-locked bones live in a separate state
+      // alongside the 2-DOF free bones.
+      type AxisState = { axis: 'x' | 'y' | 'z'; value: number; theta: number };
+      const axisLockMap: Record<string, AxisState> = {};
+      for (const lock of axisLocks) {
+          if (Math.abs(lock.value) > 1) return null; // unreachable
+          const cur = posture[lock.boneId];
+          if (!cur) continue;
+          const theta = initialThetaForAxis(lock.axis, cur);
+          posture[lock.boneId] = axisLockedDir(lock.axis, lock.value, theta);
+          axisLockMap[lock.boneId] = { axis: lock.axis, value: lock.value, theta };
+      }
+
+      let { cost, maxAbs } = computeConstraintCost(posture, t, cons);
+      if (maxAbs <= globalTol) return posture;
+
+      // Free bones: only true unit-direction limb bones (clavicles are offset
+      // vectors and must not be normalised; spine is the fixed root).
+      // 2-DOF free bones live on the full unit sphere; 1-DOF axis-locked
+      // bones live on a locked circle of the sphere; 1-DOF hinge bones live
+      // on their parent's local y-z plane.
+      const isUnitDirBone = (b: string) => /Humerus|Forearm|Femur|Tibia|Foot/.test(b);
+      const freeBones2D = Object.keys(posture).filter(
+          b => isUnitDirBone(b)
+            && !isHingeBone(b)
+            && !lockedBoneIds.has(b)
+            && !(b in axisLockMap)
+            && posture[b] !== undefined
+      );
+      const freeBones1D = Object.keys(axisLockMap).filter(b => isUnitDirBone(b));
+      const freeBonesHinge = Object.keys(posture).filter(
+          b => isHingeBone(b)
+            && !lockedBoneIds.has(b)
+            && posture[b] !== undefined
+      );
+      // Initial theta for each free hinge bone (read once; updated as steps accept).
+      const hingeThetaMap: Record<string, number> = {};
+      for (const bid of freeBonesHinge) hingeThetaMap[bid] = dirToHingeAngle(bid, posture[bid]);
+
+      if (freeBones2D.length === 0 && freeBones1D.length === 0 && freeBonesHinge.length === 0) return null;
+
+      const MAX_ITERS = 40;
+      const EPS = 0.0015;          // tangent-coord finite-difference step
+      const EPS_THETA = 0.0015;    // axis-locked angular finite-difference
+      const ARMIJO_C1 = 0.1;       // sufficient-descent constant
+      const ARMIJO_BACKTRACK = 0.5;
+      const MAX_LINESEARCH = 24;
+
+      for (let iter = 0; iter < MAX_ITERS; iter++) {
+          // Refresh tangent basis at every iteration — it depends on the
+          // current direction, which changed last step.
+          const tangents: Record<string, { e1: Vector3; e2: Vector3 }> = {};
+          for (const bid of freeBones2D) tangents[bid] = tangentBasis(posture[bid]);
+
+          // Central-difference gradient: 2-DOF bones get a (g1, g2) tangent
+          // gradient; 1-DOF axis-locked bones AND 1-DOF hinge bones get a
+          // single dθ gradient.
+          const grads2D: Record<string, [number, number]> = {};
+          const grads1D: Record<string, number> = {};
+          const gradsHinge: Record<string, number> = {};
+          let gradSqNorm = 0;
+
+          for (const bid of freeBones2D) {
+              const { e1, e2 } = tangents[bid];
+              const orig = posture[bid];
+
+              const p1Plus  = { ...posture, [bid]: applyTangentDelta(orig, e1, e2,  EPS, 0) };
+              const p1Minus = { ...posture, [bid]: applyTangentDelta(orig, e1, e2, -EPS, 0) };
+              const p2Plus  = { ...posture, [bid]: applyTangentDelta(orig, e1, e2, 0,  EPS) };
+              const p2Minus = { ...posture, [bid]: applyTangentDelta(orig, e1, e2, 0, -EPS) };
+
+              const g1 = (computeConstraintCost(p1Plus,  t, cons).cost
+                        - computeConstraintCost(p1Minus, t, cons).cost) / (2 * EPS);
+              const g2 = (computeConstraintCost(p2Plus,  t, cons).cost
+                        - computeConstraintCost(p2Minus, t, cons).cost) / (2 * EPS);
+
+              grads2D[bid] = [g1, g2];
+              gradSqNorm += g1 * g1 + g2 * g2;
+          }
+
+          for (const bid of freeBones1D) {
+              const st = axisLockMap[bid];
+              const dPlus  = axisLockedDir(st.axis, st.value, st.theta + EPS_THETA);
+              const dMinus = axisLockedDir(st.axis, st.value, st.theta - EPS_THETA);
+              const pPlus  = { ...posture, [bid]: dPlus };
+              const pMinus = { ...posture, [bid]: dMinus };
+              const g = (computeConstraintCost(pPlus,  t, cons).cost
+                       - computeConstraintCost(pMinus, t, cons).cost) / (2 * EPS_THETA);
+              grads1D[bid] = g;
+              gradSqNorm += g * g;
+          }
+
+          for (const bid of freeBonesHinge) {
+              const theta = hingeThetaMap[bid];
+              const dPlus  = hingeAngleToDir(bid, theta + EPS_THETA);
+              const dMinus = hingeAngleToDir(bid, theta - EPS_THETA);
+              const pPlus  = { ...posture, [bid]: dPlus };
+              const pMinus = { ...posture, [bid]: dMinus };
+              const g = (computeConstraintCost(pPlus,  t, cons).cost
+                       - computeConstraintCost(pMinus, t, cons).cost) / (2 * EPS_THETA);
+              gradsHinge[bid] = g;
+              gradSqNorm += g * g;
+          }
+
+          if (gradSqNorm < 1e-10) {
+              // Stationary point — either solved (handled above) or stuck.
+              break;
+          }
+
+          // Armijo backtracking line search. Initial alpha is chosen so the
+          // first trial moves each free bone by ~0.05 rad worth of tangent
+          // step at most; backtracking halves until the sufficient-descent
+          // condition holds.
+          const gradNorm = Math.sqrt(gradSqNorm);
+          let alpha = 0.05 / gradNorm;
+          let accepted = false;
+
+          for (let trial = 0; trial < MAX_LINESEARCH; trial++) {
+              const candidate: Posture = { ...posture };
+              const trialThetas: Record<string, number> = {};
+              const trialHingeThetas: Record<string, number> = {};
+              for (const bid of freeBones2D) {
+                  const { e1, e2 } = tangents[bid];
+                  const [g1, g2] = grads2D[bid];
+                  candidate[bid] = applyTangentDelta(
+                      posture[bid], e1, e2,
+                      -alpha * g1, -alpha * g2
+                  );
+              }
+              for (const bid of freeBones1D) {
+                  const st = axisLockMap[bid];
+                  const newTheta = st.theta - alpha * grads1D[bid];
+                  candidate[bid] = axisLockedDir(st.axis, st.value, newTheta);
+                  trialThetas[bid] = newTheta;
+              }
+              for (const bid of freeBonesHinge) {
+                  const newTheta = hingeThetaMap[bid] - alpha * gradsHinge[bid];
+                  candidate[bid] = hingeAngleToDir(bid, newTheta);
+                  trialHingeThetas[bid] = newTheta;
+              }
+              const candCost = computeConstraintCost(candidate, t, cons);
+              // Sufficient-descent condition: cost decreases by at least
+              // c1 * alpha * ||grad||^2.
+              if (candCost.cost <= cost - ARMIJO_C1 * alpha * gradSqNorm) {
+                  posture = candidate;
+                  cost = candCost.cost;
+                  maxAbs = candCost.maxAbs;
+                  // Commit accepted thetas back so the next iteration's
+                  // gradient/perturbation uses the new angles.
+                  for (const bid of freeBones1D) {
+                      axisLockMap[bid].theta = trialThetas[bid];
+                  }
+                  for (const bid of freeBonesHinge) {
+                      hingeThetaMap[bid] = trialHingeThetas[bid];
+                  }
+                  accepted = true;
+                  break;
+              }
+              alpha *= ARMIJO_BACKTRACK;
+              if (alpha < 1e-9) break;
+          }
+
+          if (!accepted) {
+              // No descent step satisfies Armijo — impasse.
+              return null;
+          }
+          if (maxAbs <= globalTol) return posture;
+      }
+
+      return maxAbs <= globalTol ? posture : null;
+  };
+
+  // Standalone posture-level constraint check: returns true if any active
+  // constraint on any bone would be violated by the given posture+twists.
+  const postureViolatesConstraints = (p: Posture, t: Record<string, number>): boolean => {
+      const allCons: { boneId: string; c: PlanarConstraint }[] = [];
+      (Object.entries(constraints) as [string, PlanarConstraint[]][]).forEach(([bid, list]) => {
+          for (const c of list) if (c.active) allCons.push({ boneId: bid, c });
+      });
+      if (allCons.length === 0) return false;
+      const kin = calculateKinematics(p, t);
+      for (const { boneId: bid, c } of allCons) {
+          const tip = kin.boneEndPoints[bid];
+          if (!tip) continue;
+          const L = BONE_LENGTHS[bid] || 0;
+          const TOL = Math.max(0.5, L * 0.02);
+          const N = normalize(c.normal);
+          if (Math.abs(dotProduct(sub(tip, c.center), N)) > TOL) return true;
+      }
+      return false;
+  };
+
   const resolveKinematics = (boneId: string, proposedVector: Vector3, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } => {
       const projected = projectDirOntoConstraints(boneId, proposedVector, currentPosture, currentTwists);
       return resolveFullPosture({ ...currentPosture, [boneId]: projected }, currentTwists, boneId);
   };
 
   const resolveRotation = (boneId: string, proposedTwist: number, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } => {
-      return resolveFullPosture(currentPosture, { ...currentTwists, [boneId]: proposedTwist }, boneId);
+      const proposedTwists = { ...currentTwists, [boneId]: proposedTwist };
+      // Twist changes can move downstream tips through constraint planes; if
+      // the proposed twist would put any constrained bone tip off its plane,
+      // hard-stop the rotation.
+      const tentative = resolveFullPosture(currentPosture, proposedTwists, boneId);
+      if (postureViolatesConstraints(tentative.posture, tentative.twists)) {
+          return resolveFullPosture(currentPosture, currentTwists, boneId);
+      }
+      return tentative;
   };
 
   const handleScapulaChange = (axis: 'elevation' | 'protraction', val: number) => {
@@ -709,18 +1071,54 @@ const BioModelPage: React.FC = () => {
       if (!selectedBone || isNaN(val)) return;
       if (isPlaying) setIsPlaying(false);
 
-      const currentVec = posture[selectedBone];
-      if (!currentVec) return;
+      const rawStart = posture[selectedBone];
+      if (!rawStart) return;
 
-      const currentAngle = getCurrentHingeAngle(selectedBone);
-      const deltaRad = (val - currentAngle) * Math.PI / 180;
-      const { x, y, z } = currentVec;
-      const cosD = Math.cos(deltaRad);
-      const sinD = Math.sin(deltaRad);
-      const finalVec = normalize({ x, y: y * cosD - z * sinD, z: y * sinD + z * cosD });
+      // Defensive: project current direction onto the hinge plane (x=0 in
+      // parent-local) before reading the start angle. If a previous solver
+      // run left this bone with a nonzero x, the angle reading and the
+      // local-frame rotation would both be wrong.
+      const startVec = hingeAngleToDir(selectedBone, dirToHingeAngle(selectedBone, rawStart));
 
-      const resolved = resolveKinematics(selectedBone, finalVec, posture, twists);
-      updatePostureState(resolved.posture, resolved.twists);
+      const startAngle = dirToHingeAngle(selectedBone, startVec) * 180 / Math.PI;
+      const totalDelta = val - startAngle;
+      if (Math.abs(totalDelta) < 0.01) return;
+
+      // Lock set: only the moved hinge bone's parent-local direction is fixed
+      // by the input. (Mirror partner is also locked when symmetry is on so
+      // the solver doesn't fight the mirroring step.)
+      const lockedSet = new Set<string>([selectedBone]);
+      if (symmetryMode) {
+          const opp = getOppositeBone(selectedBone);
+          if (opp) lockedSet.add(opp);
+      }
+
+      // Roughly 1° per micro-step, capped to keep responsiveness, with a
+      // floor so very tiny drags still get a few steps for path continuity.
+      const STEPS = Math.max(4, Math.min(30, Math.ceil(Math.abs(totalDelta))));
+      let workingPosture: Posture = { ...posture };
+      let lastAcceptedPosture: Posture = workingPosture;
+
+      for (let i = 1; i <= STEPS; i++) {
+          const stepAngle = startAngle + (totalDelta * i) / STEPS;
+          // Build the bone's local direction directly from the absolute
+          // hinge angle on its 1-DOF arc — guaranteed to lie in the parent's
+          // y-z plane regardless of any prior state.
+          const stepDir = hingeAngleToDir(selectedBone, stepAngle * Math.PI / 180);
+
+          let tentative: Posture = { ...workingPosture, [selectedBone]: stepDir };
+          if (symmetryMode) tentative = mirrorPosture(tentative, selectedBone);
+
+          const solved = solveConstraintsAccommodating(tentative, lockedSet, twists);
+          if (solved === null) {
+              // Cannot accommodate this step — hard-stop at the last good pose.
+              break;
+          }
+          workingPosture = solved;
+          lastAcceptedPosture = solved;
+      }
+
+      updatePostureState(lastAcceptedPosture, twists);
   };
 
   const handlePointChange = (axis: keyof Vector3, newValue: number) => {
@@ -752,16 +1150,81 @@ const BioModelPage: React.FC = () => {
             const childVecLocal = worldToLocal(transported, solution.vec2);
             const nextPosture = { ...posture, [rootBone]: solution.vec1, [childBone]: childVecLocal };
             const resolved = resolveFullPosture(nextPosture, twists, rootBone);
-            updatePostureState(resolved.posture, resolved.twists);
+            // Hard-stop the IK solve if the new posture violates any constraint.
+            if (!postureViolatesConstraints(resolved.posture, resolved.twists)) {
+                updatePostureState(resolved.posture, resolved.twists);
+            }
         }
         return;
     }
 
+    // Shoulder / hip dot input via constraint-accommodating solver. The dot
+    // itself stays free in 3D (we only write the user's chosen axis to
+    // targetPos — other axes are NOT rewritten by the solver, so the dot
+    // keeps the user's intended position). The moved bone's direction has
+    // ONE Cartesian component locked (mapped from the dot via bone length,
+    // clamped to ±1 if the dot is pulled past the reachable sphere); the
+    // remaining DOF on its locked circle, plus all other free bones, are
+    // available to satisfy active constraints.
     const newTarget = { ...targetPos, [axis]: internalVal };
-    const finalVector = normalize(newTarget);
     setTargetPos(newTarget);
-    const resolved = resolveKinematics(selectedBone, finalVector, posture, twists);
-    updatePostureState(resolved.posture, resolved.twists);
+
+    const boneLen = BONE_LENGTHS[selectedBone] || 100;
+    const startDir = posture[selectedBone];
+    if (!startDir) return;
+
+    const startComp = startDir[axis];
+    const targetComp = Math.max(-1, Math.min(1, internalVal / boneLen));
+    const totalDelta = targetComp - startComp;
+    if (Math.abs(totalDelta) < 1e-4) return;
+
+    const lockedSet = new Set<string>();
+    if (symmetryMode) {
+        const opp = getOppositeBone(selectedBone);
+        if (opp) lockedSet.add(opp);
+    }
+
+    // ~0.04 (~2.3°) per micro-step, capped for responsiveness with a floor
+    // for path continuity on tiny drags.
+    const STEPS = Math.max(4, Math.min(40, Math.ceil(Math.abs(totalDelta) / 0.04)));
+    let workingPosture: Posture = { ...posture };
+    let lastAcceptedPosture: Posture = workingPosture;
+
+    for (let i = 1; i <= STEPS; i++) {
+        const stepComp = startComp + (totalDelta * i) / STEPS;
+
+        // Snap working bone onto the locked circle preserving its current
+        // angular position so each step starts continuously.
+        const cur = workingPosture[selectedBone];
+        const theta = initialThetaForAxis(axis, cur);
+        const stepDir = axisLockedDir(axis, stepComp, theta);
+        let tentative: Posture = { ...workingPosture, [selectedBone]: stepDir };
+        if (symmetryMode) tentative = mirrorPosture(tentative, selectedBone);
+
+        const solved = solveConstraintsAccommodating(
+            tentative, lockedSet, twists,
+            [{ boneId: selectedBone, axis, value: stepComp }]
+        );
+        if (solved === null) {
+            // Cannot accommodate this step — hard-stop at the last good pose.
+            break;
+        }
+        workingPosture = solved;
+        lastAcceptedPosture = solved;
+    }
+
+    // Sync the dot to the actual solved bone tip on all three axes, so the
+    // dot the user sees and the slider values both track the bone's real
+    // position (not a separate "intent" that may diverge under axis-lock).
+    const finalDir = lastAcceptedPosture[selectedBone];
+    if (finalDir) {
+        setTargetPos({
+            x: finalDir.x * boneLen,
+            y: finalDir.y * boneLen,
+            z: finalDir.z * boneLen
+        });
+    }
+    updatePostureState(lastAcceptedPosture, twists);
   };
 
   const handleRotationChange = (val: number) => {
