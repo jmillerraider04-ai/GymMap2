@@ -179,11 +179,7 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
       return { x: right, y: u, z: back };
   };
 
-  // Swing-twist frame with above-horizontal correction.
-  // Base: shortest-arc from {0,1,0} to current direction (smooth).
-  // Correction: for above-horizontal, coronal-plane motion, smoothly
-  // twists 0°→180° from horizon to overhead so the forearm gradually
-  // rotates instead of snapping at the singularity.
+  // Checkpoint-based frame for humerus/femur — must match BioModelPage.tsx
   const createAbsoluteFrame = (boneDir: Vector3, flipAxes: boolean): Frame => {
       const u = normalize(boneDir);
       const ref = { x: 0, y: 1, z: 0 };
@@ -198,9 +194,9 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
       if (u.y < 0) {
           const hSq = u.x * u.x + u.z * u.z;
           if (hSq > 1e-8) {
-              const theta = Math.acos(Math.max(-1, Math.min(1, u.y)));
-              const excess = theta - Math.PI / 2;
-              const ramp = (1 - Math.cos(2 * excess)) / 2;
+              const excess = Math.acos(Math.max(-1, Math.min(1, u.y))) - Math.PI / 2;
+              const t = Math.min(excess / (Math.PI / 2), 1);
+              const ramp = t * t * (3 - 2 * t);
               const signedCoronal = u.x * Math.abs(u.x) / hSq;
               frame = twistFrame(frame, ramp * 180 * signedCoronal);
           }

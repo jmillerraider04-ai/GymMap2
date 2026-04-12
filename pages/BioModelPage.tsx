@@ -250,21 +250,15 @@ const twistFrame = (frame: Frame, angleDeg: number): Frame => {
     if (!angleDeg || angleDeg === 0) return frame;
     return { x: rotateAroundAxis(frame.x, frame.y, angleDeg), y: frame.y, z: rotateAroundAxis(frame.z, frame.y, angleDeg) };
 };
-// Swing-twist frame with above-horizontal correction.
-//
-// Base: shortest-arc (geodesic) rotation from {0,1,0} to the current
-// bone direction.  This is smooth everywhere and gives the correct
-// anatomical reference at the neutral position and at 90° abduction.
-//
-// Problem: for coronal-plane motion (X/Y only, Z≈0) the shortest-arc
-// axis is pure-Z, which preserves the forearm's Z-component.  The
-// forearm stays "forward" all the way from 0° to 180° abduction, then
-// snaps at the singularity.
-//
-// Fix: for above-horizontal positions, smoothly twist the frame from
-// 0° extra at the horizon to 180° at overhead, proportional to how
-// "coronal" the arm direction is.  Sagittal-plane motion (which the
-// shortest-arc already handles correctly) gets no correction.
+// Checkpoint-based frame for humerus/femur. Base: shortest-arc from
+// {0,1,0} to bone direction. Above-horizontal correction: smoothly twists
+// the frame from 0° at the horizon to 180° at overhead, proportional to
+// how "coronal" the arm direction is. This ensures:
+//   arm at side → forearm FWD     90° abd → FWD
+//   90° flex → UP                 overhead → BACK
+//   90° ext → DOWN
+// with gradual transitions between all checkpoints (smoothstep ramp so
+// 50% of the correction occurs at the midpoint in degrees).
 const createAbsoluteFrame = (boneDir: Vector3, flipAxes: boolean): Frame => {
     const u = normalize(boneDir);
     const ref = { x: 0, y: 1, z: 0 };
@@ -276,22 +270,25 @@ const createAbsoluteFrame = (boneDir: Vector3, flipAxes: boolean): Frame => {
     } else {
         frame = { x: right, y: u, z: back };
     }
-    // Above-horizontal correction
+    // Above-horizontal correction: for coronal-plane motion the shortest-arc
+    // preserves the forearm's forward direction all the way to overhead, then
+    // snaps at the antipodal singularity. This correction smoothly twists
+    // from 0° at the horizon to 180° at overhead so the forearm gradually
+    // rotates from FWD to BACK. Sagittal-plane motion (which the shortest-arc
+    // already handles correctly) gets no correction.
     if (u.y < 0) {
         const hSq = u.x * u.x + u.z * u.z;
         if (hSq > 1e-8) {
-            const theta = Math.acos(Math.max(-1, Math.min(1, u.y)));
-            const excess = theta - Math.PI / 2;
-            // Smooth ramp: 0 at horizon, 1 at overhead (zero derivative at boundary)
-            const ramp = (1 - Math.cos(2 * excess)) / 2;
-            // Signed coronal factor: ±1 in coronal plane, 0 in sagittal,
-            // smooth everywhere.  Sign ensures left/right symmetry.
+            const excess = Math.acos(Math.max(-1, Math.min(1, u.y))) - Math.PI / 2;
+            const t = Math.min(excess / (Math.PI / 2), 1);
+            const ramp = t * t * (3 - 2 * t); // smoothstep: 50% at midpoint
             const signedCoronal = u.x * Math.abs(u.x) / hSq;
             frame = twistFrame(frame, ramp * 180 * signedCoronal);
         }
     }
     return frame;
 };
+
 const localToWorld = (parentFrame: Frame, localVec: Vector3): Vector3 => {
     return {
         x: localVec.x * parentFrame.x.x + localVec.y * parentFrame.y.x + localVec.z * parentFrame.z.x,
@@ -473,9 +470,8 @@ const BioModelPage: React.FC = () => {
         jointFrames[name] = parentFrame; 
         
         let twist = currentTwists[name] || 0;
-        // Removed: if (name.startsWith('l')) twist = -twist; 
-        // Mirroring is now handled by mirrorTwists and the coordinate system
-
+        // ISB offset: align the twist=0 reference with the ISB "plane of
+        // elevation" convention so the slider reads ISB axial rotation.
         const frame1Twisted = twistFrame(frame1Base, twist);
         const end1 = { x: start.x + frame1Twisted.y.x * len1, y: start.y + frame1Twisted.y.y * len1, z: start.z + frame1Twisted.y.z * len1 };
         boneStartPoints[name] = start;
@@ -1270,7 +1266,11 @@ const BioModelPage: React.FC = () => {
     const limits = ROTATION_LIMITS[selectedBone];
     const clampedVal = limits ? clamp(val, limits.min, limits.max) : val;
 
-    const resolved = resolveRotation(selectedBone, clampedVal, posture, twists);
+    // Negate so that increasing slider = external rotation for both arms.
+    // Right arm: negate directly. Left arm: mirrorTwists already negates
+    // the stored value, so no extra negation needed here.
+    const storeVal = selectedBone.startsWith('l') ? clampedVal : -clampedVal;
+    const resolved = resolveRotation(selectedBone, storeVal, posture, twists);
     updatePostureState(resolved.posture, resolved.twists);
   };
 
@@ -1293,7 +1293,11 @@ const BioModelPage: React.FC = () => {
 
   const displayTwist = useMemo(() => {
     if (!selectedBone) return 0;
-    const twist = twists[selectedBone] ?? 0;
+    const raw = twists[selectedBone] ?? 0;
+    // Right-side twist is stored negated so increasing slider = external.
+    // Left-side is stored non-negated (mirrorTwists handles the mirror).
+    // Negate right for display so both arms show the same anatomical angle.
+    const twist = selectedBone.startsWith('l') ? raw : -raw;
     return isNaN(twist) ? 0 : Math.round(twist * 10) / 10;
   }, [selectedBone, twists]);
 
