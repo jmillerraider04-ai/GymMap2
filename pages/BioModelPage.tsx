@@ -250,6 +250,48 @@ const twistFrame = (frame: Frame, angleDeg: number): Frame => {
     if (!angleDeg || angleDeg === 0) return frame;
     return { x: rotateAroundAxis(frame.x, frame.y, angleDeg), y: frame.y, z: rotateAroundAxis(frame.z, frame.y, angleDeg) };
 };
+// Swing-twist frame with above-horizontal correction.
+//
+// Base: shortest-arc (geodesic) rotation from {0,1,0} to the current
+// bone direction.  This is smooth everywhere and gives the correct
+// anatomical reference at the neutral position and at 90° abduction.
+//
+// Problem: for coronal-plane motion (X/Y only, Z≈0) the shortest-arc
+// axis is pure-Z, which preserves the forearm's Z-component.  The
+// forearm stays "forward" all the way from 0° to 180° abduction, then
+// snaps at the singularity.
+//
+// Fix: for above-horizontal positions, smoothly twist the frame from
+// 0° extra at the horizon to 180° at overhead, proportional to how
+// "coronal" the arm direction is.  Sagittal-plane motion (which the
+// shortest-arc already handles correctly) gets no correction.
+const createAbsoluteFrame = (boneDir: Vector3, flipAxes: boolean): Frame => {
+    const u = normalize(boneDir);
+    const ref = { x: 0, y: 1, z: 0 };
+    const right = applyShortestArcRotation(ref, u, { x: 1, y: 0, z: 0 });
+    const back = applyShortestArcRotation(ref, u, { x: 0, y: 0, z: 1 });
+    let frame: Frame;
+    if (flipAxes) {
+        frame = { x: mul(right, -1), y: u, z: mul(back, -1) };
+    } else {
+        frame = { x: right, y: u, z: back };
+    }
+    // Above-horizontal correction
+    if (u.y < 0) {
+        const hSq = u.x * u.x + u.z * u.z;
+        if (hSq > 1e-8) {
+            const theta = Math.acos(Math.max(-1, Math.min(1, u.y)));
+            const excess = theta - Math.PI / 2;
+            // Smooth ramp: 0 at horizon, 1 at overhead (zero derivative at boundary)
+            const ramp = (1 - Math.cos(2 * excess)) / 2;
+            // Signed coronal factor: ±1 in coronal plane, 0 in sagittal,
+            // smooth everywhere.  Sign ensures left/right symmetry.
+            const signedCoronal = u.x * Math.abs(u.x) / hSq;
+            frame = twistFrame(frame, ramp * 180 * signedCoronal);
+        }
+    }
+    return frame;
+};
 const localToWorld = (parentFrame: Frame, localVec: Vector3): Vector3 => {
     return {
         x: localVec.x * parentFrame.x.x + localVec.y * parentFrame.y.x + localVec.z * parentFrame.z.x,
@@ -421,15 +463,9 @@ const BioModelPage: React.FC = () => {
         const dir1World = localToWorld(parentFrame, dir1Local);
 
         if (name.includes('Humerus')) {
-            const u = normalize(dir1World);
-            const neutralUp = { x: 0, y: 1, z: 0 };
-            const neutralRight = { x: 1, y: 0, z: 0 };
-            const neutralBack = { x: 0, y: 0, z: 1 };
-            const right = applyShortestArcRotation(neutralUp, u, neutralRight);
-            const back = applyShortestArcRotation(neutralUp, u, neutralBack);
-            frame1Base = { x: mul(right, -1), y: u, z: mul(back, -1) };
+            frame1Base = createAbsoluteFrame(dir1World, true);
         } else if (name.includes('Femur')) {
-            frame1Base = createRootFrame(dir1World);
+            frame1Base = createAbsoluteFrame(dir1World, false);
         } else {
             frame1Base = transportFrame(parentFrame, dir1World);
         }

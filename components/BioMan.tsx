@@ -179,32 +179,33 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
       return { x: right, y: u, z: back };
   };
 
-  // HEMISPHERE-SAFE FRAME GENERATOR FOR ARMS (Visualizer Copy)
-  const getArmBaseFrame = (isRight: boolean, currentDir: Vector3): Frame => {
-      // Copying Leg Logic: Reference Down {0,1,0}
-      const rootDir = {x: 0, y: 1, z: 0}; 
-      const rootHinge = {x: 1, y: 0, z: 0}; 
-      const rootNormal = {x: 0, y: 0, z: 1}; 
-      
-      const u = normalize(currentDir);
-      const newRight = applyShortestArcRotation(rootDir, u, rootHinge);
-      const newBack = applyShortestArcRotation(rootDir, u, rootNormal);
-      
-      // Rotate 180 around u (Y axis) to flip neutral state to 0 degrees instead of 180
-      return { x: mul(newRight, -1), y: u, z: mul(newBack, -1) };
-  };
-
-  // HEMISPHERE-SAFE FRAME GENERATOR FOR LEGS (Visualizer Copy)
-  const getLegBaseFrame = (currentDir: Vector3): Frame => {
-      const rootDir = {x: 0, y: 1, z: 0}; 
-      const rootHinge = {x: 1, y: 0, z: 0}; 
-      const rootNormal = {x: 0, y: 0, z: 1}; 
-      
-      const u = normalize(currentDir);
-      const newRight = applyShortestArcRotation(rootDir, u, rootHinge);
-      const newBack = applyShortestArcRotation(rootDir, u, rootNormal);
-      
-      return { x: newRight, y: u, z: newBack };
+  // Swing-twist frame with above-horizontal correction.
+  // Base: shortest-arc from {0,1,0} to current direction (smooth).
+  // Correction: for above-horizontal, coronal-plane motion, smoothly
+  // twists 0°→180° from horizon to overhead so the forearm gradually
+  // rotates instead of snapping at the singularity.
+  const createAbsoluteFrame = (boneDir: Vector3, flipAxes: boolean): Frame => {
+      const u = normalize(boneDir);
+      const ref = { x: 0, y: 1, z: 0 };
+      const right = applyShortestArcRotation(ref, u, { x: 1, y: 0, z: 0 });
+      const back = applyShortestArcRotation(ref, u, { x: 0, y: 0, z: 1 });
+      let frame: Frame;
+      if (flipAxes) {
+          frame = { x: mul(right, -1), y: u, z: mul(back, -1) };
+      } else {
+          frame = { x: right, y: u, z: back };
+      }
+      if (u.y < 0) {
+          const hSq = u.x * u.x + u.z * u.z;
+          if (hSq > 1e-8) {
+              const theta = Math.acos(Math.max(-1, Math.min(1, u.y)));
+              const excess = theta - Math.PI / 2;
+              const ramp = (1 - Math.cos(2 * excess)) / 2;
+              const signedCoronal = u.x * Math.abs(u.x) / hSq;
+              frame = twistFrame(frame, ramp * 180 * signedCoronal);
+          }
+      }
+      return frame;
   };
 
   const twistFrame = (frame: Frame, angleDeg: number): Frame => {
@@ -363,10 +364,9 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
         let frame1Base: Frame;
         
         if (name.includes('Humerus')) {
-            const isRight = name.startsWith('r');
-            frame1Base = getArmBaseFrame(isRight, dir1World);
+            frame1Base = createAbsoluteFrame(dir1World, true);
         } else if (name.includes('Femur')) {
-            frame1Base = getLegBaseFrame(dir1World);
+            frame1Base = createAbsoluteFrame(dir1World, false);
         } else {
             frame1Base = transportFrame(parentFrame, dir1World);
         }
