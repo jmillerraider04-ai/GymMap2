@@ -92,13 +92,15 @@ interface Measurement {
 interface ForceConfig {
     id: string;
     name: string;
-    boneId: string; 
+    boneId: string;
     position: number;
     x: number;
     y: number;
     z: number;
     magnitude: number;
     mirrorId?: string;
+    // Point-tracking (cable) mode: force always aims from attachment toward pulley
+    pulley?: Vector3;
 }
 
 interface BoneConstraint {
@@ -690,8 +692,31 @@ const BioModelPage: React.FC = () => {
       return out;
   }, [constraints, posture, twists]);
 
+  // Compute the force direction for a given force config. For point-tracking
+  // (cable) forces, the direction aims from the bone attachment toward the
+  // pulley point, recomputed every frame as the bone moves.
+  const getForceDirection = (f: ForceConfig): Vector3 => {
+      if (f.pulley) {
+          const kin = calculateKinematics(posture, twists);
+          const seg = kin.boneStartPoints[f.boneId];
+          const end = kin.boneEndPoints[f.boneId];
+          if (seg && end) {
+              const attachPt = {
+                  x: seg.x + (end.x - seg.x) * f.position,
+                  y: seg.y + (end.y - seg.y) * f.position,
+                  z: seg.z + (end.z - seg.z) * f.position
+              };
+              const towardPulley = sub(f.pulley, attachPt);
+              const len = magnitude(towardPulley);
+              if (len > 0.001) return { x: towardPulley.x / len, y: towardPulley.y / len, z: towardPulley.z / len };
+          }
+      }
+      return { x: f.x, y: f.y, z: f.z };
+  };
+
   const getVisualVector = (f: ForceConfig): Vector3 => {
-      return { x: f.x * f.magnitude, y: f.y * f.magnitude, z: f.z * f.magnitude };
+      const dir = getForceDirection(f);
+      return { x: dir.x * f.magnitude, y: dir.y * f.magnitude, z: dir.z * f.magnitude };
   };
 
   const measurements = useMemo<Measurement[]>(() => {
@@ -1454,8 +1479,10 @@ const BioModelPage: React.FC = () => {
   }, [selectedBone, twists]);
 
   // --- FORCE & CONSTRAINT MANAGEMENT ---
-  const addNewForce = () => {
-    const newForce: ForceConfig = { id: Date.now().toString(), name: 'New Force', boneId: selectedBone || 'rForearm', position: 1, x: 0, y: -1, z: 0, magnitude: 10 };
+  const addNewForce = (type: 'fixed' | 'cable' = 'fixed') => {
+    const boneId = selectedBone || 'rForearm';
+    const pulley = type === 'cable' ? { x: 0, y: -100, z: 0 } : undefined;
+    const newForce: ForceConfig = { id: Date.now().toString(), name: type === 'cable' ? 'Cable' : 'Force', boneId, position: 1, x: 0, y: -1, z: 0, magnitude: 10, pulley };
     setForces([...forces, newForce]);
     setEditingForceId(newForce.id);
     setActiveTab('kinetics');
@@ -1725,7 +1752,8 @@ const BioModelPage: React.FC = () => {
                 boneId: f.boneId,
                 position: f.position,
                 vector: getVisualVector(f),
-                color: '#ef4444'
+                color: f.pulley ? '#06b6d4' : '#ef4444',
+                pulley: f.pulley
             }))}
             reactionForces={reactionForces}
             planes={visualConstraintPlanes}
@@ -2021,7 +2049,26 @@ const BioModelPage: React.FC = () => {
                                         <div><label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Acting On</label><div className="relative"><select value={f.boneId} onChange={(e) => updateForce(f.id, 'boneId', e.target.value)} className="w-full appearance-none bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-medium text-gray-700 outline-none focus:border-orange-500">{Object.entries(BONE_NAMES).map(([id, name]) => (<option key={id} value={id}>{name}</option>))}</select><ChevronLeft className="w-4 h-4 text-gray-400 absolute right-4 top-1/2 -translate-y-1/2 -rotate-90 pointer-events-none" /></div></div>
                                         <div><label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Application Point</label><div className="flex items-center gap-4"><span className="text-xs font-bold text-gray-500">Proximal</span><input type="range" min="0" max="1" step="0.05" value={isNaN(f.position) ? 0.5 : f.position} onChange={(e) => updateForce(f.id, 'position', parseFloat(e.target.value))} className="flex-1 bio-range text-orange-500"/><span className="text-xs font-bold text-gray-500">Distal</span></div></div>
                                         <div className="bg-orange-50 border border-orange-100 p-4 rounded-xl"><div className="flex justify-between mb-2"><label className="font-bold text-orange-800 text-xs">Force (N)</label><span className="font-mono text-orange-600 font-bold text-xs">{f.magnitude} N</span></div><input type="range" min="1" max="30" step="1" value={isNaN(f.magnitude) ? 10 : f.magnitude} onChange={(e) => updateForce(f.id, 'magnitude', parseFloat(e.target.value))} className="bio-range w-full text-orange-500"/></div>
-                                        <div><label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-4 block">Direction Vector</label><div className="space-y-4">{['x', 'y', 'z'].map(axis => (<div key={axis}><div className="flex justify-between mb-1"><label className="font-bold text-gray-500 text-xs uppercase">{axis} Axis</label><span className="font-mono text-gray-400 text-xs">{f[axis as keyof ForceConfig]}</span></div><input type="range" min="-1" max="1" step="0.1" value={isNaN(f[axis as keyof ForceConfig] as number) ? 0 : f[axis as keyof ForceConfig] as number} onChange={(e) => updateForce(f.id, axis as keyof ForceConfig, parseFloat(e.target.value))} className="bio-range w-full text-gray-900"/></div>))}</div></div>
+                                        {f.pulley ? (
+                                            <div className="bg-cyan-50 border border-cyan-100 p-4 rounded-xl space-y-3">
+                                                <div className="flex justify-between items-center">
+                                                    <label className="font-bold text-cyan-800 text-xs">Pulley Point</label>
+                                                    <span className="font-mono text-[9px] text-cyan-600 bg-cyan-100 px-1.5 py-0.5 rounded">
+                                                        [{(() => { const d = getForceDirection(f); return `${d.x.toFixed(2)}, ${d.y.toFixed(2)}, ${d.z.toFixed(2)}`; })()}]
+                                                    </span>
+                                                </div>
+                                                {(['x', 'y', 'z'] as const).map(axis => (
+                                                    <div key={axis} className="flex items-center gap-2">
+                                                        <span className="text-[10px] font-bold text-cyan-600 w-2 uppercase">{axis}</span>
+                                                        <input type="number" step="10" value={Math.round(f.pulley![axis])}
+                                                            onChange={(e) => updateForce(f.id, 'pulley', { ...f.pulley!, [axis]: parseFloat(e.target.value) || 0 })}
+                                                            className="flex-1 bg-white border border-cyan-200 rounded-lg px-2 py-1.5 text-xs font-mono text-gray-700 text-center" />
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div><label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-4 block">Direction Vector</label><div className="space-y-4">{['x', 'y', 'z'].map(axis => (<div key={axis}><div className="flex justify-between mb-1"><label className="font-bold text-gray-500 text-xs uppercase">{axis} Axis</label><span className="font-mono text-gray-400 text-xs">{f[axis as keyof ForceConfig]}</span></div><input type="range" min="-1" max="1" step="0.1" value={isNaN(f[axis as keyof ForceConfig] as number) ? 0 : f[axis as keyof ForceConfig] as number} onChange={(e) => updateForce(f.id, axis as keyof ForceConfig, parseFloat(e.target.value))} className="bio-range w-full text-gray-900"/></div>))}</div></div>
+                                        )}
                                         <div className="pt-8"><button onClick={() => deleteForce(f.id)} className="w-full py-3 bg-red-50 text-red-500 font-bold rounded-xl hover:bg-red-100 transition-colors flex items-center justify-center gap-2"><Trash2 className="w-4 h-4" /> Delete Force</button></div>
                                      </>
                                  );
@@ -2030,8 +2077,8 @@ const BioModelPage: React.FC = () => {
                       </div>
                   ) : (
                       <div className="flex-1 flex flex-col">
-                          {forces.length === 0 ? (<div className="flex-1 flex flex-col items-center justify-center text-center opacity-50 border-2 border-dashed border-gray-100 rounded-3xl mb-4"><Zap className="w-8 h-8 text-orange-300 mb-2" /><p className="text-gray-400 font-bold text-sm">No external forces.</p></div>) : (<div className="flex-1 overflow-y-auto space-y-3 pr-2 mb-4">{forces.map(f => (<button key={f.id} onClick={() => setEditingForceId(f.id)} className="w-full flex items-center justify-between p-4 rounded-2xl border transition-all duration-200 group text-left bg-white border-gray-100 shadow-sm hover:shadow-md hover:border-orange-200"><div className="flex items-center gap-3"><div className="p-2 rounded-xl bg-orange-500 text-white"><Zap className="w-5 h-5" /></div><div><span className="block font-bold text-sm text-gray-900">{f.name}</span><span className="text-[10px] font-bold uppercase tracking-wide text-gray-400">{BONE_NAMES[f.boneId]}</span></div></div><div className="text-right"><span className="block font-bold text-gray-900 text-xs">{f.magnitude} N</span><ChevronRight className="w-5 h-5 text-gray-300 group-hover:text-orange-400 ml-auto" /></div></button>))}</div>)}
-                          <div className="space-y-3"><button onClick={addNewForce} className="w-full py-4 bg-orange-500 text-white font-bold rounded-2xl shadow-lg shadow-orange-200 hover:bg-orange-600 transition-all flex items-center justify-center gap-2"><Plus className="w-5 h-5" /> Add Force</button></div>
+                          {forces.length === 0 ? (<div className="flex-1 flex flex-col items-center justify-center text-center opacity-50 border-2 border-dashed border-gray-100 rounded-3xl mb-4"><Zap className="w-8 h-8 text-orange-300 mb-2" /><p className="text-gray-400 font-bold text-sm">No external forces.</p></div>) : (<div className="flex-1 overflow-y-auto space-y-3 pr-2 mb-4">{forces.map(f => (<button key={f.id} onClick={() => setEditingForceId(f.id)} className={`w-full flex items-center justify-between p-4 rounded-2xl border transition-all duration-200 group text-left bg-white shadow-sm hover:shadow-md ${f.pulley ? 'border-cyan-100 hover:border-cyan-200' : 'border-gray-100 hover:border-orange-200'}`}><div className="flex items-center gap-3"><div className={`p-2 rounded-xl text-white ${f.pulley ? 'bg-cyan-500' : 'bg-orange-500'}`}><Zap className="w-5 h-5" /></div><div><span className="block font-bold text-sm text-gray-900">{f.name}</span><span className="text-[10px] font-bold uppercase tracking-wide text-gray-400">{BONE_NAMES[f.boneId]}</span></div></div><div className="text-right"><span className="block font-bold text-gray-900 text-xs">{f.pulley ? 'Cable' : `${f.magnitude} N`}</span><ChevronRight className={`w-5 h-5 ml-auto ${f.pulley ? 'text-gray-300 group-hover:text-cyan-400' : 'text-gray-300 group-hover:text-orange-400'}`} /></div></button>))}</div>)}
+                          <div className="space-y-3"><div className="flex gap-2"><button onClick={() => addNewForce('fixed')} className="flex-1 py-4 bg-orange-500 text-white font-bold rounded-2xl shadow-lg shadow-orange-200 hover:bg-orange-600 transition-all flex items-center justify-center gap-2"><Plus className="w-5 h-5" /> Fixed</button><button onClick={() => addNewForce('cable')} className="flex-1 py-4 bg-cyan-500 text-white font-bold rounded-2xl shadow-lg shadow-cyan-200 hover:bg-cyan-600 transition-all flex items-center justify-center gap-2"><Plus className="w-5 h-5" /> Cable</button></div></div>
                       </div>
                   )}
               </div>

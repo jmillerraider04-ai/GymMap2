@@ -12,10 +12,11 @@ export type Posture = Record<string, Vector3>;
 
 export interface VisualForce {
   id: string;
-  boneId: string; 
+  boneId: string;
   position: number; // 0 (Start) to 1 (End) of the bone
   vector: Vector3;
   color?: string;
+  pulley?: Vector3; // If set, draw a pulley point and cable line
 }
 
 export interface VisualPlane {
@@ -423,7 +424,38 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
     if (externalForces) {
         externalForces.forEach((f, idx) => {
             const pos = getPointOnBone(f.boneId, f.position);
-            if (pos) drawArrow(f.id, pos, f.vector, f.color || '#ef4444', 10 + idx);
+            if (pos) {
+                drawArrow(f.id, pos, f.vector, f.color || '#ef4444', 10 + idx);
+                if (f.pulley) {
+                    // Draw cable line from attachment to pulley
+                    const camAttach = applyCamera(pos);
+                    const camPulley = applyCamera(f.pulley);
+                    const pA = project(camAttach);
+                    const pP = project(camPulley);
+                    items.push({
+                        type: 'line',
+                        id: `${f.id}-cable`,
+                        z: (camAttach.z + camPulley.z) / 2 - 1,
+                        props: {
+                            x1: pA.x, y1: pA.y, x2: pP.x, y2: pP.y,
+                            stroke: '#06b6d4', strokeWidth: 2,
+                            strokeDasharray: '6 3', opacity: 0.6,
+                            style: { pointerEvents: 'none' }
+                        }
+                    });
+                    // Draw pulley dot
+                    items.push({
+                        type: 'circle',
+                        id: `${f.id}-pulley`,
+                        z: camPulley.z + 1,
+                        props: {
+                            cx: pP.x, cy: pP.y, r: 6,
+                            fill: '#06b6d4', stroke: 'white', strokeWidth: 2,
+                            style: { pointerEvents: 'none' }
+                        }
+                    });
+                }
+            }
         });
     }
     
