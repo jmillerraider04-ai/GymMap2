@@ -283,7 +283,7 @@ const createAbsoluteFrame = (boneDir: Vector3, flipAxes: boolean): Frame => {
             const t = Math.min(excess / (Math.PI / 2), 1);
             const ramp = t * t * (3 - 2 * t); // smoothstep: 50% at midpoint
             const signedCoronal = u.x * Math.abs(u.x) / hSq;
-            frame = twistFrame(frame, ramp * 180 * signedCoronal);
+            frame = twistFrame(frame, ramp * -180 * signedCoronal);
         }
     }
     return frame;

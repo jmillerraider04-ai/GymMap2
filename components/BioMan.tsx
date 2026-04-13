@@ -198,7 +198,7 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
               const t = Math.min(excess / (Math.PI / 2), 1);
               const ramp = t * t * (3 - 2 * t);
               const signedCoronal = u.x * Math.abs(u.x) / hSq;
-              frame = twistFrame(frame, ramp * 180 * signedCoronal);
+              frame = twistFrame(frame, ramp * -180 * signedCoronal);
           }
       }
       return frame;
