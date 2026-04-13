@@ -853,9 +853,9 @@ const BioModelPage: React.FC = () => {
       lockedBoneIds: Set<string>,
       t: Record<string, number>,
       axisLocks: AxisLock[] = []
-  ): Posture | null => {
+  ): { posture: Posture; twists: Record<string, number> } | null => {
       const cons = collectActiveConstraints();
-      if (cons.length === 0) return tentative;
+      if (cons.length === 0) return { posture: tentative, twists: t };
 
       // Per-bone tolerance, take the loosest as global early-exit threshold.
       let globalTol = SOLVER_MIN_TOL;
@@ -892,8 +892,11 @@ const BioModelPage: React.FC = () => {
           axisLockMap[lock.boneId] = { axis: lock.axis, value: lock.value, theta };
       }
 
-      let { cost, maxAbs } = computeConstraintCost(posture, t, cons);
-      if (maxAbs <= globalTol) return posture;
+      // Working copy of twists — the solver can modify these for twist DOFs.
+      let solvedTwists: Record<string, number> = { ...t };
+
+      let { cost, maxAbs } = computeConstraintCost(posture, solvedTwists, cons);
+      if (maxAbs <= globalTol) return { posture, twists: solvedTwists };
 
       // Free bones: only true unit-direction limb bones (clavicles are offset
       // vectors and must not be normalised; spine is the fixed root).
@@ -918,7 +921,16 @@ const BioModelPage: React.FC = () => {
       const hingeThetaMap: Record<string, number> = {};
       for (const bid of freeBonesHinge) hingeThetaMap[bid] = dirToHingeAngle(bid, posture[bid]);
 
-      if (freeBones2D.length === 0 && freeBones1D.length === 0 && freeBonesHinge.length === 0) return null;
+      // Twist DOFs: humerus/femur bones whose twist can be adjusted by the
+      // solver. Each gets a single scalar DOF (the twist angle in degrees).
+      const isTwistBone = (b: string) => /Humerus|Femur/.test(b);
+      const freeBonesTwist = Object.keys(posture).filter(
+          b => isTwistBone(b) && !lockedBoneIds.has(b) && posture[b] !== undefined
+      );
+      const twistMap: Record<string, number> = {};
+      for (const bid of freeBonesTwist) twistMap[bid] = solvedTwists[bid] || 0;
+
+      if (freeBones2D.length === 0 && freeBones1D.length === 0 && freeBonesHinge.length === 0 && freeBonesTwist.length === 0) return null;
 
       const MAX_ITERS = 40;
       const EPS = 0.0015;          // tangent-coord finite-difference step
@@ -939,6 +951,7 @@ const BioModelPage: React.FC = () => {
           const grads2D: Record<string, [number, number]> = {};
           const grads1D: Record<string, number> = {};
           const gradsHinge: Record<string, number> = {};
+          const gradsTwist: Record<string, number> = {};
           let gradSqNorm = 0;
 
           for (const bid of freeBones2D) {
@@ -950,10 +963,10 @@ const BioModelPage: React.FC = () => {
               const p2Plus  = { ...posture, [bid]: applyTangentDelta(orig, e1, e2, 0,  EPS) };
               const p2Minus = { ...posture, [bid]: applyTangentDelta(orig, e1, e2, 0, -EPS) };
 
-              const g1 = (computeConstraintCost(p1Plus,  t, cons).cost
-                        - computeConstraintCost(p1Minus, t, cons).cost) / (2 * EPS);
-              const g2 = (computeConstraintCost(p2Plus,  t, cons).cost
-                        - computeConstraintCost(p2Minus, t, cons).cost) / (2 * EPS);
+              const g1 = (computeConstraintCost(p1Plus,  solvedTwists, cons).cost
+                        - computeConstraintCost(p1Minus, solvedTwists, cons).cost) / (2 * EPS);
+              const g2 = (computeConstraintCost(p2Plus,  solvedTwists, cons).cost
+                        - computeConstraintCost(p2Minus, solvedTwists, cons).cost) / (2 * EPS);
 
               grads2D[bid] = [g1, g2];
               gradSqNorm += g1 * g1 + g2 * g2;
@@ -965,8 +978,8 @@ const BioModelPage: React.FC = () => {
               const dMinus = axisLockedDir(st.axis, st.value, st.theta - EPS_THETA);
               const pPlus  = { ...posture, [bid]: dPlus };
               const pMinus = { ...posture, [bid]: dMinus };
-              const g = (computeConstraintCost(pPlus,  t, cons).cost
-                       - computeConstraintCost(pMinus, t, cons).cost) / (2 * EPS_THETA);
+              const g = (computeConstraintCost(pPlus,  solvedTwists, cons).cost
+                       - computeConstraintCost(pMinus, solvedTwists, cons).cost) / (2 * EPS_THETA);
               grads1D[bid] = g;
               gradSqNorm += g * g;
           }
@@ -977,9 +990,23 @@ const BioModelPage: React.FC = () => {
               const dMinus = hingeAngleToDir(bid, theta - EPS_THETA);
               const pPlus  = { ...posture, [bid]: dPlus };
               const pMinus = { ...posture, [bid]: dMinus };
-              const g = (computeConstraintCost(pPlus,  t, cons).cost
-                       - computeConstraintCost(pMinus, t, cons).cost) / (2 * EPS_THETA);
+              const g = (computeConstraintCost(pPlus,  solvedTwists, cons).cost
+                       - computeConstraintCost(pMinus, solvedTwists, cons).cost) / (2 * EPS_THETA);
               gradsHinge[bid] = g;
+              gradSqNorm += g * g;
+          }
+
+          // Twist gradient: use same angular perturbation as other DOFs (in
+          // radians) so gradients are on consistent scales. Convert to degrees
+          // for the actual twist value since twists are stored in degrees.
+          const EPS_TWIST_DEG = EPS_THETA * 180 / Math.PI;
+          for (const bid of freeBonesTwist) {
+              const tw = twistMap[bid]; // degrees
+              const tPlus  = { ...solvedTwists, [bid]: tw + EPS_TWIST_DEG };
+              const tMinus = { ...solvedTwists, [bid]: tw - EPS_TWIST_DEG };
+              const g = (computeConstraintCost(posture, tPlus,  cons).cost
+                       - computeConstraintCost(posture, tMinus, cons).cost) / (2 * EPS_THETA);
+              gradsTwist[bid] = g; // cost/radian, same scale as other gradients
               gradSqNorm += g * g;
           }
 
@@ -1000,6 +1027,7 @@ const BioModelPage: React.FC = () => {
               const candidate: Posture = { ...posture };
               const trialThetas: Record<string, number> = {};
               const trialHingeThetas: Record<string, number> = {};
+              const trialTwists: Record<string, number> = {};
               for (const bid of freeBones2D) {
                   const { e1, e2 } = tangents[bid];
                   const [g1, g2] = grads2D[bid];
@@ -1019,20 +1047,31 @@ const BioModelPage: React.FC = () => {
                   candidate[bid] = hingeAngleToDir(bid, newTheta);
                   trialHingeThetas[bid] = newTheta;
               }
-              const candCost = computeConstraintCost(candidate, t, cons);
+              const candidateTwists = { ...solvedTwists };
+              for (const bid of freeBonesTwist) {
+                  // alpha * gradient is in radians; convert to degrees for storage
+                  const stepDeg = (alpha * gradsTwist[bid]) * 180 / Math.PI;
+                  const newTw = twistMap[bid] - stepDeg;
+                  candidateTwists[bid] = newTw;
+                  trialTwists[bid] = newTw;
+              }
+              const candCost = computeConstraintCost(candidate, candidateTwists, cons);
               // Sufficient-descent condition: cost decreases by at least
               // c1 * alpha * ||grad||^2.
               if (candCost.cost <= cost - ARMIJO_C1 * alpha * gradSqNorm) {
                   posture = candidate;
+                  solvedTwists = candidateTwists;
                   cost = candCost.cost;
                   maxAbs = candCost.maxAbs;
-                  // Commit accepted thetas back so the next iteration's
-                  // gradient/perturbation uses the new angles.
+                  // Commit accepted values back so the next iteration uses them.
                   for (const bid of freeBones1D) {
                       axisLockMap[bid].theta = trialThetas[bid];
                   }
                   for (const bid of freeBonesHinge) {
                       hingeThetaMap[bid] = trialHingeThetas[bid];
+                  }
+                  for (const bid of freeBonesTwist) {
+                      twistMap[bid] = trialTwists[bid];
                   }
                   accepted = true;
                   break;
@@ -1045,10 +1084,10 @@ const BioModelPage: React.FC = () => {
               // No descent step satisfies Armijo — impasse.
               return null;
           }
-          if (maxAbs <= globalTol) return posture;
+          if (maxAbs <= globalTol) return { posture, twists: solvedTwists };
       }
 
-      return maxAbs <= globalTol ? posture : null;
+      return maxAbs <= globalTol ? { posture, twists: solvedTwists } : null;
   };
 
   // Standalone posture-level constraint check: returns true if any active
@@ -1129,28 +1168,26 @@ const BioModelPage: React.FC = () => {
       // floor so very tiny drags still get a few steps for path continuity.
       const STEPS = Math.max(4, Math.min(30, Math.ceil(Math.abs(totalDelta))));
       let workingPosture: Posture = { ...posture };
+      let workingTwists: Record<string, number> = { ...twists };
       let lastAcceptedPosture: Posture = workingPosture;
+      let lastAcceptedTwists: Record<string, number> = workingTwists;
 
       for (let i = 1; i <= STEPS; i++) {
           const stepAngle = startAngle + (totalDelta * i) / STEPS;
-          // Build the bone's local direction directly from the absolute
-          // hinge angle on its 1-DOF arc — guaranteed to lie in the parent's
-          // y-z plane regardless of any prior state.
           const stepDir = hingeAngleToDir(selectedBone, stepAngle * Math.PI / 180);
 
           let tentative: Posture = { ...workingPosture, [selectedBone]: stepDir };
           if (symmetryMode) tentative = mirrorPosture(tentative, selectedBone);
 
-          const solved = solveConstraintsAccommodating(tentative, lockedSet, twists);
-          if (solved === null) {
-              // Cannot accommodate this step — hard-stop at the last good pose.
-              break;
-          }
-          workingPosture = solved;
-          lastAcceptedPosture = solved;
+          const solved = solveConstraintsAccommodating(tentative, lockedSet, workingTwists);
+          if (solved === null) break;
+          workingPosture = solved.posture;
+          workingTwists = solved.twists;
+          lastAcceptedPosture = solved.posture;
+          lastAcceptedTwists = solved.twists;
       }
 
-      updatePostureState(lastAcceptedPosture, twists);
+      updatePostureState(lastAcceptedPosture, lastAcceptedTwists);
   };
 
   const handlePointChange = (axis: keyof Vector3, newValue: number) => {
@@ -1220,13 +1257,13 @@ const BioModelPage: React.FC = () => {
     // for path continuity on tiny drags.
     const STEPS = Math.max(4, Math.min(40, Math.ceil(Math.abs(totalDelta) / 0.04)));
     let workingPosture: Posture = { ...posture };
+    let workingTwists: Record<string, number> = { ...twists };
     let lastAcceptedPosture: Posture = workingPosture;
+    let lastAcceptedTwists: Record<string, number> = workingTwists;
 
     for (let i = 1; i <= STEPS; i++) {
         const stepComp = startComp + (totalDelta * i) / STEPS;
 
-        // Snap working bone onto the locked circle preserving its current
-        // angular position so each step starts continuously.
         const cur = workingPosture[selectedBone];
         const theta = initialThetaForAxis(axis, cur);
         const stepDir = axisLockedDir(axis, stepComp, theta);
@@ -1234,20 +1271,16 @@ const BioModelPage: React.FC = () => {
         if (symmetryMode) tentative = mirrorPosture(tentative, selectedBone);
 
         const solved = solveConstraintsAccommodating(
-            tentative, lockedSet, twists,
+            tentative, lockedSet, workingTwists,
             [{ boneId: selectedBone, axis, value: stepComp }]
         );
-        if (solved === null) {
-            // Cannot accommodate this step — hard-stop at the last good pose.
-            break;
-        }
-        workingPosture = solved;
-        lastAcceptedPosture = solved;
+        if (solved === null) break;
+        workingPosture = solved.posture;
+        workingTwists = solved.twists;
+        lastAcceptedPosture = solved.posture;
+        lastAcceptedTwists = solved.twists;
     }
 
-    // Sync the dot to the actual solved bone tip on all three axes, so the
-    // dot the user sees and the slider values both track the bone's real
-    // position (not a separate "intent" that may diverge under axis-lock).
     const finalDir = lastAcceptedPosture[selectedBone];
     if (finalDir) {
         setTargetPos({
@@ -1256,7 +1289,7 @@ const BioModelPage: React.FC = () => {
             z: finalDir.z * boneLen
         });
     }
-    updatePostureState(lastAcceptedPosture, twists);
+    updatePostureState(lastAcceptedPosture, lastAcceptedTwists);
   };
 
   const handleRotationChange = (val: number) => {
