@@ -101,11 +101,17 @@ interface ForceConfig {
     mirrorId?: string;
 }
 
-interface PlanarConstraint {
+interface BoneConstraint {
     id: string;
     active: boolean;
-    normal: Vector3; // direction the limb CANNOT move in — tip is locked to the plane perpendicular to this
-    center: Vector3; // world-space point the plane passes through (distal tip at time of creation)
+    type: 'planar' | 'arc';
+    // Planar fields
+    normal: Vector3;   // direction the limb CANNOT move in — tip locked to plane perpendicular to this
+    center: Vector3;   // world-space point the plane passes through (distal tip at time of creation)
+    // Arc fields (used when type === 'arc')
+    pivot?: Vector3;   // world-space center of rotation (machine axle)
+    axis?: Vector3;    // rotation axis direction
+    radius?: number;   // distance from pivot to tip (computed at creation)
 }
 
 interface Frame {
@@ -420,7 +426,7 @@ const BioModelPage: React.FC = () => {
   const [calculatedTorques, setCalculatedTorques] = useState<Record<string, Vector3>>({});
   const [neuralCosts, setNeuralCosts] = useState<Record<string, number>>({});
 
-  const [constraints, setConstraints] = useState<Record<string, PlanarConstraint[]>>({});
+  const [constraints, setConstraints] = useState<Record<string, BoneConstraint[]>>({});
 
   const calculateKinematics = (currentPosture: Posture, currentTwists: Record<string, number>) => {
     const locations: Record<string, Vector3> = {};
@@ -530,8 +536,8 @@ const BioModelPage: React.FC = () => {
       baseTwists: Record<string, number>
   ): Vector3 => {
       // Collect all active constraints across all bones.
-      const allCons: { boneId: string; c: PlanarConstraint }[] = [];
-      (Object.entries(constraints) as [string, PlanarConstraint[]][]).forEach(([bid, list]) => {
+      const allCons: { boneId: string; c: BoneConstraint }[] = [];
+      (Object.entries(constraints) as [string, BoneConstraint[]][]).forEach(([bid, list]) => {
           for (const c of list) if (c.active) allCons.push({ boneId: bid, c });
       });
       if (allCons.length === 0) return proposedLocalDir;
@@ -552,8 +558,17 @@ const BioModelPage: React.FC = () => {
               if (!tip) continue;
               const L = BONE_LENGTHS[bid] || 0;
               const TOL = Math.max(0.5, L * 0.02);
-              const N = normalize(c.normal);
-              if (Math.abs(dotProduct(sub(tip, c.center), N)) > TOL) return true;
+              if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
+                  const toTip = sub(tip, c.pivot);
+                  const axisN = normalize(c.axis);
+                  const axialDist = dotProduct(toTip, axisN);
+                  const inPlane = sub(toTip, mul(axisN, axialDist));
+                  const radialErr = magnitude(inPlane) - c.radius;
+                  if (Math.abs(radialErr) > TOL || Math.abs(axialDist) > TOL) return true;
+              } else {
+                  const N = normalize(c.normal);
+                  if (Math.abs(dotProduct(sub(tip, c.center), N)) > TOL) return true;
+              }
           }
           return false;
       };
@@ -584,20 +599,49 @@ const BioModelPage: React.FC = () => {
       return b;
   };
 
-  const addConstraint = (boneId: string) => {
+  // Project pivot along axis so the arc plane passes through the tip.
+  // Returns the adjusted pivot and the in-plane radius.
+  const snapArcToTip = (rawPivot: Vector3, axis: Vector3, tip: Vector3): { pivot: Vector3; radius: number } => {
+      const axisN = normalize(axis);
+      const offset = dotProduct(sub(tip, rawPivot), axisN);
+      const pivot = add(rawPivot, mul(axisN, offset));
+      const radius = magnitude(sub(tip, pivot));
+      return { pivot, radius };
+  };
+
+  const addConstraint = (boneId: string, type: 'planar' | 'arc' = 'planar') => {
       const kin = calculateKinematics(posture, twists);
       const tip = kin.boneEndPoints[boneId];
       if (!tip) return;
-      const newC: PlanarConstraint = {
-          id: Date.now().toString() + Math.random().toString(36).slice(2, 6),
-          active: true,
-          normal: { x: 0, y: 0, z: 1 }, // default: frontal plane
-          center: tip
-      };
-      setConstraints(prev => ({ ...prev, [boneId]: [...(prev[boneId] || []), newC] }));
+      if (type === 'arc') {
+          const start = kin.boneStartPoints[boneId];
+          const rawPivot = start || { x: 0, y: 0, z: 0 };
+          const axis = { x: 0, y: 0, z: 1 };
+          const { pivot, radius } = snapArcToTip(rawPivot, axis, tip);
+          const newC: BoneConstraint = {
+              id: Date.now().toString() + Math.random().toString(36).slice(2, 6),
+              active: true,
+              type: 'arc',
+              normal: axis,
+              center: tip,
+              pivot,
+              axis,
+              radius
+          };
+          setConstraints(prev => ({ ...prev, [boneId]: [...(prev[boneId] || []), newC] }));
+      } else {
+          const newC: BoneConstraint = {
+              id: Date.now().toString() + Math.random().toString(36).slice(2, 6),
+              active: true,
+              type: 'planar',
+              normal: { x: 0, y: 0, z: 1 },
+              center: tip
+          };
+          setConstraints(prev => ({ ...prev, [boneId]: [...(prev[boneId] || []), newC] }));
+      }
   };
 
-  const updateConstraint = (boneId: string, id: string, updates: Partial<PlanarConstraint>) => {
+  const updateConstraint = (boneId: string, id: string, updates: Partial<BoneConstraint>) => {
       setConstraints(prev => ({
           ...prev,
           [boneId]: (prev[boneId] || []).map(c => c.id === id ? { ...c, ...updates } : c)
@@ -614,21 +658,33 @@ const BioModelPage: React.FC = () => {
   const visualConstraintPlanes = useMemo<VisualPlane[]>(() => {
       const out: VisualPlane[] = [];
       const kin = calculateKinematics(posture, twists);
-      (Object.entries(constraints) as [string, PlanarConstraint[]][]).forEach(([boneId, list]) => {
+      (Object.entries(constraints) as [string, BoneConstraint[]][]).forEach(([boneId, list]) => {
           list.forEach(c => {
               if (!c.active) return;
-              // Center follows the current distal tip so the visible square
-              // always sits where the bone ends — not where it was when the
-              // constraint was first added.
-              const tip = kin.boneEndPoints[boneId] || c.center;
-              out.push({
-                  id: c.id,
-                  center: tip,
-                  normal: c.normal,
-                  size: 80,
-                  color: 'rgba(139, 92, 246, 0.2)',
-                  boneId
-              });
+              if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
+                  out.push({
+                      id: c.id,
+                      center: c.pivot,
+                      normal: c.axis,
+                      size: c.radius * 2,
+                      color: 'rgba(245, 158, 11, 0.2)',
+                      boneId,
+                      type: 'arc',
+                      pivot: c.pivot,
+                      axis: c.axis,
+                      radius: c.radius
+                  });
+              } else {
+                  const tip = kin.boneEndPoints[boneId] || c.center;
+                  out.push({
+                      id: c.id,
+                      center: tip,
+                      normal: c.normal,
+                      size: 80,
+                      color: 'rgba(139, 92, 246, 0.2)',
+                      boneId
+                  });
+              }
           });
       });
       return out;
@@ -749,9 +805,9 @@ const BioModelPage: React.FC = () => {
   const SOLVER_TOL_SCALE = 0.02;
   const SOLVER_MIN_TOL = 0.5;
 
-  const collectActiveConstraints = (): { boneId: string; c: PlanarConstraint }[] => {
-      const out: { boneId: string; c: PlanarConstraint }[] = [];
-      (Object.entries(constraints) as [string, PlanarConstraint[]][]).forEach(([bid, list]) => {
+  const collectActiveConstraints = (): { boneId: string; c: BoneConstraint }[] => {
+      const out: { boneId: string; c: BoneConstraint }[] = [];
+      (Object.entries(constraints) as [string, BoneConstraint[]][]).forEach(([bid, list]) => {
           for (const c of list) if (c.active) out.push({ boneId: bid, c });
       });
       return out;
@@ -760,7 +816,7 @@ const BioModelPage: React.FC = () => {
   const computeConstraintCost = (
       p: Posture,
       t: Record<string, number>,
-      cons: { boneId: string; c: PlanarConstraint }[]
+      cons: { boneId: string; c: BoneConstraint }[]
   ): { cost: number; maxAbs: number } => {
       const kin = calculateKinematics(p, t);
       let cost = 0;
@@ -768,10 +824,21 @@ const BioModelPage: React.FC = () => {
       for (const { boneId: bid, c } of cons) {
           const tip = kin.boneEndPoints[bid];
           if (!tip) continue;
-          const N = normalize(c.normal);
-          const sd = dotProduct(sub(tip, c.center), N);
-          cost += sd * sd;
-          if (Math.abs(sd) > maxAbs) maxAbs = Math.abs(sd);
+          if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
+              const toTip = sub(tip, c.pivot);
+              const axisN = normalize(c.axis);
+              const axialDist = dotProduct(toTip, axisN);
+              const inPlane = sub(toTip, mul(axisN, axialDist));
+              const radialDist = magnitude(inPlane);
+              const radialErr = radialDist - c.radius;
+              cost += radialErr * radialErr + axialDist * axialDist;
+              maxAbs = Math.max(maxAbs, Math.abs(radialErr), Math.abs(axialDist));
+          } else {
+              const N = normalize(c.normal);
+              const sd = dotProduct(sub(tip, c.center), N);
+              cost += sd * sd;
+              if (Math.abs(sd) > maxAbs) maxAbs = Math.abs(sd);
+          }
       }
       return { cost, maxAbs };
   };
@@ -1096,8 +1163,8 @@ const BioModelPage: React.FC = () => {
   // Standalone posture-level constraint check: returns true if any active
   // constraint on any bone would be violated by the given posture+twists.
   const postureViolatesConstraints = (p: Posture, t: Record<string, number>): boolean => {
-      const allCons: { boneId: string; c: PlanarConstraint }[] = [];
-      (Object.entries(constraints) as [string, PlanarConstraint[]][]).forEach(([bid, list]) => {
+      const allCons: { boneId: string; c: BoneConstraint }[] = [];
+      (Object.entries(constraints) as [string, BoneConstraint[]][]).forEach(([bid, list]) => {
           for (const c of list) if (c.active) allCons.push({ boneId: bid, c });
       });
       if (allCons.length === 0) return false;
@@ -1107,8 +1174,17 @@ const BioModelPage: React.FC = () => {
           if (!tip) continue;
           const L = BONE_LENGTHS[bid] || 0;
           const TOL = Math.max(0.5, L * 0.02);
-          const N = normalize(c.normal);
-          if (Math.abs(dotProduct(sub(tip, c.center), N)) > TOL) return true;
+          if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
+              const toTip = sub(tip, c.pivot);
+              const axisN = normalize(c.axis);
+              const axialDist = dotProduct(toTip, axisN);
+              const inPlane = sub(toTip, mul(axisN, axialDist));
+              const radialErr = magnitude(inPlane) - c.radius;
+              if (Math.abs(radialErr) > TOL || Math.abs(axialDist) > TOL) return true;
+          } else {
+              const N = normalize(c.normal);
+              if (Math.abs(dotProduct(sub(tip, c.center), N)) > TOL) return true;
+          }
       }
       return false;
   };
@@ -1800,16 +1876,21 @@ const BioModelPage: React.FC = () => {
                               <span className="font-bold text-gray-900 text-sm">{BONE_NAMES[selectedBone]}</span>
                               <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{(constraints[selectedBone] || []).length} Active</span>
                           </div>
-                          <button onClick={() => addConstraint(selectedBone)} className="w-full py-3 bg-violet-600 text-white font-bold rounded-xl shadow-lg shadow-violet-200 hover:bg-violet-700 transition-all flex items-center justify-center gap-2">
-                              <Plus className="w-4 h-4" /> Add Constraint
-                          </button>
+                          <div className="flex gap-2">
+                              <button onClick={() => addConstraint(selectedBone, 'planar')} className="flex-1 py-3 bg-violet-600 text-white font-bold rounded-xl shadow-lg shadow-violet-200 hover:bg-violet-700 transition-all flex items-center justify-center gap-2">
+                                  <Plus className="w-4 h-4" /> Planar
+                              </button>
+                              <button onClick={() => addConstraint(selectedBone, 'arc')} className="flex-1 py-3 bg-amber-500 text-white font-bold rounded-xl shadow-lg shadow-amber-200 hover:bg-amber-600 transition-all flex items-center justify-center gap-2">
+                                  <Plus className="w-4 h-4" /> Arc
+                              </button>
+                          </div>
 
                           {(constraints[selectedBone] || []).map((c, idx) => (
-                              <div key={c.id} className={`bg-white border rounded-2xl p-4 transition-all ${c.active ? 'border-violet-200 shadow-sm' : 'border-gray-100 opacity-70'}`}>
+                              <div key={c.id} className={`bg-white border rounded-2xl p-4 transition-all ${c.active ? (c.type === 'arc' ? 'border-amber-200' : 'border-violet-200') + ' shadow-sm' : 'border-gray-100 opacity-70'}`}>
                                   <div className="flex items-center justify-between mb-4">
                                       <div className="flex items-center gap-3">
-                                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs ${c.active ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-500'}`}>{idx + 1}</div>
-                                          <span className="font-bold text-gray-900 text-sm">Constraint {idx + 1}</span>
+                                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs ${c.active ? (c.type === 'arc' ? 'bg-amber-100 text-amber-700' : 'bg-violet-100 text-violet-700') : 'bg-gray-100 text-gray-500'}`}>{idx + 1}</div>
+                                          <span className="font-bold text-gray-900 text-sm">{c.type === 'arc' ? 'Arc' : 'Planar'} {idx + 1}</span>
                                       </div>
                                       <div className="flex items-center gap-2">
                                           <button
@@ -1824,7 +1905,7 @@ const BioModelPage: React.FC = () => {
                                       </div>
                                   </div>
 
-                                  {c.active && (
+                                  {c.active && c.type !== 'arc' && (
                                       <div className="space-y-4">
                                           <div>
                                               <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Plane Presets</label>
@@ -1834,7 +1915,6 @@ const BioModelPage: React.FC = () => {
                                                   <button onClick={() => updateConstraint(selectedBone, c.id, { normal: { x: 0, y: 1, z: 0 } })} className="flex-1 py-1.5 bg-gray-50 hover:bg-violet-50 text-[10px] font-bold text-gray-600 rounded-lg border border-transparent hover:border-violet-200 transition-colors">Transverse</button>
                                               </div>
                                           </div>
-
                                           <div>
                                               <div className="flex justify-between items-center mb-2">
                                                   <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400">Blocked Direction</label>
@@ -1844,13 +1924,71 @@ const BioModelPage: React.FC = () => {
                                                   {(['x', 'y', 'z'] as const).map(axis => (
                                                       <div key={axis} className="flex items-center gap-3">
                                                           <span className="text-[10px] font-bold text-gray-400 w-2 uppercase">{axis}</span>
-                                                          <input
-                                                              type="range"
-                                                              min="-1" max="1" step="0.1"
-                                                              value={c.normal[axis]}
+                                                          <input type="range" min="-1" max="1" step="0.1" value={c.normal[axis]}
                                                               onChange={(e) => updateConstraint(selectedBone, c.id, { normal: { ...c.normal, [axis]: parseFloat(e.target.value) } })}
-                                                              className="bio-range w-full text-violet-500"
-                                                          />
+                                                              className="bio-range w-full text-violet-500" />
+                                                      </div>
+                                                  ))}
+                                              </div>
+                                          </div>
+                                      </div>
+                                  )}
+                                  {c.active && c.type === 'arc' && c.pivot && c.axis && (
+                                      <div className="space-y-4">
+                                          <div>
+                                              <div className="flex justify-between items-center mb-2">
+                                                  <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400">Pivot (x, y, z)</label>
+                                                  <span className="font-mono text-[9px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">r={Math.round(c.radius ?? 0)}</span>
+                                              </div>
+                                              <div className="space-y-2">
+                                                  {(['x', 'y', 'z'] as const).map(axis => (
+                                                      <div key={axis} className="flex items-center gap-2">
+                                                          <span className="text-[10px] font-bold text-gray-400 w-2 uppercase">{axis}</span>
+                                                          <input type="number" step="5" value={Math.round(c.pivot![axis])}
+                                                              onChange={(e) => {
+                                                                  const rawPivot = { ...c.pivot!, [axis]: parseFloat(e.target.value) || 0 };
+                                                                  const kin = calculateKinematics(posture, twists);
+                                                                  const tip = kin.boneEndPoints[selectedBone];
+                                                                  if (!tip) return;
+                                                                  const snapped = snapArcToTip(rawPivot, c.axis!, tip);
+                                                                  updateConstraint(selectedBone, c.id, { pivot: snapped.pivot, radius: snapped.radius });
+                                                              }}
+                                                              className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-mono text-gray-700 text-center" />
+                                                      </div>
+                                                  ))}
+                                              </div>
+                                          </div>
+                                          <div>
+                                              <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Axis Presets</label>
+                                              <div className="flex gap-1">
+                                                  {[{ label: 'X', v: {x:1,y:0,z:0} }, { label: 'Y', v: {x:0,y:1,z:0} }, { label: 'Z', v: {x:0,y:0,z:1} }].map(p => (
+                                                      <button key={p.label} onClick={() => {
+                                                          const kin = calculateKinematics(posture, twists);
+                                                          const tip = kin.boneEndPoints[selectedBone];
+                                                          if (!tip) return;
+                                                          const snapped = snapArcToTip(c.pivot!, p.v, tip);
+                                                          updateConstraint(selectedBone, c.id, { axis: p.v, pivot: snapped.pivot, radius: snapped.radius });
+                                                      }}
+                                                          className="flex-1 py-1.5 bg-gray-50 hover:bg-amber-50 text-[10px] font-bold text-gray-600 rounded-lg border border-transparent hover:border-amber-200 transition-colors">{p.label}</button>
+                                                  ))}
+                                              </div>
+                                          </div>
+                                          <div>
+                                              <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Axis Direction</label>
+                                              <div className="space-y-3">
+                                                  {(['x', 'y', 'z'] as const).map(axis => (
+                                                      <div key={axis} className="flex items-center gap-3">
+                                                          <span className="text-[10px] font-bold text-gray-400 w-2 uppercase">{axis}</span>
+                                                          <input type="range" min="-1" max="1" step="0.1" value={c.axis![axis]}
+                                                              onChange={(e) => {
+                                                                  const newAxis = { ...c.axis!, [axis]: parseFloat(e.target.value) };
+                                                                  const kin = calculateKinematics(posture, twists);
+                                                                  const tip = kin.boneEndPoints[selectedBone];
+                                                                  if (!tip) return;
+                                                                  const snapped = snapArcToTip(c.pivot!, newAxis, tip);
+                                                                  updateConstraint(selectedBone, c.id, { axis: newAxis, pivot: snapped.pivot, radius: snapped.radius });
+                                                              }}
+                                                              className="bio-range w-full text-amber-500" />
                                                       </div>
                                                   ))}
                                               </div>

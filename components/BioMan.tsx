@@ -25,6 +25,11 @@ export interface VisualPlane {
   size: number;
   color?: string;
   boneId?: string;
+  // Arc constraint fields
+  type?: 'planar' | 'arc';
+  pivot?: Vector3;
+  axis?: Vector3;
+  radius?: number;
 }
 
 interface BioManProps {
@@ -425,35 +430,81 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
     if (planes) {
         planes.forEach(plane => {
             const camCenter = applyCamera(plane.center);
-            let tangent: Vector3 = { x: 1, y: 0, z: 0 };
-            if (Math.abs(dotProduct(plane.normal, tangent)) > 0.9) tangent = { x: 0, y: 1, z: 0 };
-            const bitangent = normalize(crossProduct(plane.normal, tangent));
-            tangent = normalize(crossProduct(bitangent, plane.normal));
-            const halfSize = plane.size / 2;
-            const p1 = add(add(plane.center, mul(tangent, halfSize)), mul(bitangent, halfSize));
-            const p2 = add(sub(plane.center, mul(tangent, halfSize)), mul(bitangent, halfSize));
-            const p3 = sub(sub(plane.center, mul(tangent, halfSize)), mul(bitangent, halfSize));
-            const p4 = sub(add(plane.center, mul(tangent, halfSize)), mul(bitangent, halfSize));
-            const proj1 = project(applyCamera(p1));
-            const proj2 = project(applyCamera(p2));
-            const proj3 = project(applyCamera(p3));
-            const proj4 = project(applyCamera(p4));
-            const dPath = `M ${proj1.x} ${proj1.y} L ${proj2.x} ${proj2.y} L ${proj3.x} ${proj3.y} L ${proj4.x} ${proj4.y} Z`;
             const isSelected = plane.boneId === selectedBone;
             const opacity = isSelected ? 0.25 : 0.05;
             const strokeOpacity = isSelected ? 0.6 : 0.15;
-            items.push({
-                type: 'path',
-                id: plane.id,
-                z: camCenter.z - 50,
-                props: {
-                    d: dPath,
-                    fill: plane.color ? plane.color.replace(/[\d.]+\)$/, `${opacity})`) : `rgba(139, 92, 246, ${opacity})`,
-                    stroke: plane.color ? plane.color.replace(/[\d.]+\)$/, `${strokeOpacity})`) : `rgba(139, 92, 246, ${strokeOpacity})`,
-                    strokeWidth: 1.5,
-                    style: { pointerEvents: 'none' }
+
+            if (plane.type === 'arc' && plane.pivot && plane.axis && plane.radius) {
+                // Render arc as a circle of line segments
+                const axisN = normalize(plane.axis);
+                let tang: Vector3 = { x: 1, y: 0, z: 0 };
+                if (Math.abs(dotProduct(axisN, tang)) > 0.9) tang = { x: 0, y: 1, z: 0 };
+                const bitang = normalize(crossProduct(axisN, tang));
+                tang = normalize(crossProduct(bitang, axisN));
+                const SEGS = 48;
+                const pts: { x: number; y: number }[] = [];
+                for (let i = 0; i <= SEGS; i++) {
+                    const angle = (i / SEGS) * Math.PI * 2;
+                    const cos = Math.cos(angle);
+                    const sin = Math.sin(angle);
+                    const worldPt = add(plane.pivot, add(mul(tang, cos * plane.radius), mul(bitang, sin * plane.radius)));
+                    pts.push(project(applyCamera(worldPt)));
                 }
-            });
+                const dPath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ') + ' Z';
+                items.push({
+                    type: 'path',
+                    id: plane.id,
+                    z: camCenter.z - 50,
+                    props: {
+                        d: dPath,
+                        fill: 'none',
+                        stroke: plane.color ? plane.color.replace(/[\d.]+\)$/, `${strokeOpacity})`) : `rgba(245, 158, 11, ${strokeOpacity})`,
+                        strokeWidth: isSelected ? 2.5 : 1.5,
+                        style: { pointerEvents: 'none' }
+                    }
+                });
+                // Draw pivot dot
+                const pivotProj = project(applyCamera(plane.pivot));
+                items.push({
+                    type: 'circle',
+                    id: `${plane.id}-pivot`,
+                    z: camCenter.z - 49,
+                    props: {
+                        cx: pivotProj.x, cy: pivotProj.y, r: 4,
+                        fill: `rgba(245, 158, 11, ${isSelected ? 0.8 : 0.3})`,
+                        stroke: 'none',
+                        style: { pointerEvents: 'none' }
+                    }
+                });
+            } else {
+                // Planar constraint: render as square
+                let tangent: Vector3 = { x: 1, y: 0, z: 0 };
+                if (Math.abs(dotProduct(plane.normal, tangent)) > 0.9) tangent = { x: 0, y: 1, z: 0 };
+                const bitangent = normalize(crossProduct(plane.normal, tangent));
+                tangent = normalize(crossProduct(bitangent, plane.normal));
+                const halfSize = plane.size / 2;
+                const p1 = add(add(plane.center, mul(tangent, halfSize)), mul(bitangent, halfSize));
+                const p2 = add(sub(plane.center, mul(tangent, halfSize)), mul(bitangent, halfSize));
+                const p3 = sub(sub(plane.center, mul(tangent, halfSize)), mul(bitangent, halfSize));
+                const p4 = sub(add(plane.center, mul(tangent, halfSize)), mul(bitangent, halfSize));
+                const proj1 = project(applyCamera(p1));
+                const proj2 = project(applyCamera(p2));
+                const proj3 = project(applyCamera(p3));
+                const proj4 = project(applyCamera(p4));
+                const dPath = `M ${proj1.x} ${proj1.y} L ${proj2.x} ${proj2.y} L ${proj3.x} ${proj3.y} L ${proj4.x} ${proj4.y} Z`;
+                items.push({
+                    type: 'path',
+                    id: plane.id,
+                    z: camCenter.z - 50,
+                    props: {
+                        d: dPath,
+                        fill: plane.color ? plane.color.replace(/[\d.]+\)$/, `${opacity})`) : `rgba(139, 92, 246, ${opacity})`,
+                        stroke: plane.color ? plane.color.replace(/[\d.]+\)$/, `${strokeOpacity})`) : `rgba(139, 92, 246, ${strokeOpacity})`,
+                        strokeWidth: 1.5,
+                        style: { pointerEvents: 'none' }
+                    }
+                });
+            }
         });
     }
 
