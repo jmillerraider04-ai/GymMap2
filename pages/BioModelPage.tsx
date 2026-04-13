@@ -134,6 +134,28 @@ interface JointCapacityProfile {
     [action: string]: CapacityConfig;
 }
 
+interface ActionAxis {
+    positiveAction: string;
+    negativeAction: string;
+    axis: Vector3;
+    isBoneAxis?: boolean;  // true for IR/ER — axis computed from current bone direction
+}
+
+interface JointActionDemand {
+    boneId: string;
+    jointGroup: JointGroup;
+    action: string;
+    torqueMagnitude: number;
+    effort: number;
+}
+
+interface TorqueDistributionResult {
+    demands: JointActionDemand[];
+    totalEffort: number;
+    limitingAction: JointActionDemand | null;
+    rawTorques: Record<string, Vector3>;
+}
+
 const createCap = (base: number, specific: number = base, angle: number = 90): CapacityConfig => ({ base, specific, angle });
 
 const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
@@ -692,31 +714,116 @@ const BioModelPage: React.FC = () => {
       return out;
   }, [constraints, posture, twists]);
 
-  // Compute the force direction for a given force config. For point-tracking
-  // (cable) forces, the direction aims from the bone attachment toward the
-  // pulley point, recomputed every frame as the bone moves.
-  const getForceDirection = (f: ForceConfig): Vector3 => {
+  // Force direction with explicit kinematics (avoids recalculating).
+  const getForceDirectionWithKin = (f: ForceConfig, kin: ReturnType<typeof calculateKinematics>): Vector3 => {
       if (f.pulley) {
-          const kin = calculateKinematics(posture, twists);
           const seg = kin.boneStartPoints[f.boneId];
           const end = kin.boneEndPoints[f.boneId];
           if (seg && end) {
-              const attachPt = {
-                  x: seg.x + (end.x - seg.x) * f.position,
-                  y: seg.y + (end.y - seg.y) * f.position,
-                  z: seg.z + (end.z - seg.z) * f.position
-              };
+              const attachPt = add(seg, mul(sub(end, seg), f.position));
               const towardPulley = sub(f.pulley, attachPt);
               const len = magnitude(towardPulley);
-              if (len > 0.001) return { x: towardPulley.x / len, y: towardPulley.y / len, z: towardPulley.z / len };
+              if (len > 0.001) return mul(towardPulley, 1 / len);
           }
       }
       return { x: f.x, y: f.y, z: f.z };
   };
 
+  const getForceDirection = (f: ForceConfig): Vector3 => {
+      return getForceDirectionWithKin(f, calculateKinematics(posture, twists));
+  };
+
   const getVisualVector = (f: ForceConfig): Vector3 => {
       const dir = getForceDirection(f);
-      return { x: dir.x * f.magnitude, y: dir.y * f.magnitude, z: dir.z * f.magnitude };
+      return mul(dir, f.magnitude);
+  };
+
+  // --- TORQUE DISTRIBUTION ---
+  const calculateTorqueDistribution = (
+      currentPosture: Posture,
+      currentTwists: Record<string, number>,
+      currentForces: ForceConfig[],
+      capacities: Record<JointGroup, JointCapacityProfile>
+  ): TorqueDistributionResult => {
+      const kin = calculateKinematics(currentPosture, currentTwists);
+      const rawTorques: Record<string, Vector3> = {};
+
+      // Accumulate torque at each joint from all forces
+      for (const f of currentForces) {
+          const seg = kin.boneStartPoints[f.boneId];
+          const end = kin.boneEndPoints[f.boneId];
+          if (!seg || !end) continue;
+
+          const attachPt = add(seg, mul(sub(end, seg), f.position));
+          const forceDir = getForceDirectionWithKin(f, kin);
+          const chain = getChainToRoot(f.boneId);
+
+          for (const bone of chain) {
+              const jointCenter = kin.boneStartPoints[bone];
+              if (!jointCenter) continue;
+              const momentArm = sub(attachPt, jointCenter);
+              const torque = crossProduct(momentArm, forceDir);
+              const prev = rawTorques[bone] || { x: 0, y: 0, z: 0 };
+              rawTorques[bone] = add(prev, torque);
+          }
+      }
+
+      // Decompose into joint actions
+      const demands: JointActionDemand[] = [];
+      for (const [bone, torqueVec] of Object.entries(rawTorques)) {
+          const jointGroup = BONE_TO_JOINT_GROUP[bone];
+          if (!jointGroup) continue;
+          const actions = JOINT_ACTIONS[jointGroup];
+          if (!actions) continue;
+
+          for (const act of actions) {
+              // Get the world-space axis for this action
+              let axis: Vector3;
+              if (act.isBoneAxis) {
+                  // IR/ER: use the bone's current direction as the rotation axis
+                  const boneStart = kin.boneStartPoints[bone];
+                  const boneEnd = kin.boneEndPoints[bone];
+                  if (!boneStart || !boneEnd) continue;
+                  axis = normalize(sub(boneEnd, boneStart));
+              } else {
+                  axis = act.axis;
+              }
+
+              const component = dotProduct(torqueVec, axis);
+              const action = component > 0 ? act.positiveAction : act.negativeAction;
+              const torqueMag = Math.abs(component);
+              if (torqueMag < 0.01) continue;
+
+              // Look up capacity for effort calculation
+              const cap = capacities[jointGroup]?.[action.toLowerCase().replace(/ /g, '')] ||
+                          capacities[jointGroup]?.[action] ||
+                          null;
+              const capValue = cap ? Math.max(cap.specific, 0.001) : 1;
+              const effort = torqueMag / capValue;
+
+              const side = bone.startsWith('l') ? 'Left' : bone.startsWith('r') ? 'Right' : '';
+              demands.push({
+                  boneId: bone,
+                  jointGroup,
+                  action: `${side} ${jointGroup} ${action}`.trim(),
+                  torqueMagnitude: torqueMag,
+                  effort,
+              });
+          }
+      }
+
+      // Sort by torque magnitude descending
+      demands.sort((a, b) => b.torqueMagnitude - a.torqueMagnitude);
+
+      // Filter near-zero (< 1% of max)
+      const maxMag = demands.length > 0 ? demands[0].torqueMagnitude : 0;
+      const filtered = demands.filter(d => d.torqueMagnitude > maxMag * 0.01);
+
+      const totalMag = filtered.reduce((s, d) => s + d.torqueMagnitude, 0);
+      const totalEffort = filtered.reduce((s, d) => s + d.effort, 0);
+      const limitingAction = filtered.length > 0 ? filtered.reduce((max, d) => d.effort > max.effort ? d : max, filtered[0]) : null;
+
+      return { demands: filtered, totalEffort, limitingAction, rawTorques };
   };
 
   const measurements = useMemo<Measurement[]>(() => {
@@ -773,6 +880,58 @@ const BioModelPage: React.FC = () => {
     rFoot: 'rTibia'
   };
 
+  const BONE_TO_JOINT_GROUP: Record<string, JointGroup> = {
+    lClavicle: 'Scapula', rClavicle: 'Scapula',
+    lHumerus: 'Shoulder', rHumerus: 'Shoulder',
+    lForearm: 'Elbow',   rForearm: 'Elbow',
+    lFemur: 'Hip',       rFemur: 'Hip',
+    lTibia: 'Knee',      rTibia: 'Knee',
+    lFoot: 'Ankle',      rFoot: 'Ankle',
+  };
+
+  const JOINT_ACTIONS: Record<JointGroup, ActionAxis[]> = {
+    'Scapula': [
+        { positiveAction: 'Depression', negativeAction: 'Elevation', axis: {x:0,y:1,z:0} },
+        { positiveAction: 'Retraction', negativeAction: 'Protraction', axis: {x:0,y:0,z:1} },
+    ],
+    'Shoulder': [
+        { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
+        { positiveAction: 'Abduction', negativeAction: 'Adduction', axis: {x:0,y:0,z:1} },
+        { positiveAction: 'Horizontal Adduction', negativeAction: 'Horizontal Abduction', axis: {x:0,y:1,z:0} },
+        { positiveAction: 'External Rotation', negativeAction: 'Internal Rotation', axis: {x:0,y:0,z:0}, isBoneAxis: true },
+    ],
+    'Elbow': [
+        { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
+    ],
+    'Spine': [
+        { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
+        { positiveAction: 'Lateral Flexion L', negativeAction: 'Lateral Flexion R', axis: {x:0,y:0,z:1} },
+        { positiveAction: 'Rotation L', negativeAction: 'Rotation R', axis: {x:0,y:1,z:0} },
+    ],
+    'Hip': [
+        { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
+        { positiveAction: 'Abduction', negativeAction: 'Adduction', axis: {x:0,y:0,z:1} },
+        { positiveAction: 'Horizontal Adduction', negativeAction: 'Horizontal Abduction', axis: {x:0,y:1,z:0} },
+        { positiveAction: 'External Rotation', negativeAction: 'Internal Rotation', axis: {x:0,y:0,z:0}, isBoneAxis: true },
+    ],
+    'Knee': [
+        { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
+    ],
+    'Ankle': [
+        { positiveAction: 'Dorsi Flexion', negativeAction: 'Plantar Flexion', axis: {x:1,y:0,z:0} },
+    ],
+  };
+
+  const getChainToRoot = (boneId: string): string[] => {
+      const chain: string[] = [boneId];
+      let current = boneId;
+      while (BONE_PARENTS[current]) {
+          current = BONE_PARENTS[current]!;
+          chain.push(current);
+      }
+      return chain;
+  };
+
   const updatePostureState = (p: Posture, t: Record<string, number>) => {
       if (poseMode === 'start') {
           setStartPosture(p);
@@ -793,6 +952,11 @@ const BioModelPage: React.FC = () => {
   const skeletalData = useMemo(() => {
     return calculateKinematics(posture, twists);
   }, [posture, twists]);
+
+  const torqueDistribution = useMemo<TorqueDistributionResult | null>(() => {
+      if (forces.length === 0) return null;
+      return calculateTorqueDistribution(posture, twists, forces, jointCapacities);
+  }, [posture, twists, forces, jointCapacities]);
 
   const resolveFullPosture = (p: Posture, t: Record<string, number>, source: string): { posture: Posture, twists: Record<string, number> } => {
       let nextP = p;
@@ -2085,9 +2249,43 @@ const BioModelPage: React.FC = () => {
           )}
           
           {activeTab === 'torque' && (
-               <div className="flex-1 flex flex-col items-center justify-center text-center opacity-50 border-2 border-dashed border-gray-100 rounded-3xl min-h-[150px] animate-in fade-in slide-in-from-right-4 duration-300">
-                   <BrainCircuit className="w-10 h-10 text-gray-300 mb-3" />
-                   <p className="text-gray-500 font-bold text-sm">Torque Analysis<br/>Coming Soon</p>
+               <div className="flex-1 flex flex-col animate-in fade-in slide-in-from-right-4 duration-300">
+                   {!torqueDistribution || torqueDistribution.demands.length === 0 ? (
+                       <div className="flex-1 flex flex-col items-center justify-center text-center opacity-50 border-2 border-dashed border-gray-100 rounded-3xl min-h-[150px]">
+                           <BrainCircuit className="w-10 h-10 text-gray-300 mb-3" />
+                           <p className="text-gray-500 font-bold text-sm">Add external forces<br/>to see joint analysis</p>
+                       </div>
+                   ) : (
+                       <div className="flex-1 overflow-y-auto pr-2 space-y-4">
+                           {torqueDistribution.limitingAction && (
+                               <div className="bg-red-50 border border-red-100 p-4 rounded-xl">
+                                   <p className="text-[9px] font-bold uppercase tracking-wide text-red-400 mb-1">Limiting Factor</p>
+                                   <p className="font-bold text-red-800 text-sm">{torqueDistribution.limitingAction.action}</p>
+                                   <p className="text-[10px] text-red-500 font-medium">Highest relative demand</p>
+                               </div>
+                           )}
+                           <div className="space-y-2">
+                               {(() => {
+                                   const totalMag = torqueDistribution.demands.reduce((s, d) => s + d.torqueMagnitude, 0);
+                                   return torqueDistribution.demands.map((d, i) => {
+                                       const pct = totalMag > 0 ? (d.torqueMagnitude / totalMag * 100) : 0;
+                                       const barColor = d.effort > 0.8 ? 'bg-red-400' : d.effort > 0.5 ? 'bg-amber-400' : 'bg-emerald-400';
+                                       return (
+                                           <div key={`${d.boneId}-${d.action}-${i}`} className="bg-white border border-gray-100 rounded-xl p-3">
+                                               <div className="flex justify-between items-center mb-2">
+                                                   <span className="font-bold text-gray-800 text-xs">{d.action}</span>
+                                                   <span className="font-mono text-xs font-bold text-gray-500">{pct.toFixed(1)}%</span>
+                                               </div>
+                                               <div className="h-2.5 bg-gray-100 rounded-full overflow-hidden">
+                                                   <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                                               </div>
+                                           </div>
+                                       );
+                                   });
+                               })()}
+                           </div>
+                       </div>
+                   )}
                </div>
           )}
           
