@@ -1051,7 +1051,10 @@ const BioModelPage: React.FC = () => {
               for (const bid of freeBonesTwist) {
                   // alpha * gradient is in radians; convert to degrees for storage
                   const stepDeg = (alpha * gradsTwist[bid]) * 180 / Math.PI;
-                  const newTw = twistMap[bid] - stepDeg;
+                  let newTw = twistMap[bid] - stepDeg;
+                  // Clamp to rotation limits so twist never exceeds slider range
+                  const lim = ROTATION_LIMITS[bid];
+                  if (lim) newTw = Math.max(lim.min, Math.min(lim.max, newTw));
                   candidateTwists[bid] = newTw;
                   trialTwists[bid] = newTw;
               }
@@ -1300,11 +1303,51 @@ const BioModelPage: React.FC = () => {
     const clampedVal = limits ? clamp(val, limits.min, limits.max) : val;
 
     // Negate so that increasing slider = external rotation for both arms.
-    // Right arm: negate directly. Left arm: mirrorTwists already negates
-    // the stored value, so no extra negation needed here.
     const storeVal = selectedBone.startsWith('l') ? clampedVal : -clampedVal;
-    const resolved = resolveRotation(selectedBone, storeVal, posture, twists);
-    updatePostureState(resolved.posture, resolved.twists);
+
+    const startTwist = twists[selectedBone] || 0;
+    const totalDelta = storeVal - startTwist;
+    if (Math.abs(totalDelta) < 0.01) return;
+
+    // The bone's DIRECTION is free so the solver can move the elbow/knee
+    // to accommodate the twist change (e.g., rotating the elbow around a
+    // fixed hand). Only the mirror partner is locked.
+    const lockedSet = new Set<string>();
+    if (symmetryMode) {
+        const opp = getOppositeBone(selectedBone);
+        if (opp) lockedSet.add(opp);
+    }
+
+    // ~1° per micro-step.
+    const STEPS = Math.max(4, Math.min(30, Math.ceil(Math.abs(totalDelta))));
+    let workingPosture: Posture = { ...posture };
+    let workingTwists: Record<string, number> = { ...twists };
+    let lastAcceptedPosture: Posture = workingPosture;
+    let lastAcceptedTwists: Record<string, number> = workingTwists;
+
+    for (let i = 1; i <= STEPS; i++) {
+        const stepTwist = startTwist + (totalDelta * i) / STEPS;
+        let tentativeTwists = { ...workingTwists, [selectedBone]: stepTwist };
+        if (symmetryMode) {
+            const opp = getOppositeBone(selectedBone);
+            if (opp) tentativeTwists[opp] = -stepTwist;
+        }
+
+        const solved = solveConstraintsAccommodating(workingPosture, lockedSet, tentativeTwists);
+        if (solved === null) break;
+        workingPosture = solved.posture;
+        workingTwists = solved.twists;
+        // Preserve the user's intended twist value.
+        workingTwists[selectedBone] = stepTwist;
+        if (symmetryMode) {
+            const opp = getOppositeBone(selectedBone);
+            if (opp) workingTwists[opp] = -stepTwist;
+        }
+        lastAcceptedPosture = workingPosture;
+        lastAcceptedTwists = { ...workingTwists };
+    }
+
+    updatePostureState(lastAcceptedPosture, lastAcceptedTwists);
   };
 
   const isScapula = selectedBone ? selectedBone.includes('Clavicle') : false;
