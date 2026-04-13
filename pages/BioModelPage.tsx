@@ -748,7 +748,10 @@ const BioModelPage: React.FC = () => {
       const kin = calculateKinematics(currentPosture, currentTwists);
       const rawTorques: Record<string, Vector3> = {};
 
-      // Accumulate torque at each joint from all forces
+      // Accumulate torque at each joint from all forces, and net linear
+      // force at each scapula (clavicle) since scapulae translate, not rotate.
+      const scapulaForces: Record<string, Vector3> = {};
+
       for (const f of currentForces) {
           const seg = kin.boneStartPoints[f.boneId];
           const end = kin.boneEndPoints[f.boneId];
@@ -759,16 +762,25 @@ const BioModelPage: React.FC = () => {
           const chain = getChainToRoot(f.boneId);
 
           for (const bone of chain) {
-              const jointCenter = kin.boneStartPoints[bone];
-              if (!jointCenter) continue;
-              const momentArm = sub(attachPt, jointCenter);
-              const torque = crossProduct(momentArm, forceDir);
-              const prev = rawTorques[bone] || { x: 0, y: 0, z: 0 };
-              rawTorques[bone] = add(prev, torque);
+              if (bone.includes('Clavicle')) {
+                  // Scapula: accumulate linear force (no moment arm needed)
+                  const prev = scapulaForces[bone] || { x: 0, y: 0, z: 0 };
+                  scapulaForces[bone] = add(prev, forceDir);
+              } else {
+                  const jointCenter = kin.boneStartPoints[bone];
+                  if (!jointCenter) continue;
+                  const momentArm = sub(attachPt, jointCenter);
+                  const torque = crossProduct(momentArm, forceDir);
+                  const prev = rawTorques[bone] || { x: 0, y: 0, z: 0 };
+                  rawTorques[bone] = add(prev, torque);
+              }
           }
       }
 
-      // Decompose into joint actions
+      // Decompose into joint actions using the joint's LOCAL frame axes
+      // (not fixed world-space axes). The joint frame rotates with the
+      // parent bone, so "flexion" is always about the joint's mediolateral
+      // axis regardless of arm position.
       const demands: JointActionDemand[] = [];
       for (const [bone, torqueVec] of Object.entries(rawTorques)) {
           const jointGroup = BONE_TO_JOINT_GROUP[bone];
@@ -776,8 +788,10 @@ const BioModelPage: React.FC = () => {
           const actions = JOINT_ACTIONS[jointGroup];
           if (!actions) continue;
 
+          // Get the joint's local frame — this defines the anatomical axes
+          const jointFrame = kin.jointFrames[bone];
+
           for (const act of actions) {
-              // Get the world-space axis for this action
               let axis: Vector3;
               if (act.isBoneAxis) {
                   // IR/ER: use the bone's current direction as the rotation axis
@@ -785,11 +799,27 @@ const BioModelPage: React.FC = () => {
                   const boneEnd = kin.boneEndPoints[bone];
                   if (!boneStart || !boneEnd) continue;
                   axis = normalize(sub(boneEnd, boneStart));
+              } else if (jointFrame) {
+                  // Transform the local-frame axis definition to world space
+                  // act.axis is in joint-local coords (e.g., {1,0,0} = frame's x-axis)
+                  axis = normalize({
+                      x: act.axis.x * jointFrame.x.x + act.axis.y * jointFrame.y.x + act.axis.z * jointFrame.z.x,
+                      y: act.axis.x * jointFrame.x.y + act.axis.y * jointFrame.y.y + act.axis.z * jointFrame.z.y,
+                      z: act.axis.x * jointFrame.x.z + act.axis.y * jointFrame.y.z + act.axis.z * jointFrame.z.z,
+                  });
               } else {
-                  axis = act.axis;
+                  axis = act.axis; // fallback to world-space
               }
 
-              const component = dotProduct(torqueVec, axis);
+              let component = dotProduct(torqueVec, axis);
+              // Mirror correction: for left-side bones, the moment arm's X
+              // component flips sign, which flips the Y and Z torque components
+              // and the bone-axis projection. Negate these so the action labels
+              // are consistent across sides.
+              const isLeft = bone.startsWith('l');
+              if (isLeft && (act.isBoneAxis || Math.abs(act.axis.y) > 0.5 || Math.abs(act.axis.z) > 0.5)) {
+                  component = -component;
+              }
               const action = component > 0 ? act.positiveAction : act.negativeAction;
               const torqueMag = Math.abs(component);
               if (torqueMag < 0.01) continue;
@@ -807,6 +837,40 @@ const BioModelPage: React.FC = () => {
                   jointGroup,
                   action: `${side} ${jointGroup} ${action}`.trim(),
                   torqueMagnitude: torqueMag,
+                  effort,
+              });
+          }
+      }
+
+      // Scapula force decomposition: project net force onto scapula action axes
+      for (const [bone, forceVec] of Object.entries(scapulaForces)) {
+          const jointGroup = BONE_TO_JOINT_GROUP[bone];
+          if (!jointGroup) continue;
+          const actions = JOINT_ACTIONS[jointGroup];
+          if (!actions) continue;
+
+          for (const act of actions) {
+              const axis = act.axis; // scapula axes are world-space (Y and Z)
+              let component = dotProduct(forceVec, axis);
+              const isLeft = bone.startsWith('l');
+              if (isLeft && Math.abs(act.axis.z) > 0.5) {
+                  component = -component; // Z flips for left side (protraction/retraction stays correct)
+              }
+              const action = component > 0 ? act.positiveAction : act.negativeAction;
+              const forceMag = Math.abs(component);
+              if (forceMag < 0.01) continue;
+
+              const cap = capacities[jointGroup]?.[action.toLowerCase().replace(/ /g, '')] ||
+                          capacities[jointGroup]?.[action] || null;
+              const capValue = cap ? Math.max(cap.specific, 0.001) : 1;
+              const effort = forceMag / capValue;
+
+              const side = bone.startsWith('l') ? 'Left' : bone.startsWith('r') ? 'Right' : '';
+              demands.push({
+                  boneId: bone,
+                  jointGroup,
+                  action: `${side} ${jointGroup} ${action}`.trim(),
+                  torqueMagnitude: forceMag,
                   effort,
               });
           }
@@ -891,17 +955,17 @@ const BioModelPage: React.FC = () => {
 
   const JOINT_ACTIONS: Record<JointGroup, ActionAxis[]> = {
     'Scapula': [
-        { positiveAction: 'Depression', negativeAction: 'Elevation', axis: {x:0,y:1,z:0} },
-        { positiveAction: 'Retraction', negativeAction: 'Protraction', axis: {x:0,y:0,z:1} },
+        { positiveAction: 'Elevation', negativeAction: 'Depression', axis: {x:0,y:1,z:0} },
+        { positiveAction: 'Protraction', negativeAction: 'Retraction', axis: {x:0,y:0,z:1} },
     ],
     'Shoulder': [
         { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
         { positiveAction: 'Abduction', negativeAction: 'Adduction', axis: {x:0,y:0,z:1} },
-        { positiveAction: 'Horizontal Adduction', negativeAction: 'Horizontal Abduction', axis: {x:0,y:1,z:0} },
+        { positiveAction: 'Horizontal Abduction', negativeAction: 'Horizontal Adduction', axis: {x:0,y:1,z:0} },
         { positiveAction: 'External Rotation', negativeAction: 'Internal Rotation', axis: {x:0,y:0,z:0}, isBoneAxis: true },
     ],
     'Elbow': [
-        { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
+        { positiveAction: 'Extension', negativeAction: 'Flexion', axis: {x:1,y:0,z:0} },
     ],
     'Spine': [
         { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
@@ -911,11 +975,11 @@ const BioModelPage: React.FC = () => {
     'Hip': [
         { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
         { positiveAction: 'Abduction', negativeAction: 'Adduction', axis: {x:0,y:0,z:1} },
-        { positiveAction: 'Horizontal Adduction', negativeAction: 'Horizontal Abduction', axis: {x:0,y:1,z:0} },
+        { positiveAction: 'Horizontal Abduction', negativeAction: 'Horizontal Adduction', axis: {x:0,y:1,z:0} },
         { positiveAction: 'External Rotation', negativeAction: 'Internal Rotation', axis: {x:0,y:0,z:0}, isBoneAxis: true },
     ],
     'Knee': [
-        { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
+        { positiveAction: 'Extension', negativeAction: 'Flexion', axis: {x:1,y:0,z:0} },
     ],
     'Ankle': [
         { positiveAction: 'Dorsi Flexion', negativeAction: 'Plantar Flexion', axis: {x:1,y:0,z:0} },
@@ -957,6 +1021,67 @@ const BioModelPage: React.FC = () => {
       if (forces.length === 0) return null;
       return calculateTorqueDistribution(posture, twists, forces, jointCapacities);
   }, [posture, twists, forces, jointCapacities]);
+
+  // Visual arcs showing the motion path for each joint action at the
+  // selected bone. Each action is a rotation about an axis — the bone
+  // endpoint traces a circle. We render these as arc constraints (BioMan
+  // already supports arc rendering).
+  const ACTION_AXIS_COLORS = ['rgba(239,68,68,0.5)', 'rgba(59,130,246,0.5)', 'rgba(34,197,94,0.5)', 'rgba(245,158,11,0.5)'];
+  const jointActionArcs = useMemo<VisualPlane[]>(() => {
+      if (!selectedBone) return [];
+      const jointGroup = BONE_TO_JOINT_GROUP[selectedBone];
+      if (!jointGroup) return [];
+      const actions = JOINT_ACTIONS[jointGroup];
+      if (!actions) return [];
+      const kin = calculateKinematics(posture, twists);
+      const jointFrame = kin.jointFrames[selectedBone];
+      const jointCenter = kin.boneStartPoints[selectedBone];
+      const boneEnd = kin.boneEndPoints[selectedBone];
+      if (!jointFrame || !jointCenter || !boneEnd) return [];
+
+      const boneLen = magnitude(sub(boneEnd, jointCenter));
+
+      return actions.map((act, i) => {
+          let axis: Vector3;
+          if (act.isBoneAxis) {
+              axis = normalize(sub(boneEnd, jointCenter));
+          } else {
+              axis = normalize({
+                  x: act.axis.x * jointFrame.x.x + act.axis.y * jointFrame.y.x + act.axis.z * jointFrame.z.x,
+                  y: act.axis.x * jointFrame.x.y + act.axis.y * jointFrame.y.y + act.axis.z * jointFrame.z.y,
+                  z: act.axis.x * jointFrame.x.z + act.axis.y * jointFrame.y.z + act.axis.z * jointFrame.z.z,
+              });
+          }
+          return {
+              id: `action-arc-${i}`,
+              center: jointCenter,
+              normal: axis,
+              size: boneLen,
+              color: ACTION_AXIS_COLORS[i % ACTION_AXIS_COLORS.length],
+              boneId: selectedBone,
+              type: 'arc' as const,
+              pivot: jointCenter,
+              axis: axis,
+              radius: boneLen,
+          };
+      });
+  }, [selectedBone, posture, twists]);
+
+  // Scapula action indicators: straight lines for elevation/depression
+  // and protraction/retraction (translations, not rotations).
+  const scapulaActionIndicators = useMemo<VisualForce[]>(() => {
+      if (!selectedBone || !selectedBone.includes('Clavicle')) return [];
+      const kin = calculateKinematics(posture, twists);
+      const pos = kin.boneEndPoints[selectedBone];
+      if (!pos) return [];
+      const LEN = 20;
+      return [
+          { id: 'scap-elev', boneId: selectedBone, position: 1, vector: { x: 0, y: -LEN, z: 0 }, color: '#ef4444' },
+          { id: 'scap-depr', boneId: selectedBone, position: 1, vector: { x: 0, y: LEN, z: 0 }, color: '#ef4444' },
+          { id: 'scap-prot', boneId: selectedBone, position: 1, vector: { x: 0, y: 0, z: -LEN }, color: '#3b82f6' },
+          { id: 'scap-retr', boneId: selectedBone, position: 1, vector: { x: 0, y: 0, z: LEN }, color: '#3b82f6' },
+      ];
+  }, [selectedBone, posture, twists]);
 
   const resolveFullPosture = (p: Posture, t: Record<string, number>, source: string): { posture: Posture, twists: Record<string, number> } => {
       let nextP = p;
@@ -1919,8 +2044,8 @@ const BioModelPage: React.FC = () => {
                 color: f.pulley ? '#06b6d4' : '#ef4444',
                 pulley: f.pulley
             }))}
-            reactionForces={reactionForces}
-            planes={visualConstraintPlanes}
+            reactionForces={[...reactionForces, ...scapulaActionIndicators]}
+            planes={[...visualConstraintPlanes, ...jointActionArcs]}
             selectedBone={selectedBone}
             onSelectBone={handleBoneSelect} 
             targetPos={targetPos} 
@@ -2264,26 +2389,46 @@ const BioModelPage: React.FC = () => {
                                    <p className="text-[10px] text-red-500 font-medium">Highest relative demand</p>
                                </div>
                            )}
-                           <div className="space-y-2">
-                               {(() => {
-                                   const totalMag = torqueDistribution.demands.reduce((s, d) => s + d.torqueMagnitude, 0);
-                                   return torqueDistribution.demands.map((d, i) => {
-                                       const pct = totalMag > 0 ? (d.torqueMagnitude / totalMag * 100) : 0;
-                                       const barColor = d.effort > 0.8 ? 'bg-red-400' : d.effort > 0.5 ? 'bg-amber-400' : 'bg-emerald-400';
-                                       return (
-                                           <div key={`${d.boneId}-${d.action}-${i}`} className="bg-white border border-gray-100 rounded-xl p-3">
-                                               <div className="flex justify-between items-center mb-2">
-                                                   <span className="font-bold text-gray-800 text-xs">{d.action}</span>
-                                                   <span className="font-mono text-xs font-bold text-gray-500">{pct.toFixed(1)}%</span>
-                                               </div>
-                                               <div className="h-2.5 bg-gray-100 rounded-full overflow-hidden">
-                                                   <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
-                                               </div>
+                           {/* Group demands by joint, show per-joint percentage breakdown */}
+                           {(() => {
+                               // Group demands by "Side JointGroup" (e.g., "Right Shoulder")
+                               const groups: Record<string, JointActionDemand[]> = {};
+                               for (const d of torqueDistribution.demands) {
+                                   const side = d.boneId.startsWith('l') ? 'Left' : d.boneId.startsWith('r') ? 'Right' : '';
+                                   const key = `${side} ${d.jointGroup}`.trim();
+                                   if (!groups[key]) groups[key] = [];
+                                   groups[key].push(d);
+                               }
+                               return Object.entries(groups).map(([groupName, groupDemands]) => {
+                                   const groupTotal = groupDemands.reduce((s, d) => s + d.torqueMagnitude, 0);
+                                   // Sort by torque within group
+                                   groupDemands.sort((a, b) => b.torqueMagnitude - a.torqueMagnitude);
+                                   return (
+                                       <div key={groupName} className="bg-white border border-gray-100 rounded-2xl p-4">
+                                           <h4 className="font-bold text-gray-900 text-sm mb-3">{groupName}</h4>
+                                           <div className="space-y-2">
+                                               {groupDemands.map((d, i) => {
+                                                   const pct = groupTotal > 0 ? (d.torqueMagnitude / groupTotal * 100) : 0;
+                                                   // Extract just the action name (remove "Left/Right JointGroup" prefix)
+                                                   const actionName = d.action.replace(/^(Left|Right)\s+\w+\s+/, '');
+                                                   const barColor = d.effort > 0.8 ? 'bg-red-400' : d.effort > 0.5 ? 'bg-amber-400' : 'bg-indigo-400';
+                                                   return (
+                                                       <div key={`${d.boneId}-${d.action}-${i}`}>
+                                                           <div className="flex justify-between items-center mb-1">
+                                                               <span className="font-bold text-gray-700 text-xs">{actionName}</span>
+                                                               <span className="font-mono text-xs font-bold text-gray-500">{pct.toFixed(1)}%</span>
+                                                           </div>
+                                                           <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                               <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                                                           </div>
+                                                       </div>
+                                                   );
+                                               })}
                                            </div>
-                                       );
-                                   });
-                               })()}
-                           </div>
+                                       </div>
+                                   );
+                               });
+                           })()}
                        </div>
                    )}
                </div>
