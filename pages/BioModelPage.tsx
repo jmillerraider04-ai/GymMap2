@@ -739,11 +739,30 @@ const BioModelPage: React.FC = () => {
   };
 
   // --- TORQUE DISTRIBUTION ---
+  // Gaussian elimination for small linear systems (Phase B optimization)
+  const solveSmall = (M: number[][], b: number[]): number[] => {
+      const n = b.length;
+      if (n === 0) return [];
+      if (n === 1) return Math.abs(M[0][0]) > 1e-12 ? [b[0] / M[0][0]] : [0];
+      const A = M.map(r => [...r]); const rhs = [...b];
+      for (let c = 0; c < n; c++) {
+          let mr = c, mv = Math.abs(A[c][c]);
+          for (let r = c+1; r < n; r++) if (Math.abs(A[r][c]) > mv) { mr = r; mv = Math.abs(A[r][c]); }
+          if (mv < 1e-12) continue;
+          [A[c], A[mr]] = [A[mr], A[c]]; [rhs[c], rhs[mr]] = [rhs[mr], rhs[c]];
+          for (let r = c+1; r < n; r++) { const f = A[r][c]/A[c][c]; for (let j = c; j < n; j++) A[r][j] -= f*A[c][j]; rhs[r] -= f*rhs[c]; }
+      }
+      const x = new Array(n).fill(0);
+      for (let i = n-1; i >= 0; i--) { let s = rhs[i]; for (let j = i+1; j < n; j++) s -= A[i][j]*x[j]; x[i] = Math.abs(A[i][i]) > 1e-12 ? s/A[i][i] : 0; }
+      return x;
+  };
+
   const calculateTorqueDistribution = (
       currentPosture: Posture,
       currentTwists: Record<string, number>,
       currentForces: ForceConfig[],
-      capacities: Record<JointGroup, JointCapacityProfile>
+      capacities: Record<JointGroup, JointCapacityProfile>,
+      activeConstraints?: Record<string, PlanarConstraint[]>
   ): TorqueDistributionResult => {
       const kin = calculateKinematics(currentPosture, currentTwists);
       const rawTorques: Record<string, Vector3> = {};
@@ -901,7 +920,190 @@ const BioModelPage: React.FC = () => {
       const totalEffort = filtered.reduce((s, d) => s + d.effort, 0);
       const limitingAction = filtered.length > 0 ? filtered.reduce((max, d) => d.effort > max.effort ? d : max, filtered[0]) : null;
 
-      return { demands: filtered, totalEffort, limitingAction, rawTorques };
+      // --- Phase B: Constrained joint coupling ---
+      // When the force bone has constraints, the constraint creates coupling
+      // between joints. The constraint reaction (perpendicular to the applied
+      // force) redistributes load across joints. The optimization minimizes
+      // total perceived effort: sum((τ_k / cap_k)²).
+      //
+      // KEY: Phase B reads Phase A's ALREADY COMPUTED demands (the `filtered`
+      // array) as its starting torques. It never recomputes them. It only
+      // adds the coupling DELTA from the constraint reaction.
+      if (activeConstraints) {
+          for (const f of currentForces) {
+              // Only check constraints on the force bone
+              const boneConstraints = (activeConstraints[f.boneId] || []).filter(c => c.active);
+              if (boneConstraints.length === 0) continue;
+
+              const chain = getChainToRoot(f.boneId).filter(b => !b.includes('Clavicle'));
+              if (chain.length < 2) continue;
+
+              const kin2 = calculateKinematics(currentPosture, currentTwists);
+              const boneTip = kin2.boneEndPoints[f.boneId];
+              if (!boneTip) continue;
+              const forceDir = normalize(getForceDirectionWithKin(f, kin2));
+
+              // Get constraint free directions, projected perpendicular to force
+              const freeDirs: Vector3[] = [];
+              for (const c of boneConstraints) {
+                  const n = normalize(c.normal);
+                  const proj = sub(n, mul(forceDir, dotProduct(n, forceDir)));
+                  const len = magnitude(proj);
+                  if (len > 0.1) freeDirs.push(normalize(proj));
+              }
+              if (freeDirs.length === 0) continue;
+
+              // Build ALL action columns for ALL chain bones — not just
+              // actions Phase A detected. The coupling can CREATE new demands
+              // (e.g., horizontal adduction from constraint reaction at non-90°).
+              type CouplingCol = {
+                  boneId: string; jointGroup: JointGroup; act: ActionAxis;
+                  tau0: number; cap: number; sens: number[];
+                  isLeft: boolean; existingIdx: number; // -1 if new
+              };
+              const cols: CouplingCol[] = [];
+
+              for (const bone of chain) {
+                  const jg = BONE_TO_JOINT_GROUP[bone];
+                  if (!jg || jg === 'Scapula') continue;
+                  const acts = JOINT_ACTIONS[jg];
+                  if (!acts) continue;
+                  const jf = kin2.jointFrames[bone];
+                  const jc = kin2.boneStartPoints[bone];
+                  if (!jc || !jf) continue;
+                  const tipArm = sub(boneTip, jc);
+                  const isLeft = bone.startsWith('l');
+                  const side = isLeft ? 'Left' : bone.startsWith('r') ? 'Right' : '';
+
+                  // Bone axis for residual
+                  let boneAx: Vector3 | null = null;
+                  if (acts.some(a => a.isBoneAxis)) {
+                      const bs = kin2.boneStartPoints[bone], be = kin2.boneEndPoints[bone];
+                      if (bs && be) boneAx = normalize(sub(be, bs));
+                  }
+                  const rawTau = rawTorques[bone] || { x: 0, y: 0, z: 0 };
+                  const residTau = boneAx ? sub(rawTau, mul(boneAx, dotProduct(rawTau, boneAx))) : rawTau;
+
+                  for (const act of acts) {
+                      let worldAxis: Vector3;
+                      if (act.isBoneAxis) {
+                          if (!boneAx) continue;
+                          worldAxis = boneAx;
+                      } else {
+                          worldAxis = normalize({
+                              x: act.axis.x*jf.x.x + act.axis.y*jf.y.x + act.axis.z*jf.z.x,
+                              y: act.axis.x*jf.x.y + act.axis.y*jf.y.y + act.axis.z*jf.z.y,
+                              z: act.axis.x*jf.x.z + act.axis.y*jf.y.z + act.axis.z*jf.z.z,
+                          });
+                      }
+
+                      // tau0: read from Phase A demands if exists, else compute
+                      const tauSrc = act.isBoneAxis ? rawTau : residTau;
+                      let tau0 = dotProduct(tauSrc, worldAxis);
+                      if (isLeft && (act.isBoneAxis || Math.abs(act.axis.y) > 0.5 || Math.abs(act.axis.z) > 0.5)) tau0 = -tau0;
+
+                      // Find matching Phase A demand (if any)
+                      const posName = `${side} ${jg} ${act.positiveAction}`.trim();
+                      const negName = `${side} ${jg} ${act.negativeAction}`.trim();
+                      let existingIdx = filtered.findIndex(d => d.boneId === bone && (d.action === posName || d.action === negName));
+
+                      // Capacity lookup
+                      const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
+                      const capLk = capacities[jg]?.[actName.toLowerCase().replace(/ /g, '')] || capacities[jg]?.[actName] || null;
+                      const capVal = capLk ? Math.max(capLk.specific, 0.001) : 1;
+
+                      // Sensitivity: moment arm from joint to constraint point
+                      const jColTip = crossProduct(worldAxis, tipArm);
+                      const sens: number[] = [];
+                      for (const fd of freeDirs) {
+                          let s = dotProduct(jColTip, fd);
+                          if (isLeft && (act.isBoneAxis || Math.abs(act.axis.y) > 0.5 || Math.abs(act.axis.z) > 0.5)) s = -s;
+                          sens.push(s);
+                      }
+
+                      cols.push({ boneId: bone, jointGroup: jg, act, tau0, cap: capVal,
+                          sens, isLeft, existingIdx });
+                  }
+              }
+
+              if (cols.length === 0) continue;
+              const N = freeDirs.length;
+              const K = cols.length;
+
+              // Solve: minimize sum(((tau0 + λ·s) / cap)²) over λ
+              const AtWA: number[][] = Array.from({length: N}, () => new Array(N).fill(0));
+              const AtWb: number[] = new Array(N).fill(0);
+              for (let i = 0; i < N; i++) {
+                  for (let j = 0; j < N; j++) {
+                      let s = 0;
+                      for (const c of cols) s += c.sens[i] * c.sens[j] / (c.cap * c.cap);
+                      AtWA[i][j] = s;
+                  }
+                  let r = 0;
+                  for (const c of cols) r += c.sens[i] * c.tau0 / (c.cap * c.cap);
+                  AtWb[i] = -r;
+              }
+              for (let i = 0; i < N; i++) AtWA[i][i] += 1e-8;
+              const lam = solveSmall(AtWA, AtWb);
+
+              // Apply coupling by SCALING Phase A demands per-bone.
+              // Phase B changes the TOTAL demand at each joint (inter-joint
+              // redistribution) but preserves Phase A's WITHIN-JOINT split
+              // (which actions and in what proportion). This prevents the
+              // optimizer from killing horizontal adduction at non-90° positions.
+
+              // Compute Phase A and Phase B total demand per bone
+              const bonePhaseA: Record<string, number> = {};
+              const bonePhaseB: Record<string, number> = {};
+              for (const c of cols) {
+                  let newTau = c.tau0;
+                  for (let i = 0; i < N; i++) newTau += lam[i] * c.sens[i];
+                  bonePhaseA[c.boneId] = (bonePhaseA[c.boneId] || 0) + Math.abs(c.tau0);
+                  bonePhaseB[c.boneId] = (bonePhaseB[c.boneId] || 0) + Math.abs(newTau);
+              }
+
+              // Scale Phase A demands proportionally for each affected bone
+              for (const bone of Object.keys(bonePhaseA)) {
+                  const phaseATotal = bonePhaseA[bone] || 0;
+                  const phaseBTotal = bonePhaseB[bone] || 0;
+                  if (phaseATotal < 0.01) continue; // no Phase A demand to scale
+                  const scale = phaseBTotal / phaseATotal;
+                  if (Math.abs(scale - 1) < 0.01) continue; // no significant change
+
+                  for (const d of filtered) {
+                      if (d.boneId === bone && d.jointGroup !== 'Scapula') {
+                          d.torqueMagnitude *= scale;
+                          const capVal = d.effort > 0 ? (d.torqueMagnitude / scale) / d.effort : 1;
+                          d.effort = d.torqueMagnitude / capVal;
+                      }
+                  }
+
+                  // Check if Phase B flips any action's DIRECTION for this bone
+                  // (e.g., elbow flexion → extension from coupling)
+                  for (const c of cols) {
+                      if (c.boneId !== bone) continue;
+                      let newTau = c.tau0;
+                      for (let i = 0; i < N; i++) newTau += lam[i] * c.sens[i];
+                      // If the sign flipped, update the action label
+                      const newAction = newTau > 0 ? c.act.positiveAction : c.act.negativeAction;
+                      const oldAction = c.tau0 > 0 ? c.act.positiveAction : c.act.negativeAction;
+                      if (newAction !== oldAction) {
+                          const side = c.isLeft ? 'Left' : c.boneId.startsWith('r') ? 'Right' : '';
+                          const oldFullName = `${side} ${c.jointGroup} ${oldAction}`.trim();
+                          const newFullName = `${side} ${c.jointGroup} ${newAction}`.trim();
+                          const di = filtered.findIndex(d => d.boneId === bone && d.action === oldFullName);
+                          if (di >= 0) filtered[di].action = newFullName;
+                      }
+                  }
+              }
+          }
+      }
+
+      // Recompute summary stats after Phase B adjustments
+      const finalTotalEffort = filtered.reduce((s, d) => s + d.effort, 0);
+      const finalLimiting = filtered.length > 0 ? filtered.reduce((max, d) => d.effort > max.effort ? d : max, filtered[0]) : null;
+
+      return { demands: filtered, totalEffort: finalTotalEffort, limitingAction: finalLimiting, rawTorques };
   };
 
   const measurements = useMemo<Measurement[]>(() => {
@@ -1033,8 +1235,8 @@ const BioModelPage: React.FC = () => {
 
   const torqueDistribution = useMemo<TorqueDistributionResult | null>(() => {
       if (forces.length === 0) return null;
-      return calculateTorqueDistribution(posture, twists, forces, jointCapacities);
-  }, [posture, twists, forces, jointCapacities]);
+      return calculateTorqueDistribution(posture, twists, forces, jointCapacities, constraints);
+  }, [posture, twists, forces, jointCapacities, constraints]);
 
   // Visual arcs showing the motion path for each joint action at the
   // selected bone. Each action is a rotation about an axis — the bone
