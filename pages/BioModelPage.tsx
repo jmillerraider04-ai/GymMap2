@@ -852,6 +852,7 @@ const BioModelPage: React.FC = () => {
           }
       }
 
+
       // Scapula force decomposition: project net force onto scapula action axes
       for (const [bone, forceVec] of Object.entries(scapulaForces)) {
           const jointGroup = BONE_TO_JOINT_GROUP[bone];
@@ -2412,15 +2413,18 @@ const BioModelPage: React.FC = () => {
                                    if (!groups[key]) groups[key] = [];
                                    groups[key].push(d);
                                }
+                               const rotationActions = new Set(['Internal Rotation', 'External Rotation']);
                                return Object.entries(groups).map(([groupName, groupDemands]) => {
-                                   const groupTotal = groupDemands.reduce((s, d) => s + d.torqueMagnitude, 0);
-                                   groupDemands.sort((a, b) => b.torqueMagnitude - a.torqueMagnitude);
+                                   const nonRotation = groupDemands.filter(d => !rotationActions.has(d.action.replace(/^(Left|Right)\s+\w+\s+/, '')));
+                                   const rotation = groupDemands.filter(d => rotationActions.has(d.action.replace(/^(Left|Right)\s+\w+\s+/, '')));
+                                   const nonRotTotal = nonRotation.reduce((s, d) => s + d.torqueMagnitude, 0);
+                                   nonRotation.sort((a, b) => b.torqueMagnitude - a.torqueMagnitude);
                                    return (
                                        <div key={groupName} className="bg-white border border-gray-100 rounded-2xl p-4">
                                            <h4 className="font-bold text-gray-900 text-sm mb-3">{groupName}</h4>
                                            <div className="space-y-2">
-                                               {groupDemands.map((d, i) => {
-                                                   const pct = groupTotal > 0 ? (d.torqueMagnitude / groupTotal * 100) : 0;
+                                               {nonRotation.map((d, i) => {
+                                                   const pct = nonRotTotal > 0 ? (d.torqueMagnitude / nonRotTotal * 100) : 0;
                                                    const actionName = d.action.replace(/^(Left|Right)\s+\w+\s+/, '');
                                                    const barColor = d.effort > 0.8 ? 'bg-red-400' : d.effort > 0.5 ? 'bg-amber-400' : 'bg-indigo-400';
                                                    return (
@@ -2431,6 +2435,21 @@ const BioModelPage: React.FC = () => {
                                                            </div>
                                                            <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                                                                <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                                                           </div>
+                                                       </div>
+                                                   );
+                                               })}
+                                               {rotation.map((d, i) => {
+                                                   const actionName = d.action.replace(/^(Left|Right)\s+\w+\s+/, '');
+                                                   const barColor = d.effort > 0.8 ? 'bg-red-400' : d.effort > 0.5 ? 'bg-amber-400' : 'bg-indigo-400';
+                                                   return (
+                                                       <div key={`${d.boneId}-${d.action}-rot-${i}`} className={nonRotation.length > 0 ? 'border-t border-gray-100 pt-2 mt-1' : ''}>
+                                                           <div className="flex justify-between items-center mb-1">
+                                                               <span className="font-bold text-gray-700 text-xs">{actionName}</span>
+                                                               <span className="font-mono text-xs font-bold text-gray-500">100.0%</span>
+                                                           </div>
+                                                           <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                               <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: '100%' }} />
                                                            </div>
                                                        </div>
                                                    );
