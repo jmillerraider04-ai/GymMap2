@@ -765,7 +765,7 @@ const BioModelPage: React.FC = () => {
               if (bone.includes('Clavicle')) {
                   // Scapula: accumulate linear force (no moment arm needed)
                   const prev = scapulaForces[bone] || { x: 0, y: 0, z: 0 };
-                  scapulaForces[bone] = add(prev, forceDir);
+                  scapulaForces[bone] = add(prev, mul(forceDir, f.magnitude || 1));
               } else {
                   const jointCenter = kin.boneStartPoints[bone];
                   if (!jointCenter) continue;
@@ -777,10 +777,13 @@ const BioModelPage: React.FC = () => {
           }
       }
 
-      // Decompose into joint actions using the joint's LOCAL frame axes
-      // (not fixed world-space axes). The joint frame rotates with the
-      // parent bone, so "flexion" is always about the joint's mediolateral
-      // axis regardless of arm position.
+      // Decompose into joint actions using the joint's LOCAL frame axes.
+      // For joints with IR/ER (bone-axis action), subtract the bone-axis
+      // component from the torque BEFORE projecting onto the other axes.
+      // This prevents double-counting when the bone axis aligns with one
+      // of the other action axes (e.g., at neutral, bone axis = Y axis,
+      // so without subtraction both horiz abd/add and IR/ER would capture
+      // the same torque component).
       const demands: JointActionDemand[] = [];
       for (const [bone, torqueVec] of Object.entries(rawTorques)) {
           const jointGroup = BONE_TO_JOINT_GROUP[bone];
@@ -788,34 +791,41 @@ const BioModelPage: React.FC = () => {
           const actions = JOINT_ACTIONS[jointGroup];
           if (!actions) continue;
 
-          // Get the joint's local frame — this defines the anatomical axes
           const jointFrame = kin.jointFrames[bone];
+
+          // Check if this joint has a bone-axis (IR/ER) action and compute
+          // the residual torque after removing the bone-axis component.
+          let boneAxis: Vector3 | null = null;
+          const hasBoneAxisAction = actions.some(a => a.isBoneAxis);
+          if (hasBoneAxisAction) {
+              const bs = kin.boneStartPoints[bone], be = kin.boneEndPoints[bone];
+              if (bs && be) boneAxis = normalize(sub(be, bs));
+          }
+          // Residual torque = torque minus bone-axis component (for non-bone-axis actions)
+          const residualTorque = boneAxis
+              ? sub(torqueVec, mul(boneAxis, dotProduct(torqueVec, boneAxis)))
+              : torqueVec;
 
           for (const act of actions) {
               let axis: Vector3;
               if (act.isBoneAxis) {
-                  // IR/ER: use the bone's current direction as the rotation axis
-                  const boneStart = kin.boneStartPoints[bone];
-                  const boneEnd = kin.boneEndPoints[bone];
-                  if (!boneStart || !boneEnd) continue;
-                  axis = normalize(sub(boneEnd, boneStart));
+                  if (!boneAxis) continue;
+                  axis = boneAxis;
               } else if (jointFrame) {
-                  // Transform the local-frame axis definition to world space
-                  // act.axis is in joint-local coords (e.g., {1,0,0} = frame's x-axis)
                   axis = normalize({
                       x: act.axis.x * jointFrame.x.x + act.axis.y * jointFrame.y.x + act.axis.z * jointFrame.z.x,
                       y: act.axis.x * jointFrame.x.y + act.axis.y * jointFrame.y.y + act.axis.z * jointFrame.z.y,
                       z: act.axis.x * jointFrame.x.z + act.axis.y * jointFrame.y.z + act.axis.z * jointFrame.z.z,
                   });
               } else {
-                  axis = act.axis; // fallback to world-space
+                  axis = act.axis;
               }
 
-              let component = dotProduct(torqueVec, axis);
-              // Mirror correction: for left-side bones, the moment arm's X
-              // component flips sign, which flips the Y and Z torque components
-              // and the bone-axis projection. Negate these so the action labels
-              // are consistent across sides.
+              // IR/ER uses the full torque; other actions use the residual
+              // (with bone-axis component removed to prevent double-counting)
+              const torqueForProjection = act.isBoneAxis ? torqueVec : residualTorque;
+              let component = dotProduct(torqueForProjection, axis);
+
               const isLeft = bone.startsWith('l');
               if (isLeft && (act.isBoneAxis || Math.abs(act.axis.y) > 0.5 || Math.abs(act.axis.z) > 0.5)) {
                   component = -component;
@@ -879,9 +889,12 @@ const BioModelPage: React.FC = () => {
       // Sort by torque magnitude descending
       demands.sort((a, b) => b.torqueMagnitude - a.torqueMagnitude);
 
-      // Filter near-zero (< 1% of max)
+      // Filter near-zero (< 1% of max), but exempt scapula demands since
+      // their linear force units aren't comparable to torque magnitudes.
       const maxMag = demands.length > 0 ? demands[0].torqueMagnitude : 0;
-      const filtered = demands.filter(d => d.torqueMagnitude > maxMag * 0.01);
+      const filtered = demands.filter(d =>
+          d.jointGroup === 'Scapula' || d.torqueMagnitude > maxMag * 0.01
+      );
 
       const totalMag = filtered.reduce((s, d) => s + d.torqueMagnitude, 0);
       const totalEffort = filtered.reduce((s, d) => s + d.effort, 0);
@@ -1313,7 +1326,7 @@ const BioModelPage: React.FC = () => {
 
       if (freeBones2D.length === 0 && freeBones1D.length === 0 && freeBonesHinge.length === 0 && freeBonesTwist.length === 0) return null;
 
-      const MAX_ITERS = 40;
+      const MAX_ITERS = 60;
       const EPS = 0.0015;          // tangent-coord finite-difference step
       const EPS_THETA = 0.0015;    // axis-locked angular finite-difference
       const ARMIJO_C1 = 0.1;       // sufficient-descent constant
@@ -2401,7 +2414,6 @@ const BioModelPage: React.FC = () => {
                                }
                                return Object.entries(groups).map(([groupName, groupDemands]) => {
                                    const groupTotal = groupDemands.reduce((s, d) => s + d.torqueMagnitude, 0);
-                                   // Sort by torque within group
                                    groupDemands.sort((a, b) => b.torqueMagnitude - a.torqueMagnitude);
                                    return (
                                        <div key={groupName} className="bg-white border border-gray-100 rounded-2xl p-4">
@@ -2409,7 +2421,6 @@ const BioModelPage: React.FC = () => {
                                            <div className="space-y-2">
                                                {groupDemands.map((d, i) => {
                                                    const pct = groupTotal > 0 ? (d.torqueMagnitude / groupTotal * 100) : 0;
-                                                   // Extract just the action name (remove "Left/Right JointGroup" prefix)
                                                    const actionName = d.action.replace(/^(Left|Right)\s+\w+\s+/, '');
                                                    const barColor = d.effort > 0.8 ? 'bg-red-400' : d.effort > 0.5 ? 'bg-amber-400' : 'bg-indigo-400';
                                                    return (
