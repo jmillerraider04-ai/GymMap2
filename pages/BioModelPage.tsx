@@ -762,7 +762,7 @@ const BioModelPage: React.FC = () => {
       currentTwists: Record<string, number>,
       currentForces: ForceConfig[],
       capacities: Record<JointGroup, JointCapacityProfile>,
-      activeConstraints?: Record<string, PlanarConstraint[]>
+      activeConstraints?: Record<string, BoneConstraint[]>
   ): TorqueDistributionResult => {
       const kin = calculateKinematics(currentPosture, currentTwists);
       const rawTorques: Record<string, Vector3> = {};
