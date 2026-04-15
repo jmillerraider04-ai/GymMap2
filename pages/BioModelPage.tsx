@@ -114,6 +114,9 @@ interface BoneConstraint {
     pivot?: Vector3;   // world-space center of rotation (machine axle)
     axis?: Vector3;    // rotation axis direction
     radius?: number;   // distance from pivot to tip (computed at creation)
+    // Symmetry mirroring: if set, the constraint on the opposite-side bone
+    // sharing this same mirrorId stays in sync with this one.
+    mirrorId?: string;
 }
 
 interface Frame {
@@ -266,6 +269,77 @@ const getOppositeBone = (boneId: string): string | null => {
     return null;
 };
 
+// Build the mirrored force payload (same values, X components negated,
+// boneId flipped). Returns everything EXCEPT id / mirrorId so callers can
+// set those based on their own pairing logic.
+const mirrorForceData = (f: ForceConfig): Omit<ForceConfig, 'id' | 'mirrorId'> => {
+    const opp = getOppositeBone(f.boneId) || f.boneId;
+    return {
+        name: f.name,
+        boneId: opp,
+        position: f.position,
+        x: -f.x,
+        y: f.y,
+        z: f.z,
+        magnitude: f.magnitude,
+        pulley: f.pulley ? { x: -f.pulley.x, y: f.pulley.y, z: f.pulley.z } : undefined,
+    };
+};
+
+// Build the mirrored constraint payload. X components of normal/center/pivot/axis
+// are negated so the constraint lives on the opposite side of the body plane.
+const mirrorConstraintData = (c: BoneConstraint): Omit<BoneConstraint, 'id' | 'mirrorId'> => {
+    return {
+        active: c.active,
+        type: c.type,
+        normal: { x: -c.normal.x, y: c.normal.y, z: c.normal.z },
+        center: { x: -c.center.x, y: c.center.y, z: c.center.z },
+        pivot: c.pivot ? { x: -c.pivot.x, y: c.pivot.y, z: c.pivot.z } : undefined,
+        axis: c.axis ? { x: -c.axis.x, y: c.axis.y, z: c.axis.z } : undefined,
+        radius: c.radius,
+    };
+};
+
+// Wholesale symmetry sync for forces: discards all forces whose bone starts
+// with the opposite-side prefix, then regenerates them as mirrors of the
+// source side. Non-sided forces (e.g. spine) pass through untouched.
+const syncForcesFromSide = (list: ForceConfig[], sourceSide: 'r' | 'l'): ForceConfig[] => {
+    const sourceForces = list.filter(f => f.boneId.startsWith(sourceSide));
+    const nonSided = list.filter(f => !f.boneId.startsWith('r') && !f.boneId.startsWith('l'));
+    const promoted = sourceForces.map(f => ({ ...f, mirrorId: undefined as string | undefined }));
+    const mirrors: ForceConfig[] = sourceForces.map(f => ({
+        ...mirrorForceData(f),
+        id: 'm_' + f.id + '_' + Math.random().toString(36).slice(2, 6),
+        mirrorId: f.id,
+    }));
+    return [...promoted, ...mirrors, ...nonSided];
+};
+
+// Wholesale symmetry sync for constraints: discards all opposite-side
+// constraint lists, then regenerates them as mirrors of the source side.
+const syncConstraintsFromSide = (
+    map: Record<string, BoneConstraint[]>,
+    sourceSide: 'r' | 'l'
+): Record<string, BoneConstraint[]> => {
+    const oppSide = sourceSide === 'r' ? 'l' : 'r';
+    const next: Record<string, BoneConstraint[]> = {};
+    Object.entries(map).forEach(([boneId, list]) => {
+        if (boneId.startsWith(oppSide)) return; // wipe opposite-side
+        next[boneId] = list.map(c => ({ ...c, mirrorId: undefined }));
+    });
+    Object.entries(map).forEach(([boneId, list]) => {
+        if (!boneId.startsWith(sourceSide)) return;
+        const oppBone = getOppositeBone(boneId);
+        if (!oppBone) return;
+        next[oppBone] = list.map(c => ({
+            ...mirrorConstraintData(c),
+            id: 'mc_' + c.id + '_' + Math.random().toString(36).slice(2, 6),
+            mirrorId: c.id,
+        }));
+    });
+    return next;
+};
+
 // --- MATH HELPERS FOR IK ---
 const createRootFrame = (dir: Vector3 = {x: 0, y: 1, z: 0}): Frame => {
     const u = normalize(dir);
@@ -383,12 +457,60 @@ const getAbsoluteRotation = (boneId: string, currentPosture: Posture, currentTwi
     return currentTwists[boneId] || 0;
 };
 
+// --- SOLVER / ANALYSIS TOLERANCES ---
+// Module-scope because calculateTorqueDistribution (declared early in the
+// component body) is invoked from a useMemo that fires before the in-body
+// const declarations run, so these need to live outside the closure to
+// avoid a Temporal Dead Zone error.
+const SOLVER_TOL_SCALE = 0.0005;
+const SOLVER_MIN_TOL = 0.01;
+
+// --- HINGE BONE HELPERS ---
+// Hinge bones (forearm/tibia/foot) live on a 1-DOF arc in the parent's local
+// y-z plane. Module-scope so they're available in both calculateTorqueDistribution
+// (used inside a useMemo that fires before in-body const declarations run) and
+// solveConstraintsAccommodating.
+const isHingeBone = (b: string) => /Forearm|Tibia|Foot/.test(b);
+const hingeAngleToDir = (b: string, theta: number): Vector3 => {
+    if (b.includes('Foot')) return { x: 0, y: Math.sin(theta), z: -Math.cos(theta) };
+    return { x: 0, y: Math.cos(theta), z: Math.sin(theta) };
+};
+const dirToHingeAngle = (b: string, d: Vector3): number => {
+    if (b.includes('Foot')) return Math.atan2(d.y, -d.z);
+    return Math.atan2(d.z, d.y);
+};
+
 // --- INTERPOLATION UTILS ---
 const interpolateVector = (start: Vector3, end: Vector3, t: number): Vector3 => ({
     x: start.x + (end.x - start.x) * t,
     y: start.y + (end.y - start.y) * t,
     z: start.z + (end.z - start.z) * t,
 });
+
+// Spherical linear interpolation for unit direction vectors. Gives constant
+// angular velocity along the great circle between start and end — the bone
+// tip sweeps degrees-per-tick linearly in t, so at fixed playback t-rate
+// every slider moves at a speed proportional to its total delta. Falls back
+// to linear lerp for near-parallel or near-antipodal cases.
+const slerpDirection = (start: Vector3, end: Vector3, t: number): Vector3 => {
+    const d = start.x * end.x + start.y * end.y + start.z * end.z;
+    const clamped = Math.max(-1, Math.min(1, d));
+    const omega = Math.acos(clamped);
+    const sinO = Math.sin(omega);
+    if (sinO < 1e-4) {
+        // Degenerate: lerp and renormalize.
+        const v = interpolateVector(start, end, t);
+        const m = Math.hypot(v.x, v.y, v.z) || 1;
+        return { x: v.x / m, y: v.y / m, z: v.z / m };
+    }
+    const a = Math.sin((1 - t) * omega) / sinO;
+    const b = Math.sin(t * omega) / sinO;
+    return {
+        x: a * start.x + b * end.x,
+        y: a * start.y + b * end.y,
+        z: a * start.z + b * end.z,
+    };
+};
 
 const interpolateScalar = (start: number, end: number, t: number): number => {
     return start + (end - start) * t;
@@ -470,6 +592,8 @@ const BioModelPage: React.FC = () => {
     locations['lShoulder'] = { x: neckBase.x + lClavOffset.x, y: neckBase.y + lClavOffset.y, z: neckBase.z + lClavOffset.z };
     locations['rShoulder'] = { x: neckBase.x + rClavOffset.x, y: neckBase.y + rClavOffset.y, z: neckBase.z + rClavOffset.z };
     
+    boneStartPoints['lClavicle'] = neckBase;
+    boneStartPoints['rClavicle'] = neckBase;
     boneEndPoints['lClavicle'] = locations['lShoulder'];
     boneEndPoints['rClavicle'] = locations['rShoulder'];
 
@@ -581,7 +705,7 @@ const BioModelPage: React.FC = () => {
               const tip = kin.boneEndPoints[bid];
               if (!tip) continue;
               const L = BONE_LENGTHS[bid] || 0;
-              const TOL = Math.max(0.5, L * 0.02);
+              const TOL = Math.max(SOLVER_MIN_TOL, L * SOLVER_TOL_SCALE);
               if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
                   const toTip = sub(tip, c.pivot);
                   const axisN = normalize(c.axis);
@@ -633,50 +757,71 @@ const BioModelPage: React.FC = () => {
       return { pivot, radius };
   };
 
+  // Determine source side from an edited bone id: 'l'/'r' prefix, else null.
+  const sideOf = (boneId: string): 'l' | 'r' | null => {
+      if (boneId.startsWith('l')) return 'l';
+      if (boneId.startsWith('r')) return 'r';
+      return null;
+  };
+
+  // Wholesale sync: after ANY edit on a side, wipe the opposite side's
+  // posture, twists, forces, and constraints and regenerate them from the
+  // source side. Each handler for positioning/forces/constraints should call
+  // this after its primary state update so a single nudge mirrors the whole
+  // pose, not just the edited domain.
+  const applyWholesaleSync = (src: 'l' | 'r') => {
+      // mirrorPosture/mirrorTwists key off the first character of their
+      // sourceBoneId argument, so passing the side letter alone is enough.
+      setPosture(prev => mirrorPosture(prev, src));
+      setTwists(prev => mirrorTwists(prev, src));
+      setForces(prev => syncForcesFromSide(prev, src));
+      setConstraints(prev => syncConstraintsFromSide(prev, src));
+  };
+
   const addConstraint = (boneId: string, type: 'planar' | 'arc' = 'planar') => {
       const kin = calculateKinematics(posture, twists);
       const tip = kin.boneEndPoints[boneId];
       if (!tip) return;
+      const baseId = Date.now().toString() + Math.random().toString(36).slice(2, 6);
+      let newC: BoneConstraint;
       if (type === 'arc') {
           const start = kin.boneStartPoints[boneId];
           const rawPivot = start || { x: 0, y: 0, z: 0 };
           const axis = { x: 0, y: 0, z: 1 };
           const { pivot, radius } = snapArcToTip(rawPivot, axis, tip);
-          const newC: BoneConstraint = {
-              id: Date.now().toString() + Math.random().toString(36).slice(2, 6),
-              active: true,
-              type: 'arc',
-              normal: axis,
-              center: tip,
-              pivot,
-              axis,
-              radius
+          newC = {
+              id: baseId, active: true, type: 'arc',
+              normal: axis, center: tip,
+              pivot, axis, radius,
           };
-          setConstraints(prev => ({ ...prev, [boneId]: [...(prev[boneId] || []), newC] }));
       } else {
-          const newC: BoneConstraint = {
-              id: Date.now().toString() + Math.random().toString(36).slice(2, 6),
-              active: true,
-              type: 'planar',
+          newC = {
+              id: baseId, active: true, type: 'planar',
               normal: { x: 0, y: 0, z: 1 },
-              center: tip
+              center: tip,
           };
-          setConstraints(prev => ({ ...prev, [boneId]: [...(prev[boneId] || []), newC] }));
       }
+      setConstraints(prev => ({ ...prev, [boneId]: [...(prev[boneId] || []), newC] }));
+      const src = sideOf(boneId);
+      if (symmetryMode && src) applyWholesaleSync(src);
   };
 
   const updateConstraint = (boneId: string, id: string, updates: Partial<BoneConstraint>) => {
-      setConstraints(prev => ({
-          ...prev,
-          [boneId]: (prev[boneId] || []).map(c => c.id === id ? { ...c, ...updates } : c)
-      }));
+      setConstraints(prev => {
+          const sourceList = (prev[boneId] || []).map(c => c.id === id ? { ...c, ...updates } : c);
+          return { ...prev, [boneId]: sourceList };
+      });
+      const src = sideOf(boneId);
+      if (symmetryMode && src) applyWholesaleSync(src);
   };
 
   const removeConstraint = (boneId: string, id: string) => {
       setConstraints(prev => ({
           ...prev,
-          [boneId]: (prev[boneId] || []).filter(c => c.id !== id)
+          [boneId]: (prev[boneId] || []).filter(c => c.id !== id),
       }));
+      const src = sideOf(boneId);
+      if (symmetryMode && src) applyWholesaleSync(src);
   };
 
   const visualConstraintPlanes = useMemo<VisualPlane[]>(() => {
@@ -740,6 +885,15 @@ const BioModelPage: React.FC = () => {
 
   // --- TORQUE DISTRIBUTION ---
   // Gaussian elimination for small linear systems (Phase B optimization)
+  // Convert an action label like "Horizontal Adduction" to camelCase
+  // ("horizontalAdduction") to match the keys in DEFAULT_CAPACITIES.
+  const actionKey = (name: string): string =>
+      name.split(' ').map((w, i) => {
+          if (w.length === 0) return w;
+          const lower = w.toLowerCase();
+          return i === 0 ? lower : lower.charAt(0).toUpperCase() + lower.slice(1);
+      }).join('');
+
   const solveSmall = (M: number[][], b: number[]): number[] => {
       const n = b.length;
       if (n === 0) return [];
@@ -782,9 +936,14 @@ const BioModelPage: React.FC = () => {
 
           for (const bone of chain) {
               if (bone.includes('Clavicle')) {
-                  // Scapula: accumulate linear force (no moment arm needed)
+                  // Scapula: accumulate linear force (no moment arm). Uses
+                  // unit-direction force to match the convention used for
+                  // rotation torques above — otherwise the scapula column's
+                  // scale wouldn't be comparable to the rotation columns in
+                  // Phase B's joint optimization (magnitudes don't affect the
+                  // relative distribution anyway, per the 1RM assumption).
                   const prev = scapulaForces[bone] || { x: 0, y: 0, z: 0 };
-                  scapulaForces[bone] = add(prev, mul(forceDir, f.magnitude || 1));
+                  scapulaForces[bone] = add(prev, forceDir);
               } else {
                   const jointCenter = kin.boneStartPoints[bone];
                   if (!jointCenter) continue;
@@ -854,7 +1013,7 @@ const BioModelPage: React.FC = () => {
               if (torqueMag < 0.01) continue;
 
               // Look up capacity for effort calculation
-              const cap = capacities[jointGroup]?.[action.toLowerCase().replace(/ /g, '')] ||
+              const cap = capacities[jointGroup]?.[actionKey(action)] ||
                           capacities[jointGroup]?.[action] ||
                           null;
               const capValue = cap ? Math.max(cap.specific, 0.001) : 1;
@@ -881,11 +1040,12 @@ const BioModelPage: React.FC = () => {
 
           for (const act of actions) {
               const axis = act.axis; // scapula axes are world-space (Y and Z)
-              let component = dotProduct(forceVec, axis);
-              const isLeft = bone.startsWith('l');
-              if (isLeft && Math.abs(act.axis.z) > 0.5) {
-                  component = -component; // Z flips for left side (protraction/retraction stays correct)
-              }
+              const component = dotProduct(forceVec, axis);
+              // No left-side flip: protraction/retraction are anatomically
+              // the same direction on both sides (+Z = both scapulas moving
+              // forward = both protracting). The mirror step flips X, not
+              // Z, so +Z on the right maps to +Z on the left, and both
+              // should produce the same action label.
               const action = component > 0 ? act.positiveAction : act.negativeAction;
               const forceMag = Math.abs(component);
               if (forceMag < 0.01) continue;
@@ -931,27 +1091,85 @@ const BioModelPage: React.FC = () => {
       // adds the coupling DELTA from the constraint reaction.
       if (activeConstraints) {
           for (const f of currentForces) {
-              // Only check constraints on the force bone
-              const boneConstraints = (activeConstraints[f.boneId] || []).filter(c => c.active);
-              if (boneConstraints.length === 0) continue;
-
-              const chain = getChainToRoot(f.boneId).filter(b => !b.includes('Clavicle'));
-              if (chain.length < 2) continue;
+              // Include clavicle bones in the Phase B chain so the scapula
+              // (translation DOFs) participates in constraint coupling.
+              const chain = getChainToRoot(f.boneId);
+              if (chain.length < 1) continue;
 
               const kin2 = calculateKinematics(currentPosture, currentTwists);
               const boneTip = kin2.boneEndPoints[f.boneId];
               if (!boneTip) continue;
-              const forceDir = normalize(getForceDirectionWithKin(f, kin2));
 
-              // Get constraint free directions, projected perpendicular to force
-              const freeDirs: Vector3[] = [];
-              for (const c of boneConstraints) {
-                  const n = normalize(c.normal);
-                  const proj = sub(n, mul(forceDir, dotProduct(n, forceDir)));
-                  const len = magnitude(proj);
-                  if (len > 0.1) freeDirs.push(normalize(proj));
+              // Collect active constraints on ANY bone in the force's chain
+              // (ancestors + force bone itself). Each constraint's reaction
+              // acts at that constraint's bone's tip. A constraint on an
+              // ancestor creates torque at joints between the root and the
+              // constrained bone's joint — not at joints below it.
+              type ConstraintRef = {
+                  n: Vector3;                // world-space plane normal
+                  center: Vector3;           // plane passes through this point
+                  tip: Vector3;              // current tip of the constrained bone
+                  constrainedBone: string;   // which bone the constraint is on
+                  ancestors: Set<string>;    // joints that feel this reaction
+              };
+              const consRefs: ConstraintRef[] = [];
+              for (const b of chain) {
+                  // Only planar constraints for now (arc constraints handled via analytic path if needed)
+                  const list = (activeConstraints[b] || []).filter(c => c.active && c.type === 'planar');
+                  if (list.length === 0) continue;
+                  const tipB = kin2.boneEndPoints[b];
+                  if (!tipB) continue;
+                  const bIdx = chain.indexOf(b);
+                  const ancestors = new Set(chain.slice(bIdx));
+                  for (const c of list) {
+                      const n = normalize(c.normal);
+                      if (magnitude(n) > 0.1) consRefs.push({
+                          n, center: c.center, tip: tipB,
+                          constrainedBone: b, ancestors
+                      });
+                  }
               }
-              if (freeDirs.length === 0) continue;
+              if (consRefs.length === 0) continue;
+
+              // Step size for finite-difference sensitivities — small enough
+              // to approximate a local derivative but large enough to detect
+              // curvature effects at stationary points (where the linear
+              // Jacobian says a DOF is free, but finite motion actually hits
+              // the constraint through second-order coupling).
+              const SENS_STEP_RAD = 3 * Math.PI / 180;
+              const SENS_STEP_DEG = 3;
+
+              // Helper: build perturbed posture/twists for one column's DOF.
+              // Returns null if the perturbation can't be applied.
+              const perturbStateForCol = (
+                  boneId: string,
+                  act: ActionAxis,
+                  jf: Frame
+              ): { posture: Posture; twists: Record<string, number> } | null => {
+                  if (act.isBoneAxis) {
+                      return {
+                          posture: currentPosture,
+                          twists: { ...currentTwists,
+                              [boneId]: (currentTwists[boneId] || 0) + SENS_STEP_DEG },
+                      };
+                  }
+                  const curDir = currentPosture[boneId];
+                  if (!curDir) return null;
+                  if (isHingeBone(boneId)) {
+                      const theta = dirToHingeAngle(boneId, curDir);
+                      const newDir = hingeAngleToDir(boneId, theta + SENS_STEP_RAD);
+                      return { posture: { ...currentPosture, [boneId]: newDir },
+                               twists: currentTwists };
+                  }
+                  const worldAxis = normalize({
+                      x: act.axis.x*jf.x.x + act.axis.y*jf.y.x + act.axis.z*jf.z.x,
+                      y: act.axis.x*jf.x.y + act.axis.y*jf.y.y + act.axis.z*jf.z.y,
+                      z: act.axis.x*jf.x.z + act.axis.y*jf.y.z + act.axis.z*jf.z.z,
+                  });
+                  const newDir = rotateAroundAxis(curDir, worldAxis, SENS_STEP_DEG);
+                  return { posture: { ...currentPosture, [boneId]: newDir },
+                           twists: currentTwists };
+              };
 
               // Build ALL action columns for ALL chain bones — not just
               // actions Phase A detected. The coupling can CREATE new demands
@@ -965,13 +1183,52 @@ const BioModelPage: React.FC = () => {
 
               for (const bone of chain) {
                   const jg = BONE_TO_JOINT_GROUP[bone];
-                  if (!jg || jg === 'Scapula') continue;
+                  if (!jg) continue;
+
+                  // Scapula branch: translation DOFs on the clavicle. The
+                  // scapula's "demand" is the net linear force on it projected
+                  // onto each action axis. Constraint reactions are linear
+                  // forces (λ·n) that add directly to the net, so sens = n·axis
+                  // without any moment arm. The whole rigid chain feels every
+                  // reaction, so there's no ancestors check either.
+                  if (jg === 'Scapula') {
+                      const acts = JOINT_ACTIONS[jg];
+                      if (!acts) continue;
+                      const isLeft = bone.startsWith('l');
+                      const side = isLeft ? 'Left' : 'Right';
+                      const forceVec = scapulaForces[bone] || { x: 0, y: 0, z: 0 };
+
+                      for (const act of acts) {
+                          // No left-side Z flip: both scapulas use identical
+                          // anatomical labels for the same world-space force
+                          // direction (see Phase A decomposition comment).
+                          const tau0 = dotProduct(forceVec, act.axis);
+
+                          const posName = `${side} ${jg} ${act.positiveAction}`.trim();
+                          const negName = `${side} ${jg} ${act.negativeAction}`.trim();
+                          let existingIdx = filtered.findIndex(d => d.boneId === bone && (d.action === posName || d.action === negName));
+
+                          const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
+                          const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
+                          const capVal = capLk ? Math.max(capLk.specific, 0.001) : 1;
+
+                          const sens: number[] = [];
+                          for (const cref of consRefs) {
+                              const s = dotProduct(cref.n, act.axis);
+                              sens.push(s);
+                          }
+
+                          cols.push({ boneId: bone, jointGroup: jg, act, tau0, cap: capVal,
+                              sens, isLeft, existingIdx });
+                      }
+                      continue;
+                  }
+
                   const acts = JOINT_ACTIONS[jg];
                   if (!acts) continue;
                   const jf = kin2.jointFrames[bone];
                   const jc = kin2.boneStartPoints[bone];
                   if (!jc || !jf) continue;
-                  const tipArm = sub(boneTip, jc);
                   const isLeft = bone.startsWith('l');
                   const side = isLeft ? 'Left' : bone.startsWith('r') ? 'Right' : '';
 
@@ -1009,16 +1266,79 @@ const BioModelPage: React.FC = () => {
 
                       // Capacity lookup
                       const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
-                      const capLk = capacities[jg]?.[actName.toLowerCase().replace(/ /g, '')] || capacities[jg]?.[actName] || null;
+                      const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
                       const capVal = capLk ? Math.max(capLk.specific, 0.001) : 1;
 
-                      // Sensitivity: moment arm from joint to constraint point
-                      const jColTip = crossProduct(worldAxis, tipArm);
+                      // Analytic sensitivity (first-order Jacobian). Each
+                      // constraint's reaction acts at its own tip. A constraint
+                      // on a distal bone (not an ancestor of this joint) has
+                      // zero moment arm at this joint.
+                      //
+                      // For non-bone-axis actions, the sens is RESIDUALIZED
+                      // the same way tau0 is (bone-axis component removed).
+                      // Without this, the flex column picks up sens that
+                      // really belongs to IR/ER at a pose where the two
+                      // coincide with the bone axis, and the optimizer
+                      // conjures up spurious flex demand when using a
+                      // constraint reaction that targets IR/ER.
                       const sens: number[] = [];
-                      for (const fd of freeDirs) {
-                          let s = dotProduct(jColTip, fd);
+                      for (const cref of consRefs) {
+                          if (!cref.ancestors.has(bone)) {
+                              sens.push(0);
+                              continue;
+                          }
+                          const rArm = sub(cref.tip, jc);
+                          const rxn = crossProduct(rArm, cref.n);
+                          let s = dotProduct(rxn, worldAxis);
+                          if (!act.isBoneAxis && boneAx) {
+                              const bAxDotAxis = dotProduct(boneAx, worldAxis);
+                              const rxnDotBAx = dotProduct(rxn, boneAx);
+                              s -= bAxDotAxis * rxnDotBAx;
+                          }
                           if (isLeft && (act.isBoneAxis || Math.abs(act.axis.y) > 0.5 || Math.abs(act.axis.z) > 0.5)) s = -s;
                           sens.push(s);
+                      }
+
+                      // Block detection: if the analytic sens is zero for all
+                      // constraints (first-order stationary point) but a finite
+                      // perturbation of this DOF moves a constrained tip off
+                      // its plane by more than tolerance, the DOF is effectively
+                      // pinned by constraint curvature. Treat it as fully
+                      // absorbed: zero the demand so the muscle doesn't need
+                      // to fire. This only triggers when |tau0| is nontrivial
+                      // AND the sens is all zero — normal columns pass through.
+                      // Block detection: if analytic sens is all zero AND
+                      // tau0 is non-trivial, check whether the chain can
+                      // accommodate a perturbation in this DOF. We run the
+                      // constraint solver with this DOF locked — if it
+                      // converges, some combination of the other free bones
+                      // can absorb the motion, so this action is NOT actually
+                      // blocked. Only if the solver fails (returns null) is
+                      // the DOF truly pinned and its demand gets zeroed.
+                      const sensAllZero = sens.every(s => Math.abs(s) < 0.01);
+                      if (sensAllZero && Math.abs(tau0) > 0.01) {
+                          try {
+                              const perturbed = perturbStateForCol(bone, act, jf);
+                              if (perturbed) {
+                                  const lockedForBlock = new Set<string>();
+                                  const lockedTwistForBlock = new Set<string>();
+                                  if (act.isBoneAxis) {
+                                      lockedTwistForBlock.add(bone);
+                                  } else {
+                                      lockedForBlock.add(bone);
+                                  }
+                                  const solved = solveConstraintsAccommodating(
+                                      perturbed.posture, lockedForBlock,
+                                      perturbed.twists, [], lockedTwistForBlock);
+                                  if (solved === null) {
+                                      tau0 = 0;
+                                      if (existingIdx >= 0) {
+                                          filtered[existingIdx].torqueMagnitude = 0;
+                                          filtered[existingIdx].effort = 0;
+                                      }
+                                  }
+                              }
+                          } catch { /* solver bail — leave column alone */ }
                       }
 
                       cols.push({ boneId: bone, jointGroup: jg, act, tau0, cap: capVal,
@@ -1027,7 +1347,7 @@ const BioModelPage: React.FC = () => {
               }
 
               if (cols.length === 0) continue;
-              const N = freeDirs.length;
+              const N = consRefs.length;
               const K = cols.length;
 
               // Solve: minimize sum(((tau0 + λ·s) / cap)²) over λ
@@ -1046,64 +1366,63 @@ const BioModelPage: React.FC = () => {
               for (let i = 0; i < N; i++) AtWA[i][i] += 1e-8;
               const lam = solveSmall(AtWA, AtWb);
 
-              // Apply coupling by SCALING Phase A demands per-bone.
-              // Phase B changes the TOTAL demand at each joint (inter-joint
-              // redistribution) but preserves Phase A's WITHIN-JOINT split
-              // (which actions and in what proportion). This prevents the
-              // optimizer from killing horizontal adduction at non-90° positions.
-
-              // Compute Phase A and Phase B total demand per bone
-              const bonePhaseA: Record<string, number> = {};
-              const bonePhaseB: Record<string, number> = {};
+              // Apply coupling per-action (direct assignment). For every
+              // column, write τ_new = τ0 + Σ λᵢ·sensᵢ directly as the demand.
+              // Creates new entries when τ0 was 0 but τ_new ≠ 0 (e.g., the
+              // constraint redirected force onto a new axis). Updates sign
+              // labels when the coupling flips a torque's direction.
               for (const c of cols) {
                   let newTau = c.tau0;
                   for (let i = 0; i < N; i++) newTau += lam[i] * c.sens[i];
-                  bonePhaseA[c.boneId] = (bonePhaseA[c.boneId] || 0) + Math.abs(c.tau0);
-                  bonePhaseB[c.boneId] = (bonePhaseB[c.boneId] || 0) + Math.abs(newTau);
-              }
+                  const newMag = Math.abs(newTau);
 
-              // Scale Phase A demands proportionally for each affected bone
-              for (const bone of Object.keys(bonePhaseA)) {
-                  const phaseATotal = bonePhaseA[bone] || 0;
-                  const phaseBTotal = bonePhaseB[bone] || 0;
-                  if (phaseATotal < 0.01) continue; // no Phase A demand to scale
-                  const scale = phaseBTotal / phaseATotal;
-                  if (Math.abs(scale - 1) < 0.01) continue; // no significant change
+                  const side = c.isLeft ? 'Left' : c.boneId.startsWith('r') ? 'Right' : '';
+                  const newAction = newTau >= 0 ? c.act.positiveAction : c.act.negativeAction;
+                  const oldAction = c.tau0 >= 0 ? c.act.positiveAction : c.act.negativeAction;
+                  const newFullName = `${side} ${c.jointGroup} ${newAction}`.trim();
+                  const oldFullName = `${side} ${c.jointGroup} ${oldAction}`.trim();
 
-                  for (const d of filtered) {
-                      if (d.boneId === bone && d.jointGroup !== 'Scapula') {
-                          d.torqueMagnitude *= scale;
-                          const capVal = d.effort > 0 ? (d.torqueMagnitude / scale) / d.effort : 1;
-                          d.effort = d.torqueMagnitude / capVal;
-                      }
-                  }
+                  let di = filtered.findIndex(d =>
+                      d.boneId === c.boneId &&
+                      (d.action === oldFullName || d.action === newFullName));
 
-                  // Check if Phase B flips any action's DIRECTION for this bone
-                  // (e.g., elbow flexion → extension from coupling)
-                  for (const c of cols) {
-                      if (c.boneId !== bone) continue;
-                      let newTau = c.tau0;
-                      for (let i = 0; i < N; i++) newTau += lam[i] * c.sens[i];
-                      // If the sign flipped, update the action label
-                      const newAction = newTau > 0 ? c.act.positiveAction : c.act.negativeAction;
-                      const oldAction = c.tau0 > 0 ? c.act.positiveAction : c.act.negativeAction;
-                      if (newAction !== oldAction) {
-                          const side = c.isLeft ? 'Left' : c.boneId.startsWith('r') ? 'Right' : '';
-                          const oldFullName = `${side} ${c.jointGroup} ${oldAction}`.trim();
-                          const newFullName = `${side} ${c.jointGroup} ${newAction}`.trim();
-                          const di = filtered.findIndex(d => d.boneId === bone && d.action === oldFullName);
-                          if (di >= 0) filtered[di].action = newFullName;
-                      }
+                  const capLk = capacities[c.jointGroup]?.[actionKey(newAction)]
+                              || capacities[c.jointGroup]?.[newAction] || null;
+                  const capVal = capLk ? Math.max(capLk.specific, 0.001) : 1;
+
+                  if (di >= 0) {
+                      filtered[di].torqueMagnitude = newMag;
+                      filtered[di].effort = newMag / capVal;
+                      filtered[di].action = newFullName;
+                  } else if (newMag > 0.01) {
+                      filtered.push({
+                          boneId: c.boneId,
+                          jointGroup: c.jointGroup,
+                          action: newFullName,
+                          torqueMagnitude: newMag,
+                          effort: newMag / capVal,
+                      });
                   }
               }
           }
       }
 
-      // Recompute summary stats after Phase B adjustments
-      const finalTotalEffort = filtered.reduce((s, d) => s + d.effort, 0);
-      const finalLimiting = filtered.length > 0 ? filtered.reduce((max, d) => d.effort > max.effort ? d : max, filtered[0]) : null;
+      // Re-filter after Phase B: coupling may have scaled some demands to
+      // near-zero (constraint fully absorbed that component). Drop them.
+      // Scapula is exempted from the relative (1%-of-phaseAMax) filter
+      // because its linear force magnitudes aren't directly comparable to
+      // torque magnitudes, but we still drop it when Phase B zeros it out.
+      const phaseAMax = maxMag;
+      const finalFiltered = filtered.filter(d =>
+          (d.jointGroup === 'Scapula' && Math.abs(d.torqueMagnitude) > 0.01) ||
+          d.torqueMagnitude > phaseAMax * 0.01
+      );
 
-      return { demands: filtered, totalEffort: finalTotalEffort, limitingAction: finalLimiting, rawTorques };
+      // Recompute summary stats after Phase B adjustments
+      const finalTotalEffort = finalFiltered.reduce((s, d) => s + d.effort, 0);
+      const finalLimiting = finalFiltered.length > 0 ? finalFiltered.reduce((max, d) => d.effort > max.effort ? d : max, finalFiltered[0]) : null;
+
+      return { demands: finalFiltered, totalEffort: finalTotalEffort, limitingAction: finalLimiting, rawTorques };
   };
 
   const measurements = useMemo<Measurement[]>(() => {
@@ -1222,6 +1541,17 @@ const BioModelPage: React.FC = () => {
       }
       setPosture(p);
       setTwists(t);
+      // Wholesale symmetry: any position change on a sided bone also forces
+      // opposite-side forces + constraints to regenerate from the source
+      // side. Posture/twists are already mirrored inline in the position
+      // handlers, so this is a no-op for posture/twists themselves.
+      if (symmetryMode && selectedBone) {
+          const src = selectedBone.startsWith('l') ? 'l' : selectedBone.startsWith('r') ? 'r' : null;
+          if (src) {
+              setForces(prev => syncForcesFromSide(prev, src));
+              setConstraints(prev => syncConstraintsFromSide(prev, src));
+          }
+      }
   };
 
   const updateTwistState = (updater: (prev: Record<string, number>) => Record<string, number>) => {
@@ -1232,11 +1562,9 @@ const BioModelPage: React.FC = () => {
   const skeletalData = useMemo(() => {
     return calculateKinematics(posture, twists);
   }, [posture, twists]);
-
-  const torqueDistribution = useMemo<TorqueDistributionResult | null>(() => {
-      if (forces.length === 0) return null;
-      return calculateTorqueDistribution(posture, twists, forces, jointCapacities, constraints);
-  }, [posture, twists, forces, jointCapacities, constraints]);
+  // torqueDistribution useMemo moved below postureViolatesConstraints so it
+  // fires after all the helpers it transitively depends on (via block
+  // detection's call to solveConstraintsAccommodating) are initialized.
 
   // Visual arcs showing the motion path for each joint action at the
   // selected bone. Each action is a rotation about an axis — the bone
@@ -1332,8 +1660,10 @@ const BioModelPage: React.FC = () => {
   //     This is what enforces "minimum local accommodation" and prevents
   //     the snapping behaviour we saw before.
 
-  const SOLVER_TOL_SCALE = 0.02;
-  const SOLVER_MIN_TOL = 0.5;
+  // (SOLVER_MIN_TOL and SOLVER_TOL_SCALE moved to module scope so
+  // calculateTorqueDistribution — declared above this point but called
+  // from a useMemo that runs before this line during render — can access
+  // them without hitting the Temporal Dead Zone.)
 
   const collectActiveConstraints = (): { boneId: string; c: BoneConstraint }[] => {
       const out: { boneId: string; c: BoneConstraint }[] = [];
@@ -1435,21 +1765,15 @@ const BioModelPage: React.FC = () => {
   // The solver MUST treat hinge bones this way; if they were 2-DOF, gradient
   // descent could push them off the hinge plane and the slider's flexion angle
   // (acos(y) / asin(y)) would no longer match the actual geometry.
-  const isHingeBone = (b: string) => /Forearm|Tibia|Foot/.test(b);
-  const hingeAngleToDir = (b: string, theta: number): Vector3 => {
-      if (b.includes('Foot')) return { x: 0, y: Math.sin(theta), z: -Math.cos(theta) };
-      return { x: 0, y: Math.cos(theta), z: Math.sin(theta) };
-  };
-  const dirToHingeAngle = (b: string, d: Vector3): number => {
-      if (b.includes('Foot')) return Math.atan2(d.y, -d.z);
-      return Math.atan2(d.z, d.y);
-  };
+  // (hinge helpers hoisted to module scope so calculateTorqueDistribution,
+  // which is defined before this point, can use them without TDZ issues.)
 
   const solveConstraintsAccommodating = (
       tentative: Posture,
       lockedBoneIds: Set<string>,
       t: Record<string, number>,
-      axisLocks: AxisLock[] = []
+      axisLocks: AxisLock[] = [],
+      lockedTwistIds: Set<string> = new Set()
   ): { posture: Posture; twists: Record<string, number> } | null => {
       const cons = collectActiveConstraints();
       if (cons.length === 0) return { posture: tentative, twists: t };
@@ -1522,14 +1846,14 @@ const BioModelPage: React.FC = () => {
       // solver. Each gets a single scalar DOF (the twist angle in degrees).
       const isTwistBone = (b: string) => /Humerus|Femur/.test(b);
       const freeBonesTwist = Object.keys(posture).filter(
-          b => isTwistBone(b) && !lockedBoneIds.has(b) && posture[b] !== undefined
+          b => isTwistBone(b) && !lockedBoneIds.has(b) && !lockedTwistIds.has(b) && posture[b] !== undefined
       );
       const twistMap: Record<string, number> = {};
       for (const bid of freeBonesTwist) twistMap[bid] = solvedTwists[bid] || 0;
 
       if (freeBones2D.length === 0 && freeBones1D.length === 0 && freeBonesHinge.length === 0 && freeBonesTwist.length === 0) return null;
 
-      const MAX_ITERS = 60;
+      const MAX_ITERS = 150;
       const EPS = 0.0015;          // tangent-coord finite-difference step
       const EPS_THETA = 0.0015;    // axis-locked angular finite-difference
       const ARMIJO_C1 = 0.1;       // sufficient-descent constant
@@ -1703,7 +2027,7 @@ const BioModelPage: React.FC = () => {
           const tip = kin.boneEndPoints[bid];
           if (!tip) continue;
           const L = BONE_LENGTHS[bid] || 0;
-          const TOL = Math.max(0.5, L * 0.02);
+          const TOL = Math.max(SOLVER_MIN_TOL, L * SOLVER_TOL_SCALE);
           if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
               const toTip = sub(tip, c.pivot);
               const axisN = normalize(c.axis);
@@ -1718,6 +2042,15 @@ const BioModelPage: React.FC = () => {
       }
       return false;
   };
+
+  // Torque distribution useMemo — must live below solveConstraintsAccommodating
+  // and postureViolatesConstraints because calculateTorqueDistribution's block
+  // detector invokes solveConstraintsAccommodating, which transitively depends
+  // on constants declared further down in the component body.
+  const torqueDistribution = useMemo<TorqueDistributionResult | null>(() => {
+      if (forces.length === 0) return null;
+      return calculateTorqueDistribution(posture, twists, forces, jointCapacities, constraints);
+  }, [posture, twists, forces, jointCapacities, constraints]);
 
   const resolveKinematics = (boneId: string, proposedVector: Vector3, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } => {
       const projected = projectDirOntoConstraints(boneId, proposedVector, currentPosture, currentTwists);
@@ -1814,25 +2147,62 @@ const BioModelPage: React.FC = () => {
     const internalVal = -newValue;
 
     if (targetReferenceBone) {
-        const newTarget = { ...targetPos, [axis]: internalVal };
-        setTargetPos(newTarget);
         const rootBone = targetReferenceBone;
         const childBone = selectedBone;
         const len1 = BONE_LENGTHS[rootBone];
         const len2 = BONE_LENGTHS[childBone];
-        const currentPole = mul(posture[rootBone], len1);
-        const solution = solveTwoBoneIK({x:0,y:0,z:0}, newTarget, len1, len2, currentPole);
-        if (solution) {
-            const rootFrame = createRootFrame({x:0, y:1, z:0});
-            const transported = transportFrame(rootFrame, solution.vec1);
-            const childVecLocal = worldToLocal(transported, solution.vec2);
-            const nextPosture = { ...posture, [rootBone]: solution.vec1, [childBone]: childVecLocal };
-            const resolved = resolveFullPosture(nextPosture, twists, rootBone);
-            // Hard-stop the IK solve if the new posture violates any constraint.
-            if (!postureViolatesConstraints(resolved.posture, resolved.twists)) {
-                updatePostureState(resolved.posture, resolved.twists);
-            }
+
+        const startTarget: Vector3 = { ...targetPos };
+        const endTarget: Vector3 = { ...targetPos, [axis]: internalVal };
+        const delta = sub(endTarget, startTarget);
+        const dist = magnitude(delta);
+        if (dist < 0.01) return;
+
+        setTargetPos(endTarget);
+
+        // Incremental IK + accommodation solver. Each step advances the
+        // tip along the delta, computes 2-bone IK, optionally mirrors, and
+        // lets the solver move free bones (scapula, other arm, twists) to
+        // satisfy constraints. Breaks on solver failure so the input
+        // hard-stops at the last valid step rather than rejecting wholesale.
+        const STEPS = Math.max(4, Math.min(40, Math.ceil(dist / 2)));
+        const rootFrame0 = createRootFrame({ x: 0, y: 1, z: 0 });
+
+        const lockedSet = new Set<string>([rootBone, childBone]);
+        if (symmetryMode) {
+            const oppRoot = getOppositeBone(rootBone);
+            const oppChild = getOppositeBone(childBone);
+            if (oppRoot) lockedSet.add(oppRoot);
+            if (oppChild) lockedSet.add(oppChild);
         }
+
+        let workingPosture: Posture = { ...posture };
+        let workingTwists: Record<string, number> = { ...twists };
+        let lastAcceptedPosture: Posture = workingPosture;
+        let lastAcceptedTwists: Record<string, number> = workingTwists;
+
+        for (let i = 1; i <= STEPS; i++) {
+            const stepTarget: Vector3 = {
+                x: startTarget.x + (delta.x * i) / STEPS,
+                y: startTarget.y + (delta.y * i) / STEPS,
+                z: startTarget.z + (delta.z * i) / STEPS,
+            };
+            const currentPole = mul(workingPosture[rootBone], len1);
+            const solution = solveTwoBoneIK({ x: 0, y: 0, z: 0 }, stepTarget, len1, len2, currentPole);
+            if (!solution) break;
+            const transported = transportFrame(rootFrame0, solution.vec1);
+            const childVecLocal = worldToLocal(transported, solution.vec2);
+            let tentative: Posture = { ...workingPosture, [rootBone]: solution.vec1, [childBone]: childVecLocal };
+            if (symmetryMode) tentative = mirrorPosture(tentative, rootBone);
+            const solved = solveConstraintsAccommodating(tentative, lockedSet, workingTwists);
+            if (solved === null) break;
+            workingPosture = solved.posture;
+            workingTwists = solved.twists;
+            lastAcceptedPosture = solved.posture;
+            lastAcceptedTwists = solved.twists;
+        }
+
+        updatePostureState(lastAcceptedPosture, lastAcceptedTwists);
         return;
     }
 
@@ -1856,11 +2226,12 @@ const BioModelPage: React.FC = () => {
     const totalDelta = targetComp - startComp;
     if (Math.abs(totalDelta) < 1e-4) return;
 
+    // In symmetry mode, the opposite bone gets its own axisLock (on the
+    // MIRRORED value, i.e. -stepComp for the X axis, same for Y/Z) so both
+    // bones have 1-DOF freedom on their locked circles and the solver can
+    // find a symmetric solution. lockedBoneIds stays empty — the axisLock
+    // handles the constraint.
     const lockedSet = new Set<string>();
-    if (symmetryMode) {
-        const opp = getOppositeBone(selectedBone);
-        if (opp) lockedSet.add(opp);
-    }
 
     // ~0.04 (~2.3°) per micro-step, capped for responsiveness with a floor
     // for path continuity on tiny drags.
@@ -1869,6 +2240,8 @@ const BioModelPage: React.FC = () => {
     let workingTwists: Record<string, number> = { ...twists };
     let lastAcceptedPosture: Posture = workingPosture;
     let lastAcceptedTwists: Record<string, number> = workingTwists;
+
+    const oppBone = symmetryMode ? getOppositeBone(selectedBone) : null;
 
     for (let i = 1; i <= STEPS; i++) {
         const stepComp = startComp + (totalDelta * i) / STEPS;
@@ -1879,9 +2252,16 @@ const BioModelPage: React.FC = () => {
         let tentative: Posture = { ...workingPosture, [selectedBone]: stepDir };
         if (symmetryMode) tentative = mirrorPosture(tentative, selectedBone);
 
+        const axisLocks: AxisLock[] = [{ boneId: selectedBone, axis, value: stepComp }];
+        if (oppBone) {
+            // Mirror negates X, keeps Y/Z. So the opposite bone's locked
+            // Cartesian value is -stepComp only when we're sliding X.
+            const mirroredVal = axis === 'x' ? -stepComp : stepComp;
+            axisLocks.push({ boneId: oppBone, axis, value: mirroredVal });
+        }
+
         const solved = solveConstraintsAccommodating(
-            tentative, lockedSet, workingTwists,
-            [{ boneId: selectedBone, axis, value: stepComp }]
+            tentative, lockedSet, workingTwists, axisLocks
         );
         if (solved === null) break;
         workingPosture = solved.posture;
@@ -1915,14 +2295,15 @@ const BioModelPage: React.FC = () => {
     const totalDelta = storeVal - startTwist;
     if (Math.abs(totalDelta) < 0.01) return;
 
-    // The bone's DIRECTION is free so the solver can move the elbow/knee
-    // to accommodate the twist change (e.g., rotating the elbow around a
-    // fixed hand). Only the mirror partner is locked.
+    // Both the user's bone's DIRECTION and the mirror partner's DIRECTION
+    // stay free so the solver can accommodate the twist. lockedBoneIds
+    // stays empty. What we lock are the TWISTS: both the user's selected
+    // bone and its mirror partner (with negated value). The mirror
+    // partner's pose gets synchronized via mirrorPosture inside the loop.
     const lockedSet = new Set<string>();
-    if (symmetryMode) {
-        const opp = getOppositeBone(selectedBone);
-        if (opp) lockedSet.add(opp);
-    }
+    const lockedTwistSet = new Set<string>([selectedBone]);
+    const oppBone = symmetryMode ? getOppositeBone(selectedBone) : null;
+    if (oppBone) lockedTwistSet.add(oppBone);
 
     // ~1° per micro-step.
     const STEPS = Math.max(4, Math.min(30, Math.ceil(Math.abs(totalDelta))));
@@ -1934,21 +2315,23 @@ const BioModelPage: React.FC = () => {
     for (let i = 1; i <= STEPS; i++) {
         const stepTwist = startTwist + (totalDelta * i) / STEPS;
         let tentativeTwists = { ...workingTwists, [selectedBone]: stepTwist };
-        if (symmetryMode) {
-            const opp = getOppositeBone(selectedBone);
-            if (opp) tentativeTwists[opp] = -stepTwist;
-        }
+        if (oppBone) tentativeTwists[oppBone] = -stepTwist;
 
-        const solved = solveConstraintsAccommodating(workingPosture, lockedSet, tentativeTwists);
+        // Mirror the pose from the user's side to the opposite side so the
+        // solver starts from a symmetric configuration. Without this the
+        // opposite side drifts away from the mirror over successive steps.
+        let tentativePosture: Posture = { ...workingPosture };
+        if (symmetryMode) tentativePosture = mirrorPosture(tentativePosture, selectedBone);
+
+        const solved = solveConstraintsAccommodating(
+            tentativePosture, lockedSet, tentativeTwists, [], lockedTwistSet
+        );
         if (solved === null) break;
         workingPosture = solved.posture;
         workingTwists = solved.twists;
         // Preserve the user's intended twist value.
         workingTwists[selectedBone] = stepTwist;
-        if (symmetryMode) {
-            const opp = getOppositeBone(selectedBone);
-            if (opp) workingTwists[opp] = -stepTwist;
-        }
+        if (oppBone) workingTwists[oppBone] = -stepTwist;
         lastAcceptedPosture = workingPosture;
         lastAcceptedTwists = { ...workingTwists };
     }
@@ -1987,18 +2370,40 @@ const BioModelPage: React.FC = () => {
   const addNewForce = (type: 'fixed' | 'cable' = 'fixed') => {
     const boneId = selectedBone || 'rForearm';
     const pulley = type === 'cable' ? { x: 0, y: -100, z: 0 } : undefined;
-    const newForce: ForceConfig = { id: Date.now().toString(), name: type === 'cable' ? 'Cable' : 'Force', boneId, position: 1, x: 0, y: -1, z: 0, magnitude: 10, pulley };
-    setForces([...forces, newForce]);
+    const baseId = Date.now().toString();
+    const newForce: ForceConfig = {
+        id: baseId,
+        name: type === 'cable' ? 'Cable' : 'Force',
+        boneId, position: 1, x: 0, y: -1, z: 0, magnitude: 10, pulley,
+    };
+    setForces(prev => [...prev, newForce]);
+    const src = sideOf(boneId);
+    if (symmetryMode && src) applyWholesaleSync(src);
     setEditingForceId(newForce.id);
     setActiveTab('kinetics');
   };
-  
+
   const updateForce = (id: string, field: keyof ForceConfig, value: any) => {
     if (typeof value === 'number' && isNaN(value)) return;
-    setForces(prev => prev.map(f => f.id === id ? { ...f, [field]: value } : f));
+    let srcSide: 'l' | 'r' | null = null;
+    setForces(prev => {
+        const updated = prev.map(f => f.id === id ? { ...f, [field]: value } : f);
+        const source = updated.find(f => f.id === id);
+        if (source) srcSide = sideOf(source.boneId);
+        return updated;
+    });
+    if (symmetryMode && srcSide) applyWholesaleSync(srcSide);
   };
-  
-  const deleteForce = (id: string) => { setForces(prev => prev.filter(f => f.id !== id)); };
+
+  const deleteForce = (id: string) => {
+    let srcSide: 'l' | 'r' | null = null;
+    setForces(prev => {
+        const target = prev.find(f => f.id === id);
+        if (target) srcSide = sideOf(target.boneId);
+        return prev.filter(f => f.id !== id);
+    });
+    if (symmetryMode && srcSide) applyWholesaleSync(srcSide);
+  };
 
   const toggleSymmetry = () => setSymmetryMode(prev => !prev);
 
@@ -2102,40 +2507,74 @@ const BioModelPage: React.FC = () => {
   }, [selectedBone, posture, isScapula]);
 
   // ANIMATION LOOP
+  //
+  // Interpolation strategy: every slider moves at a fixed proportional speed
+  // between start and end — a slider whose value changes 50° covers the same
+  // t-range as one changing 5°, so the bigger-delta slider moves ~10× faster
+  // in absolute terms. This is what the user sees as "constant-feeling"
+  // playback. To achieve this:
+  //   • Unit direction vectors use SLERP (constant angular velocity on the
+  //     great circle between start and end — component-wise lerp does NOT
+  //     give constant angular speed and was the cause of the "fast in the
+  //     middle / slow at the ends" feel).
+  //   • Non-unit clavicle offset vectors use linear lerp (they're
+  //     translations, not rotations).
+  //   • Twists use linear scalar lerp.
+  //
+  // Constraint enforcement: the straight-line path between two valid poses
+  // doesn't lie on the constraint manifold, so each interpolated frame is
+  // projected back onto it by solveConstraintsAccommodating (empty lock
+  // sets — we want all bones free to satisfy constraints, starting from the
+  // interpolated "tentative" as a hint). If the solver fails on a frame we
+  // just skip rendering that frame and keep the previous valid pose.
   useEffect(() => {
     if (isPlaying) {
       const startTime = Date.now();
       const cycleDuration = 3000;
+      const EMPTY_LOCK = new Set<string>();
       const animate = () => {
         const now = Date.now();
         const elapsed = now - startTime;
         const phase = (elapsed % cycleDuration) / cycleDuration;
         let t = 0;
         if (phase < 0.5) { t = phase * 2; } else { t = 2 - (phase * 2); }
+
         const newPosture: Posture = {};
-        const newTwists: Record<string, number> = {};
         Object.keys(startPosture).forEach(boneId => {
             const startV = startPosture[boneId];
             const endV = endPosture[boneId] || startV;
-            newPosture[boneId] = interpolateVector(startV, endV, t);
+            if (boneId.includes('Clavicle')) {
+                // Clavicles store raw offset vectors, not unit directions.
+                newPosture[boneId] = interpolateVector(startV, endV, t);
+            } else {
+                newPosture[boneId] = slerpDirection(startV, endV, t);
+            }
         });
+
+        const newTwists: Record<string, number> = {};
         const allTwistKeys = new Set([...Object.keys(startTwists), ...Object.keys(endTwists)]);
         allTwistKeys.forEach(boneId => {
             const startT = startTwists[boneId] || 0;
             const endT = endTwists[boneId] || 0;
             newTwists[boneId] = interpolateScalar(startT, endT, t);
         });
-        setPosture(newPosture);
-        setTwists(newTwists);
+
+        // Project the interpolated frame onto the constraint manifold.
+        const solved = solveConstraintsAccommodating(newPosture, EMPTY_LOCK, newTwists);
+        if (solved) {
+            setPosture(solved.posture);
+            setTwists(solved.twists);
+        }
         animationRef.current = requestAnimationFrame(animate);
       };
       animationRef.current = requestAnimationFrame(animate);
     } else {
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
-      if (poseMode === 'start') { setPosture(startPosture); setTwists(startTwists); } 
+      if (poseMode === 'start') { setPosture(startPosture); setTwists(startTwists); }
       else { setPosture(endPosture); setTwists(endTwists); }
     }
     return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying, startPosture, endPosture, startTwists, endTwists, poseMode]);
 
   // INITIALIZE TARGET POS ON SELECTION
@@ -2261,7 +2700,7 @@ const BioModelPage: React.FC = () => {
                 pulley: f.pulley
             }))}
             reactionForces={[...reactionForces, ...scapulaActionIndicators]}
-            planes={[...visualConstraintPlanes, ...jointActionArcs]}
+            planes={visualConstraintPlanes}
             selectedBone={selectedBone}
             onSelectBone={handleBoneSelect} 
             targetPos={targetPos} 
