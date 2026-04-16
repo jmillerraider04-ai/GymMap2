@@ -350,19 +350,9 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
     };
 
     // --- KINEMATICS GENERATION ---
-    // Spine: a passive rigid bone from pelvis → ribcage. Its direction
-    // comes from posture['spine'] (default {0,-1,0} = upright). The solver
-    // can tilt it to accommodate constraints.
+    const neckBase = { x: 0, y: -CONFIG.TORSO_LEN / 2, z: 0 };
     const pelvisBase = { x: 0, y: CONFIG.TORSO_LEN / 2, z: 0 };
-    const spineDir = posture['spine'] || { x: 0, y: -1, z: 0 };
-    const sdLen = Math.sqrt(spineDir.x * spineDir.x + spineDir.y * spineDir.y + spineDir.z * spineDir.z) || 1;
-    const sdNorm = { x: spineDir.x / sdLen, y: spineDir.y / sdLen, z: spineDir.z / sdLen };
-    const neckBase = {
-        x: pelvisBase.x + sdNorm.x * CONFIG.TORSO_LEN,
-        y: pelvisBase.y + sdNorm.y * CONFIG.TORSO_LEN,
-        z: pelvisBase.z + sdNorm.z * CONFIG.TORSO_LEN,
-    };
-    addLine('spine', pelvisBase, neckBase, 12);
+    addLine('spine', neckBase, pelvisBase, 12);
 
     const lHipBase = { x: -20, y: pelvisBase.y, z: 0 };
     const rHipBase = { x: 20, y: pelvisBase.y, z: 0 };
@@ -412,29 +402,21 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
         return { frame1: frame1Twisted, frame2: frame2Twisted, frame3: frame3Twisted, end1, end2 };
     };
 
-    const rootFrame = createRootFrame({x:0, y:1, z:0});
+    const rootFrame = createRootFrame({x:0, y:1, z:0}); 
 
-    // Spine frame: transported from root along the spine's world direction.
-    // Everything above the pelvis (clavicles, arms) uses this as parent
-    // so the upper body tilts with the spine.
-    const spineFrame = transportFrame(rootFrame, sdNorm);
-
-    // Dynamic Clavicles — offsets interpreted in spine frame so they
-    // tilt with the spine.
+    // Dynamic Clavicles
     const lClavOffset = posture['lClavicle'] || { x: -25, y: 0, z: 0 };
     const rClavOffset = posture['rClavicle'] || { x: 25, y: 0, z: 0 };
-    const lClavWorld = localToWorld(spineFrame, lClavOffset);
-    const rClavWorld = localToWorld(spineFrame, rClavOffset);
 
-    const lShoulderPos = { x: neckBase.x + lClavWorld.x, y: neckBase.y + lClavWorld.y, z: neckBase.z + lClavWorld.z };
-    const rShoulderPos = { x: neckBase.x + rClavWorld.x, y: neckBase.y + rClavWorld.y, z: neckBase.z + rClavWorld.z };
+    const lShoulderPos = { x: neckBase.x + lClavOffset.x, y: neckBase.y + lClavOffset.y, z: neckBase.z + lClavOffset.z };
+    const rShoulderPos = { x: neckBase.x + rClavOffset.x, y: neckBase.y + rClavOffset.y, z: neckBase.z + rClavOffset.z };
 
     addLine('lClavicle', neckBase, lShoulderPos);
     addLine('rClavicle', neckBase, rShoulderPos);
 
-    // Dynamic Limbs — arms parent off spineFrame, legs off rootFrame.
-    const lArm = buildLimb('lHumerus', 'lForearm', '', lShoulderPos, spineFrame, CONFIG.HUMERUS_LEN, CONFIG.FOREARM_LEN, 0);
-    const rArm = buildLimb('rHumerus', 'rForearm', '', rShoulderPos, spineFrame, CONFIG.HUMERUS_LEN, CONFIG.FOREARM_LEN, 0);
+    // Dynamic Limbs
+    const lArm = buildLimb('lHumerus', 'lForearm', '', lShoulderPos, rootFrame, CONFIG.HUMERUS_LEN, CONFIG.FOREARM_LEN, 0);
+    const rArm = buildLimb('rHumerus', 'rForearm', '', rShoulderPos, rootFrame, CONFIG.HUMERUS_LEN, CONFIG.FOREARM_LEN, 0);
     const lLeg = buildLimb('lFemur', 'lTibia', 'lFoot', lHipBase, rootFrame, CONFIG.FEMUR_LEN, CONFIG.TIBIA_LEN, CONFIG.FOOT_LEN);
     const rLeg = buildLimb('rFemur', 'rTibia', 'rFoot', rHipBase, rootFrame, CONFIG.FEMUR_LEN, CONFIG.TIBIA_LEN, CONFIG.FOOT_LEN);
 
