@@ -784,8 +784,10 @@ const BioModelPage: React.FC = () => {
     locations['Spine'] = { x: 0, y: CONFIG.TORSO_LEN/2, z: 0 };
     const neckBase = { x: 0, y: -CONFIG.TORSO_LEN/2, z: 0 }; 
     
-    boneStartPoints['spine'] = neckBase;
-    boneEndPoints['spine'] = locations['Spine'];
+    // Spine: proximal end = pelvis (the fixed joint center for moment arms),
+    // distal end = neckBase (where clavicles attach).
+    boneStartPoints['spine'] = locations['Spine']; // pelvis
+    boneEndPoints['spine'] = neckBase;              // neck
 
     const lClavOffset = currentPosture['lClavicle'] || { x: -25, y: 0, z: 0 };
     const rClavOffset = currentPosture['rClavicle'] || { x: 25, y: 0, z: 0 };
@@ -802,6 +804,7 @@ const BioModelPage: React.FC = () => {
     locations['rHip'] = { x: CONFIG.HIP_WIDTH, y: CONFIG.TORSO_LEN/2, z: 0 };
 
     const rootFrame = createRootFrame({x: 0, y: 1, z: 0});
+    jointFrames['spine'] = rootFrame;
     jointFrames['lClavicle'] = rootFrame;
     jointFrames['rClavicle'] = rootFrame;
     jointFrames['lShoulder'] = rootFrame;
@@ -1889,14 +1892,15 @@ const BioModelPage: React.FC = () => {
   const BONE_ORDER = ['lClavicle', 'rClavicle', 'lHumerus', 'rHumerus', 'lFemur', 'rFemur', 'lForearm', 'rForearm', 'lTibia', 'rTibia', 'lFoot', 'rFoot'];
 
   const BONE_PARENTS: Record<string, string | undefined> = {
-    lClavicle: undefined,
-    rClavicle: undefined,
+    spine: undefined,
+    lClavicle: 'spine',
+    rClavicle: 'spine',
     lHumerus: 'lClavicle',
     rHumerus: 'rClavicle',
     lForearm: 'lHumerus',
     rForearm: 'rHumerus',
-    lFemur: undefined,
-    rFemur: undefined,
+    lFemur: 'spine',
+    rFemur: 'spine',
     lTibia: 'lFemur',
     rTibia: 'rFemur',
     lFoot: 'lTibia',
@@ -1904,6 +1908,7 @@ const BioModelPage: React.FC = () => {
   };
 
   const BONE_TO_JOINT_GROUP: Record<string, JointGroup> = {
+    spine: 'Spine',
     lClavicle: 'Scapula', rClavicle: 'Scapula',
     lHumerus: 'Shoulder', rHumerus: 'Shoulder',
     lForearm: 'Elbow',   rForearm: 'Elbow',
@@ -3982,7 +3987,7 @@ const BioModelPage: React.FC = () => {
                           Each constraint blocks motion in a chosen direction. The limb's distal end is locked to the plane perpendicular to that direction.
                       </p>
                   </div>
-                  {!selectedBone || selectedBone === 'spine' ? (
+                  {!selectedBone ? (
                       <div className="flex-1 flex flex-col items-center justify-center text-center opacity-50 border-2 border-dashed border-gray-100 rounded-3xl min-h-[150px]">
                           <MousePointerClick className="w-10 h-10 text-gray-300 mb-3" />
                           <p className="text-gray-500 font-bold text-sm">Select a limb to<br/>configure constraints.</p>
