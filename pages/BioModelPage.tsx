@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import BioMan, { Posture, Vector3, VisualForce, VisualPlane } from '../components/BioMan';
-import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, BrainCircuit, Axis3d, Plus, Trash2 } from 'lucide-react';
+import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, BrainCircuit, Axis3d, Plus, Trash2, TrendingUp } from 'lucide-react';
 
 const DEFAULT_POSTURE: Posture = {
   lClavicle: { x: -25, y: 0, z: 0 },
@@ -89,6 +89,15 @@ interface Measurement {
   isDim?: boolean;
 }
 
+// Resistance profile: piecewise-linear curve mapping timeline position
+// t ∈ [0, 1] (start → end of the exercise ROM) to a multiplier on force
+// magnitude. Models cams, banded resistance, leveraged machine profiles,
+// or any situation where the "weight" changes through the movement.
+// Default (no profile) = constant multiplier of 1.0.
+interface ResistanceProfile {
+    points: { t: number; multiplier: number }[];
+}
+
 interface ForceConfig {
     id: string;
     name: string;
@@ -101,15 +110,32 @@ interface ForceConfig {
     mirrorId?: string;
     // Point-tracking (cable) mode: force always aims from attachment toward pulley
     pulley?: Vector3;
+    // Bone-local direction mode: when true, the (x, y, z) vector is
+    // interpreted in the bone's local joint frame and transformed to world
+    // space at each pose. Models lever machines where the handle swings
+    // with the limb, so the force direction tracks with the bone rather
+    // than staying fixed in world space. Cable (pulley) overrides this.
+    localFrame?: boolean;
+    // When true AND localFrame is true, the bone's IR/ER twist is excluded
+    // from the local frame computation. The force rotates with the bone's
+    // gross swing (flexion, abduction, etc.) but NOT with its axial twist.
+    // This is the typical lever-machine behavior: the handle pivots as the
+    // lever swings, but the handle doesn't spin around the shaft. Without
+    // this, small twist changes (which can occur even in non-rotation
+    // exercises due to how IR/ER is defined) cause the force to rotate
+    // unexpectedly.
+    localFrameIgnoreTwist?: boolean;
+    // Resistance profile: magnitude multiplier as a function of ROM t.
+    profile?: ResistanceProfile;
 }
 
 interface BoneConstraint {
     id: string;
     active: boolean;
-    type: 'planar' | 'arc';
+    type: 'planar' | 'arc' | 'fixed';
     // Planar fields
     normal: Vector3;   // direction the limb CANNOT move in — tip locked to plane perpendicular to this
-    center: Vector3;   // world-space point the plane passes through (distal tip at time of creation)
+    center: Vector3;   // world-space point the plane/fixed-point passes through (distal tip at time of creation)
     // Arc fields (used when type === 'arc')
     pivot?: Vector3;   // world-space center of rotation (machine axle)
     axis?: Vector3;    // rotation axis direction
@@ -142,6 +168,13 @@ interface ActionAxis {
     negativeAction: string;
     axis: Vector3;
     isBoneAxis?: boolean;  // true for IR/ER — axis computed from current bone direction
+    // When true, the axis is interpreted in WORLD space and skips the
+    // jointFrame local-to-world transformation. Used for actions like
+    // horizontal ab/ad that are defined relative to the world orientation
+    // (transverse plane of a standing person), not the joint's local frame.
+    // Without this flag, horizontal ab/ad's local Y axis would alias to the
+    // humerus bone axis in the joint frame and collide with IR/ER.
+    useWorldAxis?: boolean;
 }
 
 interface JointActionDemand {
@@ -157,9 +190,72 @@ interface TorqueDistributionResult {
     totalEffort: number;
     limitingAction: JointActionDemand | null;
     rawTorques: Record<string, Vector3>;
+    // Net transmitted force at each bone's proximal joint, in world space.
+    // Computed by walking the chain from each applied force up to the root
+    // and summing the force vector, plus Phase B constraint reaction forces
+    // (λ·n) at every ancestor of a constrained bone. Used by the limb force
+    // arrow visualization so the user can see at a glance what each joint
+    // is actually resisting once constraints have done their work.
+    jointForces: Record<string, Vector3>;
 }
 
+// --- JOINT LIMITS ---
+//
+// Per joint-action pair, store the passive end-range in degrees. When the
+// physics engine wires this up, torque components pushing the joint past
+// min or max become "passively absorbed" (bone/capsule/ligament) and drop
+// out of the muscle demand calculation. The UI treats the positive-action
+// direction as "positive angle" and negative-action as "negative angle",
+// so a joint like Elbow (Flexion = positive, Extension = negative) has
+// limits like { min: 0, max: 160 }.
+//
+// The data model supports sophistication that the first-pass UI may hide:
+//
+//   softZone   - an optional end-range width (degrees) where resistance
+//                ramps linearly from 0 at (limit - softZone) to full at
+//                the limit. 0 or undefined means a perfectly hard stop.
+//
+//   coupling   - optional linear coupling to another joint action's live
+//                angle. The effective limit becomes
+//                    limit + slope * couplingAction.currentAngle
+//                so e.g. hip flexion limit can fall as knee extends.
+//                Null means independent limits.
+//
+// Keyed by "${JointGroup}.${positiveAction}" — limits are shared bilaterally
+// (left and right share the same anatomy), so we don't key by bone.
+interface JointLimitCoupling {
+    dependsOn: string;   // "${JointGroup}.${positiveAction}" of the coupling source
+    slopeMin: number;    // degrees shift in min per degree of source
+    slopeMax: number;    // degrees shift in max per degree of source
+}
+interface JointLimit {
+    min: number;
+    max: number;
+    softZone?: number;
+    coupling?: JointLimitCoupling;
+}
+type JointLimitsMap = Record<string, JointLimit>;
+
 const createCap = (base: number, specific: number = base, angle: number = 90): CapacityConfig => ({ base, specific, angle });
+
+// Evaluate a capacity at a given joint angle. Uses cosine interpolation
+// between `base` (strength at the worst position) and `specific` (strength
+// at the optimal `angle`). The curve is a smooth bell centered at `angle`:
+//
+//   cap(θ) = base + (specific - base) × ½(1 + cos(π × |θ - angle| / 180))
+//
+//   θ = angle     →  cos(0) = 1       →  cap = specific  (peak)
+//   θ = angle±90  →  cos(π/2) = 0     →  cap = (base+specific)/2  (mid)
+//   θ = angle±180 →  cos(π) = -1      →  cap = base  (weakest)
+//
+// This is a deliberate simplification — real strength curves aren't
+// perfectly cosine-shaped — but it's the right shape (bell, smooth, peaked
+// at mid-range) and only uses the three numbers already in CapacityConfig.
+const evaluateCapacity = (cap: CapacityConfig, currentAngle: number): number => {
+    const dist = Math.min(Math.abs(currentAngle - cap.angle), 180);
+    const blend = 0.5 + 0.5 * Math.cos(dist * Math.PI / 180);
+    return Math.max(cap.base + (cap.specific - cap.base) * blend, 0.001);
+};
 
 const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
     'Shoulder': {
@@ -204,6 +300,75 @@ const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
         'lateralFlexion': createCap(70, 130, 0),
         'rotation': createCap(70, 120, 0)
     }
+};
+
+// Default joint limits. Key scheme:
+//   "${group}.action.${positiveActionName}" — action-based dimension
+//   "${group}.dir.${x|y|z}"                 — direction-component dimension
+//
+// Bilateral normalization: limits are stored in RIGHT-side convention for
+// dir.x (since +X is body-right in model coordinates). Left-side bones
+// negate their x before comparison, so the same limit table serves both.
+// Y/Z/action values have no bilateral flip — they're already symmetric
+// across the sagittal plane (both arms flex forward to -z, both elevate
+// up to -y, both flex about the mediolateral X axis).
+//
+// All numbers are approximate population ROM for a healthy adult. Users
+// can edit these in the Joint Limits tab if they need something different.
+const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
+    // --- Scapula (clavicle offset, model-unit cm, y-down) ---
+    'Scapula.dir.y': { min: -15, max: 10 },
+    'Scapula.dir.z': {
+        min: -15, max: 10,
+        // "Retraction limit increases slightly as the scapula elevates."
+        // elevation = dir.y decreasing (more negative).  dir.z.min is the
+        // retraction stop; we want it to decrease (more retraction) as y
+        // decreases. effective.min = min + slopeMin * source.currentValue
+        //   y =   0  →  eff.min = -15            (neutral)
+        //   y = -10  →  eff.min = -15 + 0.5*-10 = -20  (5 more retraction)
+        coupling: { dependsOn: 'Scapula.dir.y', slopeMin: 0.5, slopeMax: 0 },
+    },
+
+    // --- Shoulder (humerus unit direction, right-normalized) ---
+    // Right arm at rest is (0, 1, 0). Full abduction ≈ (1, 0, 0).
+    // Cross-body adduction reaches ≈ (-0.4, 0.9, 0) at ~25°.
+    // Overhead (y = -1) is hit via flexion or abduction.
+    // Forward flexion tip reaches (0, 0, -1); further overhead curls back.
+    // Backward extension ≈ 60° → z ≈ +0.87.
+    'Shoulder.dir.x': { min: -0.4, max: 1.02 },
+    'Shoulder.dir.y': { min: -1.02, max: 1.02 },
+    'Shoulder.dir.z': { min: -1.02, max: 0.9 },
+    'Shoulder.action.External Rotation': { min: -90, max: 90 },
+
+    // --- Elbow hinge. The slider emits 0-160 meaning "degrees of flexion"
+    // and the drag handler uses that value directly as a stored-angle
+    // target, so the joint limit has to be in THAT same space: 0 straight,
+    // 160 fully flexed. positiveAction = Extension is a SEPARATE convention
+    // for demand labeling — it controls whether a positive torque component
+    // gets labeled "Extension" or "Flexion", and is independent of which
+    // direction the stored hinge angle calls positive. The two conventions
+    // happen to disagree here, which is fine as long as nothing mixes them.
+    'Elbow.action.Extension': { min: 0, max: 160 },
+
+    // --- Spine (fixed in the model today; defined for static analysis) ---
+    'Spine.action.Flexion':          { min: -30, max: 80 },
+    'Spine.action.Lateral Flexion L':{ min: -35, max: 35 },
+    'Spine.action.Rotation L':       { min: -45, max: 45 },
+
+    // --- Hip (femur unit direction, right-normalized) ---
+    // Standing rest: (0, 1, 0). Flexion forward curls y toward -0.5 with
+    // z → -0.85 at ~120°. Extension back reaches z ≈ 0.3 at ~20°.
+    // Abduction out to ≈ 45° gives x ≈ 0.7. Cross-midline adduction ≈ -0.35.
+    'Hip.dir.x': { min: -0.35, max: 0.75 },
+    'Hip.dir.y': { min: -0.55, max: 1.02 },
+    'Hip.dir.z': { min: -0.9,  max: 0.4  },
+    'Hip.action.External Rotation': { min: -45, max: 45 },
+
+    // --- Knee hinge. Same as Elbow — limit is in slider space (0=straight, 160=full flex). ---
+    'Knee.action.Extension': { min: 0, max: 160 },
+
+    // --- Ankle hinge. positiveAction = Dorsi Flexion. ---
+    'Ankle.action.Dorsi Flexion': { min: -50, max: 30 },
 };
 
 const normalize = (v: Vector3): Vector3 => {
@@ -283,6 +448,11 @@ const mirrorForceData = (f: ForceConfig): Omit<ForceConfig, 'id' | 'mirrorId'> =
         z: f.z,
         magnitude: f.magnitude,
         pulley: f.pulley ? { x: -f.pulley.x, y: f.pulley.y, z: f.pulley.z } : undefined,
+        // Carry over all optional force features so the mirrored side
+        // stays in sync with the source side's configuration.
+        localFrame: f.localFrame,
+        localFrameIgnoreTwist: f.localFrameIgnoreTwist,
+        profile: f.profile ? { points: f.profile.points.map(p => ({ ...p })) } : undefined,
     };
 };
 
@@ -516,6 +686,24 @@ const interpolateScalar = (start: number, end: number, t: number): number => {
     return start + (end - start) * t;
 };
 
+// Evaluate a resistance profile at timeline position t. Returns the
+// magnitude multiplier (piecewise-linear interpolation between control
+// points). If profile is undefined/empty, returns 1.0 (flat profile).
+const evaluateProfile = (profile: ResistanceProfile | undefined, t: number): number => {
+    if (!profile || profile.points.length === 0) return 1;
+    if (profile.points.length === 1) return profile.points[0].multiplier;
+    const pts = profile.points; // assume sorted by t ascending
+    if (t <= pts[0].t) return pts[0].multiplier;
+    if (t >= pts[pts.length - 1].t) return pts[pts.length - 1].multiplier;
+    for (let i = 0; i < pts.length - 1; i++) {
+        if (t >= pts[i].t && t <= pts[i + 1].t) {
+            const frac = (t - pts[i].t) / (pts[i + 1].t - pts[i].t);
+            return pts[i].multiplier + frac * (pts[i + 1].multiplier - pts[i].multiplier);
+        }
+    }
+    return 1;
+};
+
 const mirrorPosture = (posture: Posture, sourceBoneId: string): Posture => {
     const isLeft = sourceBoneId.startsWith('l');
     const prefix = isLeft ? 'l' : 'r';
@@ -549,7 +737,7 @@ const mirrorTwists = (twists: Record<string, number>, sourceBoneId: string): Rec
 };
 
 const BioModelPage: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'capacities' | 'constraints'>('kinematics');
+  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'timeline' | 'capacities' | 'constraints' | 'limits'>('kinematics');
   const [poseMode, setPoseMode] = useState<'start' | 'end'>('start');
   const [startPosture, setStartPosture] = useState<Posture>(DEFAULT_POSTURE);
   const [endPosture, setEndPosture] = useState<Posture>(DEFAULT_POSTURE);
@@ -563,12 +751,25 @@ const BioModelPage: React.FC = () => {
   
   const [symmetryMode, setSymmetryMode] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  // Current ROM position for resistance profile evaluation. 0 = start pose,
+  // 1 = end pose. Updated by pose-mode switch and playback animation.
+  const [currentRomT, setCurrentRomT] = useState(0);
   const animationRef = useRef<number | null>(null);
   const [forces, setForces] = useState<ForceConfig[]>([]);
   const [editingForceId, setEditingForceId] = useState<string | null>(null);
   const [jointCapacities, setJointCapacities] = useState<Record<JointGroup, JointCapacityProfile>>(DEFAULT_CAPACITIES);
+  const [jointLimits, setJointLimits] = useState<JointLimitsMap>(DEFAULT_JOINT_LIMITS);
+  // Joint Analysis tab display mode:
+  //   '1rm-local' — normalize so the hardest action at the current pose reads
+  //                 100%. Interprets the pose as "loaded to 1RM right now."
+  //                 Cross-joint comparable, no ROM scan required.
+  //   'raw'       — show raw effort (torque/capacity) as-is. Only meaningful if
+  //                 the user has calibrated f.magnitude to match the capacity
+  //                 table's unit scale, which defaults don't.
+  const [torqueDisplayMode, setTorqueDisplayMode] = useState<'1rm-local' | 'raw'>('1rm-local');
   
-  const [reactionForces, setReactionForces] = useState<VisualForce[]>([]);
+  // Removed reactionForces state — replaced by the jointForceArrows memo
+  // below which derives net proximal force per bone from torqueDistribution.
   const [calculatedTorques, setCalculatedTorques] = useState<Record<string, Vector3>>({});
   const [neuralCosts, setNeuralCosts] = useState<Record<string, number>>({});
 
@@ -769,22 +970,39 @@ const BioModelPage: React.FC = () => {
   // source side. Each handler for positioning/forces/constraints should call
   // this after its primary state update so a single nudge mirrors the whole
   // pose, not just the edited domain.
+  //
+  // Updates BOTH the live posture/twists AND the active keyframe (start or
+  // end) so that switching pose modes or triggering playback doesn't reveal
+  // stale asymmetric keyframes.
   const applyWholesaleSync = (src: 'l' | 'r') => {
       // mirrorPosture/mirrorTwists key off the first character of their
       // sourceBoneId argument, so passing the side letter alone is enough.
       setPosture(prev => mirrorPosture(prev, src));
       setTwists(prev => mirrorTwists(prev, src));
+      if (poseMode === 'start') {
+          setStartPosture(prev => mirrorPosture(prev, src));
+          setStartTwists(prev => mirrorTwists(prev, src));
+      } else {
+          setEndPosture(prev => mirrorPosture(prev, src));
+          setEndTwists(prev => mirrorTwists(prev, src));
+      }
       setForces(prev => syncForcesFromSide(prev, src));
       setConstraints(prev => syncConstraintsFromSide(prev, src));
   };
 
-  const addConstraint = (boneId: string, type: 'planar' | 'arc' = 'planar') => {
+  const addConstraint = (boneId: string, type: 'planar' | 'arc' | 'fixed' = 'planar') => {
       const kin = calculateKinematics(posture, twists);
       const tip = kin.boneEndPoints[boneId];
       if (!tip) return;
       const baseId = Date.now().toString() + Math.random().toString(36).slice(2, 6);
       let newC: BoneConstraint;
-      if (type === 'arc') {
+      if (type === 'fixed') {
+          newC = {
+              id: baseId, active: true, type: 'fixed',
+              normal: { x: 0, y: 0, z: 0 }, // unused but required by interface
+              center: tip,
+          };
+      } else if (type === 'arc') {
           const start = kin.boneStartPoints[boneId];
           const rawPivot = start || { x: 0, y: 0, z: 0 };
           const axis = { x: 0, y: 0, z: 1 };
@@ -830,7 +1048,16 @@ const BioModelPage: React.FC = () => {
       (Object.entries(constraints) as [string, BoneConstraint[]][]).forEach(([boneId, list]) => {
           list.forEach(c => {
               if (!c.active) return;
-              if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
+              if (c.type === 'fixed') {
+                  // Fixed point: show 3 small orthogonal planes as a visual
+                  // "pin" marker at the locked position. Use a smaller size
+                  // and distinct color (rose) so it reads as "locked here."
+                  const pt = c.center;
+                  const SZ = 20;
+                  out.push({ id: c.id + '-fx', center: pt, normal: { x: 1, y: 0, z: 0 }, size: SZ, color: 'rgba(244, 63, 94, 0.25)', boneId });
+                  out.push({ id: c.id + '-fy', center: pt, normal: { x: 0, y: 1, z: 0 }, size: SZ, color: 'rgba(244, 63, 94, 0.25)', boneId });
+                  out.push({ id: c.id + '-fz', center: pt, normal: { x: 0, y: 0, z: 1 }, size: SZ, color: 'rgba(244, 63, 94, 0.25)', boneId });
+              } else if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
                   out.push({
                       id: c.id,
                       center: c.pivot,
@@ -860,7 +1087,10 @@ const BioModelPage: React.FC = () => {
   }, [constraints, posture, twists]);
 
   // Force direction with explicit kinematics (avoids recalculating).
-  const getForceDirectionWithKin = (f: ForceConfig, kin: ReturnType<typeof calculateKinematics>): Vector3 => {
+  const getForceDirectionWithKin = (f: ForceConfig, kin: ReturnType<typeof calculateKinematics>, bTwists?: Record<string, number>): Vector3 => {
+      // Cable mode: direction always from attachment point toward pulley.
+      // Takes priority over localFrame (cable direction is world-space by
+      // definition — the cable goes to a fixed point in the room).
       if (f.pulley) {
           const seg = kin.boneStartPoints[f.boneId];
           const end = kin.boneEndPoints[f.boneId];
@@ -871,11 +1101,43 @@ const BioModelPage: React.FC = () => {
               if (len > 0.001) return mul(towardPulley, 1 / len);
           }
       }
-      return { x: f.x, y: f.y, z: f.z };
+      const raw = normalize({ x: f.x, y: f.y, z: f.z });
+      // Bone-local mode: interpret (x, y, z) as a direction in the bone's
+      // OWN local frame (Y = bone axis, X = perpendicular "hinge" axis,
+      // Z = flex direction) and transform to world space. As the bone moves,
+      // the force direction rotates with it — models lever-type machines
+      // where the handle is rigidly attached to the limb.
+      //
+      // NOTE: jointFrames[boneId] stores the bone's PARENT frame, not the
+      // bone's own frame. We need to transport the parent frame to the
+      // bone's current direction and apply its twist to get the bone's
+      // own frame. This is the same computation calculateChain does, just
+      // reconstructed here from the stored kinematics.
+      if (f.localFrame) {
+          const parentFrame = kin.jointFrames[f.boneId];
+          const bs = kin.boneStartPoints[f.boneId];
+          const be = kin.boneEndPoints[f.boneId];
+          if (parentFrame && bs && be) {
+              const boneWorldDir = normalize(sub(be, bs));
+              const boneFrame = transportFrame(parentFrame, boneWorldDir);
+              // When localFrameIgnoreTwist is set, use the pre-twist frame
+              // so the force tracks the bone's swing but not its axial
+              // rotation. This is the common lever-machine behavior.
+              const frame = f.localFrameIgnoreTwist
+                  ? boneFrame
+                  : twistFrame(boneFrame, bTwists?.[f.boneId] || 0);
+              return normalize({
+                  x: raw.x * frame.x.x + raw.y * frame.y.x + raw.z * frame.z.x,
+                  y: raw.x * frame.x.y + raw.y * frame.y.y + raw.z * frame.z.y,
+                  z: raw.x * frame.x.z + raw.y * frame.y.z + raw.z * frame.z.z,
+              });
+          }
+      }
+      return raw;
   };
 
   const getForceDirection = (f: ForceConfig): Vector3 => {
-      return getForceDirectionWithKin(f, calculateKinematics(posture, twists));
+      return getForceDirectionWithKin(f, calculateKinematics(posture, twists), twists);
   };
 
   const getVisualVector = (f: ForceConfig): Vector3 => {
@@ -916,7 +1178,10 @@ const BioModelPage: React.FC = () => {
       currentTwists: Record<string, number>,
       currentForces: ForceConfig[],
       capacities: Record<JointGroup, JointCapacityProfile>,
-      activeConstraints?: Record<string, BoneConstraint[]>
+      activeConstraints?: Record<string, BoneConstraint[]>,
+      // Current ROM position [0, 1] for resistance profile evaluation.
+      // Defaults to 0 (start pose) when not provided.
+      currentT: number = 0
   ): TorqueDistributionResult => {
       const kin = calculateKinematics(currentPosture, currentTwists);
       const rawTorques: Record<string, Vector3> = {};
@@ -925,30 +1190,50 @@ const BioModelPage: React.FC = () => {
       // force at each scapula (clavicle) since scapulae translate, not rotate.
       const scapulaForces: Record<string, Vector3> = {};
 
+      // Net transmitted force at each bone's proximal joint — the sum of
+      // every applied force vector (and, later, constraint reactions) on
+      // the chain distal to and including this bone. Visualized as arrows
+      // at the limb's proximal tip so the user can verify that each joint
+      // is feeling the full load after all physics (constraints + chain
+      // transmission). Scaled by f.magnitude because the user sees absolute
+      // force magnitudes in the Kinetics tab and expects arrow length to
+      // reflect them.
+      const jointForces: Record<string, Vector3> = {};
+
       for (const f of currentForces) {
           const seg = kin.boneStartPoints[f.boneId];
           const end = kin.boneEndPoints[f.boneId];
           if (!seg || !end) continue;
 
           const attachPt = add(seg, mul(sub(end, seg), f.position));
-          const forceDir = getForceDirectionWithKin(f, kin);
+          const forceDir = getForceDirectionWithKin(f, kin, currentTwists);
           const chain = getChainToRoot(f.boneId);
 
+          // Effective magnitude: base magnitude × resistance profile at the
+          // current ROM position. This is the "weight you feel" at this frame,
+          // and it scales EVERYTHING: torque, scapula force, joint force.
+          // Under the 1RM model, individual magnitudes are in arbitrary units
+          // but RELATIVE magnitudes between forces matter when there are
+          // multiple forces contributing to different joints.
+          const baseMag = f.magnitude || 1;
+          const profileMult = evaluateProfile(f.profile, currentT);
+          const effectiveMag = baseMag * profileMult;
+          const scaledForce = mul(forceDir, effectiveMag);
+
           for (const bone of chain) {
+              const prevJ = jointForces[bone] || { x: 0, y: 0, z: 0 };
+              jointForces[bone] = add(prevJ, scaledForce);
+
               if (bone.includes('Clavicle')) {
-                  // Scapula: accumulate linear force (no moment arm). Uses
-                  // unit-direction force to match the convention used for
-                  // rotation torques above — otherwise the scapula column's
-                  // scale wouldn't be comparable to the rotation columns in
-                  // Phase B's joint optimization (magnitudes don't affect the
-                  // relative distribution anyway, per the 1RM assumption).
+                  // Scapula: accumulate linear force scaled by effective
+                  // magnitude so multi-force relative weighting is correct.
                   const prev = scapulaForces[bone] || { x: 0, y: 0, z: 0 };
-                  scapulaForces[bone] = add(prev, forceDir);
+                  scapulaForces[bone] = add(prev, scaledForce);
               } else {
                   const jointCenter = kin.boneStartPoints[bone];
                   if (!jointCenter) continue;
                   const momentArm = sub(attachPt, jointCenter);
-                  const torque = crossProduct(momentArm, forceDir);
+                  const torque = crossProduct(momentArm, scaledForce);
                   const prev = rawTorques[bone] || { x: 0, y: 0, z: 0 };
                   rawTorques[bone] = add(prev, torque);
               }
@@ -989,6 +1274,9 @@ const BioModelPage: React.FC = () => {
               if (act.isBoneAxis) {
                   if (!boneAxis) continue;
                   axis = boneAxis;
+              } else if (act.useWorldAxis) {
+                  // Skip jointFrame transform — axis is already in world space.
+                  axis = normalize(act.axis);
               } else if (jointFrame) {
                   axis = normalize({
                       x: act.axis.x * jointFrame.x.x + act.axis.y * jointFrame.y.x + act.axis.z * jointFrame.z.x,
@@ -1012,11 +1300,67 @@ const BioModelPage: React.FC = () => {
               const torqueMag = Math.abs(component);
               if (torqueMag < 0.01) continue;
 
-              // Look up capacity for effort calculation
+              // Joint-limit zeroing: if the joint is at its passive end-range
+              // stop AND the torque is pushing further into that stop, the
+              // passive anatomy (ligaments/capsule/bony contact) absorbs the
+              // load and the muscle demand drops to zero. Skip this demand.
+              //
+              //   Hinges (elbow/knee/ankle): action-based limit on hinge angle.
+              //   Twists (IR/ER):            action-based limit on twist angle.
+              //   2-DOF ball-sockets:        dir-based limits + motion gradient.
+              const dims = limitDimensionsForGroup(jointGroup);
+              let blockedByLimit = false;
+              if (/Forearm|Tibia|Foot/.test(bone)) {
+                  const ad = dims.find(d => d.kind === 'action');
+                  if (ad) {
+                      const eff = getEffectiveLimit(ad.key, bone, currentPosture, currentTwists);
+                      if (eff) {
+                          const curAngle = getActionAngle(bone, act, currentPosture, currentTwists);
+                          if (curAngle >= eff.max - 1 && component > 0) blockedByLimit = true;
+                          if (curAngle <= eff.min + 1 && component < 0) blockedByLimit = true;
+                      }
+                  }
+              } else if (act.isBoneAxis) {
+                  const td = dims.find(d => d.kind === 'action' && d.action?.isBoneAxis);
+                  if (td) {
+                      const eff = getEffectiveLimit(td.key, bone, currentPosture, currentTwists);
+                      if (eff) {
+                          const curAngle = getActionAngle(bone, act, currentPosture, currentTwists);
+                          if (curAngle >= eff.max - 1 && component > 0) blockedByLimit = true;
+                          if (curAngle <= eff.min + 1 && component < 0) blockedByLimit = true;
+                      }
+                  }
+              } else {
+                  // 2-DOF: check each DIR limit. The motion of the bone tip
+                  // under a positive rotation about `axis` is axis × boneDir.
+                  // If the torque direction (sign of component) pushes further
+                  // into a limited component, zero the demand.
+                  const boneDir = currentPosture[bone];
+                  if (boneDir) {
+                      const motionRaw = crossProduct(axis, boneDir);
+                      const sign = component > 0 ? 1 : -1;
+                      for (const dim of dims) {
+                          if (dim.kind !== 'dir' || !dim.component) continue;
+                          const eff = getEffectiveLimit(dim.key, bone, currentPosture, currentTwists);
+                          if (!eff) continue;
+                          const val = getDimensionValue(dim, bone, currentPosture, currentTwists);
+                          let motionC = motionRaw[dim.component] * sign;
+                          if (dim.component === 'x' && bone.startsWith('l')) motionC = -motionC;
+                          if (val >= eff.max - 0.02 && motionC > 0.01) { blockedByLimit = true; break; }
+                          if (val <= eff.min + 0.02 && motionC < -0.01) { blockedByLimit = true; break; }
+                      }
+                  }
+              }
+              if (blockedByLimit) continue;
+
+              // Look up capacity for effort calculation. Capacity is
+              // position-dependent: evaluateCapacity interpolates between
+              // base and specific using the current joint action angle.
               const cap = capacities[jointGroup]?.[actionKey(action)] ||
                           capacities[jointGroup]?.[action] ||
                           null;
-              const capValue = cap ? Math.max(cap.specific, 0.001) : 1;
+              const actionAngle = getActionAngle(bone, act, currentPosture, currentTwists);
+              const capValue = cap ? evaluateCapacity(cap, actionAngle) : 1;
               const effort = torqueMag / capValue;
 
               const side = bone.startsWith('l') ? 'Left' : bone.startsWith('r') ? 'Right' : '';
@@ -1050,9 +1394,31 @@ const BioModelPage: React.FC = () => {
               const forceMag = Math.abs(component);
               if (forceMag < 0.01) continue;
 
+              // Scapula joint limits: clavicle offset already lives in the
+              // same coordinate space as the action axis, so the motion
+              // gradient is just the axis itself (no cross product). If the
+              // offset is at a dir.y or dir.z limit and the force pushes
+              // further into it, zero the demand.
+              {
+                  const dims = limitDimensionsForGroup(jointGroup);
+                  const sign = component > 0 ? 1 : -1;
+                  let blockedByLimit = false;
+                  for (const dim of dims) {
+                      if (dim.kind !== 'dir' || !dim.component) continue;
+                      const eff = getEffectiveLimit(dim.key, bone, currentPosture, currentTwists);
+                      if (!eff) continue;
+                      const val = getDimensionValue(dim, bone, currentPosture, currentTwists);
+                      const motionC = axis[dim.component] * sign;
+                      if (val >= eff.max - 0.5 && motionC > 0.01) { blockedByLimit = true; break; }
+                      if (val <= eff.min + 0.5 && motionC < -0.01) { blockedByLimit = true; break; }
+                  }
+                  if (blockedByLimit) continue;
+              }
+
               const cap = capacities[jointGroup]?.[action.toLowerCase().replace(/ /g, '')] ||
                           capacities[jointGroup]?.[action] || null;
-              const capValue = cap ? Math.max(cap.specific, 0.001) : 1;
+              const scapAngle = getActionAngle(bone, act, currentPosture, currentTwists);
+              const capValue = cap ? evaluateCapacity(cap, scapAngle) : 1;
               const effort = forceMag / capValue;
 
               const side = bone.startsWith('l') ? 'Left' : bone.startsWith('r') ? 'Right' : '';
@@ -1112,21 +1478,62 @@ const BioModelPage: React.FC = () => {
                   constrainedBone: string;   // which bone the constraint is on
                   ancestors: Set<string>;    // joints that feel this reaction
               };
+              // Build consRefs for BOTH planar and arc constraints. Each
+              // planar constraint contributes one reaction direction (the
+              // plane normal). Each arc constraint contributes TWO:
+              //   1. Axial — normal to the arc's plane = the arc axis.
+              //   2. Radial — current radial vector at the tip, pointing
+              //      away from the pivot projected into the arc plane.
+              // The tangent direction (axis × radial) stays free, which
+              // is exactly the arc's allowed motion. Phase B's linear
+              // solve then treats the two arc rows just like any two
+              // independent planar constraints.
               const consRefs: ConstraintRef[] = [];
               for (const b of chain) {
-                  // Only planar constraints for now (arc constraints handled via analytic path if needed)
-                  const list = (activeConstraints[b] || []).filter(c => c.active && c.type === 'planar');
+                  const list = (activeConstraints[b] || []).filter(c => c.active);
                   if (list.length === 0) continue;
                   const tipB = kin2.boneEndPoints[b];
                   if (!tipB) continue;
                   const bIdx = chain.indexOf(b);
                   const ancestors = new Set(chain.slice(bIdx));
                   for (const c of list) {
-                      const n = normalize(c.normal);
-                      if (magnitude(n) > 0.1) consRefs.push({
-                          n, center: c.center, tip: tipB,
-                          constrainedBone: b, ancestors
-                      });
+                      if (c.type === 'fixed') {
+                          // Fixed point = 3 orthogonal reaction directions. The
+                          // tip can't move at all, so the constraint can absorb
+                          // force in any direction. This makes 3 rows in the Phase
+                          // B linear system — one per world axis.
+                          consRefs.push({ n: { x: 1, y: 0, z: 0 }, center: c.center, tip: tipB, constrainedBone: b, ancestors });
+                          consRefs.push({ n: { x: 0, y: 1, z: 0 }, center: c.center, tip: tipB, constrainedBone: b, ancestors });
+                          consRefs.push({ n: { x: 0, y: 0, z: 1 }, center: c.center, tip: tipB, constrainedBone: b, ancestors });
+                      } else if (c.type === 'planar') {
+                          const n = normalize(c.normal);
+                          if (magnitude(n) > 0.1) consRefs.push({
+                              n, center: c.center, tip: tipB,
+                              constrainedBone: b, ancestors
+                          });
+                      } else if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
+                          const axisN = normalize(c.axis);
+                          // Axial reaction direction — blocks motion off the plane.
+                          if (magnitude(axisN) > 0.1) consRefs.push({
+                              n: axisN, center: c.pivot, tip: tipB,
+                              constrainedBone: b, ancestors
+                          });
+                          // Radial reaction direction at the current tip — blocks
+                          // motion toward/away from the pivot. Project relative
+                          // tip onto the plane perpendicular to the arc axis,
+                          // then normalize. Skip if degenerate (tip on the axis).
+                          const relTip = sub(tipB, c.pivot);
+                          const axComp = dotProduct(relTip, axisN);
+                          const radial = sub(relTip, mul(axisN, axComp));
+                          const radMag = magnitude(radial);
+                          if (radMag > 0.1) {
+                              const radN = { x: radial.x / radMag, y: radial.y / radMag, z: radial.z / radMag };
+                              consRefs.push({
+                                  n: radN, center: c.pivot, tip: tipB,
+                                  constrainedBone: b, ancestors
+                              });
+                          }
+                      }
                   }
               }
               if (consRefs.length === 0) continue;
@@ -1210,7 +1617,7 @@ const BioModelPage: React.FC = () => {
 
                           const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
                           const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
-                          const capVal = capLk ? Math.max(capLk.specific, 0.001) : 1;
+                          const capVal = capLk ? evaluateCapacity(capLk, getActionAngle(bone, act, currentPosture, currentTwists)) : 1;
 
                           const sens: number[] = [];
                           for (const cref of consRefs) {
@@ -1267,7 +1674,7 @@ const BioModelPage: React.FC = () => {
                       // Capacity lookup
                       const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
                       const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
-                      const capVal = capLk ? Math.max(capLk.specific, 0.001) : 1;
+                      const capVal = capLk ? evaluateCapacity(capLk, getActionAngle(bone, act, currentPosture, currentTwists)) : 1;
 
                       // Analytic sensitivity (first-order Jacobian). Each
                       // constraint's reaction acts at its own tip. A constraint
@@ -1366,6 +1773,23 @@ const BioModelPage: React.FC = () => {
               for (let i = 0; i < N; i++) AtWA[i][i] += 1e-8;
               const lam = solveSmall(AtWA, AtWb);
 
+              // Accumulate constraint reaction forces into jointForces for
+              // visualization. Each λ_i times its normal is a linear force
+              // applied at the constrained bone's tip; every bone from the
+              // constrained bone up to the root feels it transmitted through
+              // the chain.
+              for (let i = 0; i < N; i++) {
+                  const cref = consRefs[i];
+                  const Rmag = lam[i];
+                  if (Math.abs(Rmag) < 1e-9) continue;
+                  const Rvec = mul(cref.n, Rmag);
+                  const reactChain = getChainToRoot(cref.constrainedBone);
+                  for (const bone of reactChain) {
+                      const prevJ = jointForces[bone] || { x: 0, y: 0, z: 0 };
+                      jointForces[bone] = add(prevJ, Rvec);
+                  }
+              }
+
               // Apply coupling per-action (direct assignment). For every
               // column, write τ_new = τ0 + Σ λᵢ·sensᵢ directly as the demand.
               // Creates new entries when τ0 was 0 but τ_new ≠ 0 (e.g., the
@@ -1388,7 +1812,7 @@ const BioModelPage: React.FC = () => {
 
                   const capLk = capacities[c.jointGroup]?.[actionKey(newAction)]
                               || capacities[c.jointGroup]?.[newAction] || null;
-                  const capVal = capLk ? Math.max(capLk.specific, 0.001) : 1;
+                  const capVal = capLk ? evaluateCapacity(capLk, getActionAngle(c.boneId, c.act, currentPosture, currentTwists)) : 1;
 
                   if (di >= 0) {
                       filtered[di].torqueMagnitude = newMag;
@@ -1422,7 +1846,7 @@ const BioModelPage: React.FC = () => {
       const finalTotalEffort = finalFiltered.reduce((s, d) => s + d.effort, 0);
       const finalLimiting = finalFiltered.length > 0 ? finalFiltered.reduce((max, d) => d.effort > max.effort ? d : max, finalFiltered[0]) : null;
 
-      return { demands: finalFiltered, totalEffort: finalTotalEffort, limitingAction: finalLimiting, rawTorques };
+      return { demands: finalFiltered, totalEffort: finalTotalEffort, limitingAction: finalLimiting, rawTorques, jointForces };
   };
 
   const measurements = useMemo<Measurement[]>(() => {
@@ -1496,10 +1920,26 @@ const BioModelPage: React.FC = () => {
     'Shoulder': [
         { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
         { positiveAction: 'Abduction', negativeAction: 'Adduction', axis: {x:0,y:0,z:1} },
-        { positiveAction: 'Horizontal Abduction', negativeAction: 'Horizontal Adduction', axis: {x:0,y:1,z:0} },
+        // Horizontal ab/ad is rotation about the WORLD vertical. Using the
+        // local frame Y would alias to the bone axis (frame.y) and collide
+        // with IR/ER, silently zeroing this action's demand via the residual
+        // subtraction. World Y avoids that.
+        { positiveAction: 'Horizontal Abduction', negativeAction: 'Horizontal Adduction', axis: {x:0,y:1,z:0}, useWorldAxis: true },
         { positiveAction: 'External Rotation', negativeAction: 'Internal Rotation', axis: {x:0,y:0,z:0}, isBoneAxis: true },
     ],
     'Elbow': [
+        // positiveAction = Extension. dirToHingeAngle (atan2(z, y)) returns a
+        // POSITIVE angle when the forearm rotates backward past straight
+        // (toward hyperextension) and a NEGATIVE angle as it flexes forward
+        // toward the shoulder. A +X torque (the action axis) similarly rotates
+        // the forearm in the +Z direction = extension. Keeping positiveAction
+        // in sync with that convention means the demand label ("Flexion" vs
+        // "Extension") comes out right when we write:
+        //     component > 0 ? positiveAction : negativeAction
+        // The tradeoff is that the Joint Limits tab shows the stored range
+        // as {min: -160, max: 0} (negative = flexion), which is slightly
+        // counter-intuitive visually but physically consistent with everything
+        // else in the pipeline.
         { positiveAction: 'Extension', negativeAction: 'Flexion', axis: {x:1,y:0,z:0} },
     ],
     'Spine': [
@@ -1510,15 +1950,249 @@ const BioModelPage: React.FC = () => {
     'Hip': [
         { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
         { positiveAction: 'Abduction', negativeAction: 'Adduction', axis: {x:0,y:0,z:1} },
-        { positiveAction: 'Horizontal Abduction', negativeAction: 'Horizontal Adduction', axis: {x:0,y:1,z:0} },
+        // Same rationale as shoulder — world vertical avoids bone-axis collision.
+        { positiveAction: 'Horizontal Abduction', negativeAction: 'Horizontal Adduction', axis: {x:0,y:1,z:0}, useWorldAxis: true },
         { positiveAction: 'External Rotation', negativeAction: 'Internal Rotation', axis: {x:0,y:0,z:0}, isBoneAxis: true },
     ],
     'Knee': [
+        // Same convention as Elbow — positiveAction = Extension because
+        // dirToHingeAngle is positive for backward rotation (hyperextension)
+        // and negative for forward flexion. See the Elbow comment for the
+        // full rationale.
         { positiveAction: 'Extension', negativeAction: 'Flexion', axis: {x:1,y:0,z:0} },
     ],
     'Ankle': [
         { positiveAction: 'Dorsi Flexion', negativeAction: 'Plantar Flexion', axis: {x:1,y:0,z:0} },
     ],
+  };
+
+  // Map each joint group to its representative bones for left and right
+  // sides. Spine is excluded because it's fixed in the model.
+  const GROUP_BONES: Record<JointGroup, { left: string; right: string } | null> = {
+      'Scapula':  { left: 'lClavicle', right: 'rClavicle' },
+      'Shoulder': { left: 'lHumerus',  right: 'rHumerus'  },
+      'Elbow':    { left: 'lForearm',  right: 'rForearm'  },
+      'Spine':    null,
+      'Hip':      { left: 'lFemur',    right: 'rFemur'    },
+      'Knee':     { left: 'lTibia',    right: 'rTibia'    },
+      'Ankle':    { left: 'lFoot',     right: 'rFoot'     },
+  };
+
+  // Current live angle of a joint action, in degrees. Positive means the
+  // joint is rotating in the positiveAction direction of the ActionAxis.
+  //
+  // Hinges (elbow/knee/ankle) use dirToHingeAngle directly — they have
+  // exactly one DOF, so the action "angle" is unambiguous.
+  //
+  // isBoneAxis actions (IR/ER) come from the twist value.
+  //
+  // Ball-socket actions project the bone direction onto the plane
+  // perpendicular to the action's axis, compute the signed angle from a
+  // neutral direction in that plane, and return it. This is a simplified
+  // metric — it doesn't follow clinical convention for coupled actions
+  // like horizontal ab/ad at non-neutral abduction — but it's consistent
+  // and reversible, which is what matters for limit comparisons.
+  //
+  // For left-side bones, the sign is flipped on the Z and Y axes so both
+  // sides report the same positive direction (e.g. abduction always reads
+  // positive regardless of side). X-axis rotations (flexion) are
+  // bilaterally symmetric and don't need flipping.
+  const getActionAngle = (
+      boneId: string,
+      action: ActionAxis,
+      curPosture: Posture,
+      curTwists: Record<string, number>
+  ): number => {
+      if (action.isBoneAxis) {
+          const raw = curTwists[boneId] || 0;
+          // Twists are stored raw for left, negated for right (see
+          // handleRotationChange). Display positive = external rotation
+          // for both sides by flipping right.
+          return boneId.startsWith('l') ? raw : -raw;
+      }
+      if (/Forearm|Tibia|Foot/.test(boneId)) {
+          const dir = curPosture[boneId];
+          if (!dir) return 0;
+          return dirToHingeAngle(boneId, dir) * 180 / Math.PI;
+      }
+      const dir = curPosture[boneId];
+      if (!dir) return 0;
+      const axisN = normalize(action.axis);
+      const neutral = { x: 0, y: 1, z: 0 };
+      // Project both into the plane perpendicular to the action axis.
+      const dirPerp = sub(dir, mul(axisN, dotProduct(dir, axisN)));
+      const neutralPerp = sub(neutral, mul(axisN, dotProduct(neutral, axisN)));
+      if (magnitude(dirPerp) < 1e-6 || magnitude(neutralPerp) < 1e-6) return 0;
+      const a = normalize(dirPerp);
+      const b = normalize(neutralPerp);
+      const cosA = clamp(dotProduct(a, b), -1, 1);
+      const cross = crossProduct(b, a);
+      const sign = Math.sign(dotProduct(cross, axisN)) || 1;
+      let angleDeg = Math.acos(cosA) * sign * 180 / Math.PI;
+      // Bilateral flip: for left-side bones, negate actions whose axis is
+      // perpendicular to the sagittal plane (Z or Y components). X-axis
+      // actions are symmetric across the body's midline.
+      if (boneId.startsWith('l') && Math.abs(axisN.x) < 0.5) {
+          angleDeg = -angleDeg;
+      }
+      return angleDeg;
+  };
+
+  // A limit dimension is a single scalar axis that a user can bound. It's
+  // either an ACTION angle (hinge or twist, in degrees) or a DIRECTION
+  // component (raw x/y/z of the bone's stored vector). Each joint group
+  // advertises its own list of dimensions: ball-sockets expose dir.x/y/z
+  // plus an IR/ER action; hinges expose their single action; scapula
+  // exposes dir.y/z on the clavicle offset.
+  interface LimitDimension {
+      kind: 'action' | 'dir';
+      key: string;                  // matches JointLimitsMap keys
+      label: string;                // e.g. "Flexion / Extension", "DIR X (left / right)"
+      action?: ActionAxis;          // defined when kind === 'action'
+      component?: 'x' | 'y' | 'z';  // defined when kind === 'dir'
+      displayMin: number;           // visualization track bounds
+      displayMax: number;
+      unit: '°' | '';
+  }
+
+  const limitDimensionsForGroup = (group: JointGroup): LimitDimension[] => {
+      if (group === 'Shoulder' || group === 'Hip') {
+          const twist = JOINT_ACTIONS[group].find(a => a.isBoneAxis);
+          const dirs: LimitDimension[] = [
+              { kind: 'dir', key: `${group}.dir.x`, label: 'DIR X  (lateral / medial)', component: 'x', displayMin: -1.1, displayMax: 1.1, unit: '' },
+              { kind: 'dir', key: `${group}.dir.y`, label: 'DIR Y  (down / up)',        component: 'y', displayMin: -1.1, displayMax: 1.1, unit: '' },
+              { kind: 'dir', key: `${group}.dir.z`, label: 'DIR Z  (back / forward)',   component: 'z', displayMin: -1.1, displayMax: 1.1, unit: '' },
+          ];
+          if (twist) {
+              dirs.push({
+                  kind: 'action',
+                  key: `${group}.action.${twist.positiveAction}`,
+                  label: `${twist.positiveAction} / ${twist.negativeAction}`,
+                  action: twist,
+                  displayMin: -120, displayMax: 120, unit: '°',
+              });
+          }
+          return dirs;
+      }
+      if (group === 'Scapula') {
+          return [
+              { kind: 'dir', key: 'Scapula.dir.y', label: 'DIR Y  (elevation / depression)',  component: 'y', displayMin: -20, displayMax: 15, unit: '' },
+              { kind: 'dir', key: 'Scapula.dir.z', label: 'DIR Z  (retraction / protraction)', component: 'z', displayMin: -20, displayMax: 15, unit: '' },
+          ];
+      }
+      // Hinges (Elbow/Knee/Ankle) and Spine: action-based.
+      return JOINT_ACTIONS[group].map(action => ({
+          kind: 'action' as const,
+          key: `${group}.action.${action.positiveAction}`,
+          label: `${action.positiveAction} / ${action.negativeAction}`,
+          action,
+          displayMin: -200,
+          displayMax: 200,
+          unit: '°' as const,
+      }));
+  };
+
+  // Live value of a dimension for a given bone, BILATERALLY NORMALIZED.
+  // Left-side bones get their x component flipped on DIR X so both sides
+  // share one limits table. Action dimensions already handle bilateral
+  // sign via getActionAngle.
+  const getDimensionValue = (
+      dim: LimitDimension,
+      boneId: string,
+      curPosture: Posture,
+      curTwists: Record<string, number>,
+  ): number => {
+      if (dim.kind === 'dir' && dim.component) {
+          const v = curPosture[boneId];
+          if (!v) return 0;
+          let raw = v[dim.component];
+          if (dim.component === 'x' && boneId.startsWith('l')) raw = -raw;
+          return raw;
+      }
+      if (dim.kind === 'action' && dim.action) {
+          return getActionAngle(boneId, dim.action, curPosture, curTwists);
+      }
+      return 0;
+  };
+
+  // Reverse the bilateral flip: given a normalized target value, return
+  // what should actually be written to the stored posture component.
+  const denormalizeDimValue = (
+      dim: LimitDimension,
+      boneId: string,
+      normalized: number,
+  ): number => {
+      if (dim.kind === 'dir' && dim.component === 'x' && boneId.startsWith('l')) {
+          return -normalized;
+      }
+      return normalized;
+  };
+
+  // Bone → joint group lookup. Runs once per call; cheap for our bone count.
+  const getBoneJointGroup = (boneId: string): JointGroup | null => {
+      for (const [group, sides] of Object.entries(GROUP_BONES) as [JointGroup, { left: string; right: string } | null][]) {
+          if (sides && (sides.left === boneId || sides.right === boneId)) return group;
+      }
+      return null;
+  };
+
+  // Resolve effective limits for a dimension at a given bone, applying any
+  // coupling relative to the live source value. Returns the hard-stop
+  // min/max AFTER coupling has been applied — i.e. the values the physics
+  // should enforce right now. softZone is passed through unchanged.
+  const getEffectiveLimit = (
+      dimKey: string,
+      boneId: string,
+      curPosture: Posture,
+      curTwists: Record<string, number>,
+  ): { min: number; max: number; softZone?: number } | null => {
+      const limit = jointLimits[dimKey];
+      if (!limit) return null;
+      let effMin = limit.min;
+      let effMax = limit.max;
+      if (limit.coupling) {
+          // Find the source dimension to compute the live source value.
+          const entry = allLimitDimensions.find(d => d.dim.key === limit.coupling!.dependsOn);
+          if (entry) {
+              const srcBones = GROUP_BONES[entry.group];
+              if (srcBones) {
+                  // Use the same side's source bone when possible to keep
+                  // coupling local to one side of the body.
+                  const srcBone = boneId.startsWith('l') ? srcBones.left : srcBones.right;
+                  const srcVal = getDimensionValue(entry.dim, srcBone, curPosture, curTwists);
+                  effMin = limit.min + limit.coupling.slopeMin * srcVal;
+                  effMax = limit.max + limit.coupling.slopeMax * srcVal;
+              }
+          }
+      }
+      return { min: effMin, max: effMax, softZone: limit.softZone };
+  };
+
+  // Clamp a normalized value against a dimension's effective limits for
+  // a given bone. Used by drag handlers to refuse slider movement past
+  // the hard stop. Returns the input unchanged if no limit is configured.
+  const clampNormalizedToLimit = (
+      dim: LimitDimension,
+      boneId: string,
+      normalizedValue: number,
+      curPosture: Posture,
+      curTwists: Record<string, number>,
+  ): number => {
+      const eff = getEffectiveLimit(dim.key, boneId, curPosture, curTwists);
+      if (!eff) return normalizedValue;
+      return clamp(normalizedValue, eff.min, eff.max);
+  };
+
+  // All dimensions across all groups — used by the coupling dropdown.
+  const allLimitDimensions: Array<{ group: JointGroup; dim: LimitDimension }> = (
+      Object.keys(JOINT_ACTIONS) as JointGroup[]
+  ).flatMap(g => limitDimensionsForGroup(g).map(dim => ({ group: g, dim })));
+
+  const updateLimit = (key: string, patch: Partial<JointLimit>) => {
+      setJointLimits(prev => ({
+          ...prev,
+          [key]: { ...(prev[key] || { min: -1, max: 1 }), ...patch },
+      }));
   };
 
   const getChainToRoot = (boneId: string): string[] => {
@@ -1541,17 +2215,12 @@ const BioModelPage: React.FC = () => {
       }
       setPosture(p);
       setTwists(t);
-      // Wholesale symmetry: any position change on a sided bone also forces
-      // opposite-side forces + constraints to regenerate from the source
-      // side. Posture/twists are already mirrored inline in the position
-      // handlers, so this is a no-op for posture/twists themselves.
-      if (symmetryMode && selectedBone) {
-          const src = selectedBone.startsWith('l') ? 'l' : selectedBone.startsWith('r') ? 'r' : null;
-          if (src) {
-              setForces(prev => syncForcesFromSide(prev, src));
-              setConstraints(prev => syncConstraintsFromSide(prev, src));
-          }
-      }
+      // NOTE: no force/constraint resync here. A prior belt-and-suspenders
+      // version called syncForcesFromSide + syncConstraintsFromSide on every
+      // position update, which returned fresh array/map references every
+      // tick and invalidated the torqueDistribution useMemo ~60x/sec during
+      // drags. Forces and constraints are already kept in sync by their own
+      // handlers -- position edits have no semantic reason to touch them.
   };
 
   const updateTwistState = (updater: (prev: Record<string, number>) => Record<string, number>) => {
@@ -1589,6 +2258,8 @@ const BioModelPage: React.FC = () => {
           let axis: Vector3;
           if (act.isBoneAxis) {
               axis = normalize(sub(boneEnd, jointCenter));
+          } else if (act.useWorldAxis) {
+              axis = normalize(act.axis);
           } else {
               axis = normalize({
                   x: act.axis.x * jointFrame.x.x + act.axis.y * jointFrame.y.x + act.axis.z * jointFrame.z.x,
@@ -1684,7 +2355,18 @@ const BioModelPage: React.FC = () => {
       for (const { boneId: bid, c } of cons) {
           const tip = kin.boneEndPoints[bid];
           if (!tip) continue;
-          if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
+          if (c.type === 'fixed') {
+              // Fixed point: cost = 3D distance² from tip to center.
+              // Equivalent to 3 orthogonal planar constraints but expressed
+              // as a single entry. The tip must stay exactly at center.
+              const dx = tip.x - c.center.x;
+              const dy = tip.y - c.center.y;
+              const dz = tip.z - c.center.z;
+              const dist2 = dx * dx + dy * dy + dz * dz;
+              cost += dist2;
+              const dist = Math.sqrt(dist2);
+              if (dist > maxAbs) maxAbs = dist;
+          } else if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
               const toTip = sub(tip, c.pivot);
               const axisN = normalize(c.axis);
               const axialDist = dotProduct(toTip, axisN);
@@ -1842,6 +2524,27 @@ const BioModelPage: React.FC = () => {
       const hingeThetaMap: Record<string, number> = {};
       for (const bid of freeBonesHinge) hingeThetaMap[bid] = dirToHingeAngle(bid, posture[bid]);
 
+      // Resolve hinge joint limits once per solver call and store in radians.
+      // The Armijo line search clamps candidate angles to this range so the
+      // solver cannot indirectly drive a knee into hyperextension (or an
+      // elbow past full flex) while trying to satisfy a BoneConstraint. We
+      // resolve against the STARTING posture/twists — that's good enough for
+      // hinges since none of the default hinge limits use coupling.
+      const hingeLimitsRad: Record<string, { min: number; max: number }> = {};
+      for (const bid of freeBonesHinge) {
+          const group = getBoneJointGroup(bid);
+          if (!group) continue;
+          const dims = limitDimensionsForGroup(group);
+          const actDim = dims.find(d => d.kind === 'action');
+          if (!actDim) continue;
+          const eff = getEffectiveLimit(actDim.key, bid, posture, solvedTwists);
+          if (!eff) continue;
+          hingeLimitsRad[bid] = {
+              min: eff.min * Math.PI / 180,
+              max: eff.max * Math.PI / 180,
+          };
+      }
+
       // Twist DOFs: humerus/femur bones whose twist can be adjusted by the
       // solver. Each gets a single scalar DOF (the twist angle in degrees).
       const isTwistBone = (b: string) => /Humerus|Femur/.test(b);
@@ -1964,7 +2667,10 @@ const BioModelPage: React.FC = () => {
                   trialThetas[bid] = newTheta;
               }
               for (const bid of freeBonesHinge) {
-                  const newTheta = hingeThetaMap[bid] - alpha * gradsHinge[bid];
+                  let newTheta = hingeThetaMap[bid] - alpha * gradsHinge[bid];
+                  // Clamp to joint angle limits (same treatment twist already gets).
+                  const hl = hingeLimitsRad[bid];
+                  if (hl) newTheta = Math.max(hl.min, Math.min(hl.max, newTheta));
                   candidate[bid] = hingeAngleToDir(bid, newTheta);
                   trialHingeThetas[bid] = newTheta;
               }
@@ -2028,7 +2734,10 @@ const BioModelPage: React.FC = () => {
           if (!tip) continue;
           const L = BONE_LENGTHS[bid] || 0;
           const TOL = Math.max(SOLVER_MIN_TOL, L * SOLVER_TOL_SCALE);
-          if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
+          if (c.type === 'fixed') {
+              const dist = magnitude(sub(tip, c.center));
+              if (dist > TOL) return true;
+          } else if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
               const toTip = sub(tip, c.pivot);
               const axisN = normalize(c.axis);
               const axialDist = dotProduct(toTip, axisN);
@@ -2047,10 +2756,261 @@ const BioModelPage: React.FC = () => {
   // and postureViolatesConstraints because calculateTorqueDistribution's block
   // detector invokes solveConstraintsAccommodating, which transitively depends
   // on constants declared further down in the component body.
+  // Always-on when forces exist: the joint force arrow visualization needs
+  // the jointForces field regardless of which tab is active. The torque
+  // demand UI is still shown only on the 'torque' tab (via conditional
+  // rendering below), but the computation itself runs whenever the user
+  // has any forces configured. Tab-gate was removed for this reason.
   const torqueDistribution = useMemo<TorqueDistributionResult | null>(() => {
       if (forces.length === 0) return null;
-      return calculateTorqueDistribution(posture, twists, forces, jointCapacities, constraints);
-  }, [posture, twists, forces, jointCapacities, constraints]);
+      return calculateTorqueDistribution(posture, twists, forces, jointCapacities, constraints, currentRomT);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [posture, twists, forces, jointCapacities, constraints, jointLimits, currentRomT]);
+
+  // --- JOINT FORCE ARROWS ---
+  //
+  // Subtle arrows on the proximal tip of each limb segment showing the net
+  // force that segment transmits through its joint. Derived from
+  // torqueDistribution.jointForces, which is the sum of (a) every applied
+  // force propagated up the chain from its bone of application, and (b)
+  // every Phase B constraint reaction λ·n propagated from the constrained
+  // bone to the root. This is the true "limb proximal load" after all
+  // physics, so a visible backward arrow at the scapula should appear the
+  // moment a constraint genuinely redirects force in that direction.
+  //
+  // Arrow length is proportional to force magnitude normalized across all
+  // visible arrows (so the scene stays readable whether forces are 1 N or
+  // 10,000 N). Arrows shorter than MIN_VIS_LEN are skipped so noise at
+  // near-root bones (which see tiny forces after the chain cancels out)
+  // doesn't clutter the view.
+  const jointForceArrows = useMemo<VisualForce[]>(() => {
+      if (!torqueDistribution) return [];
+      const jf = torqueDistribution.jointForces;
+      if (!jf) return [];
+
+      // Find the max magnitude to normalize arrow scale. Skip tiny ones.
+      const entries = Object.entries(jf) as [string, Vector3][];
+      let maxMag = 0;
+      for (const [, v] of entries) {
+          const m = Math.hypot(v.x, v.y, v.z);
+          if (m > maxMag) maxMag = m;
+      }
+      if (maxMag < 1e-6) return [];
+
+      const MAX_VIS_LEN = 22;   // pixels-ish; matches the scale of existing arrows
+      const MIN_VIS_LEN = 2;    // drop anything under this for clarity
+      const arrows: VisualForce[] = [];
+      for (const [boneId, v] of entries) {
+          const m = Math.hypot(v.x, v.y, v.z);
+          if (m < 1e-6) continue;
+          const visLen = (m / maxMag) * MAX_VIS_LEN;
+          if (visLen < MIN_VIS_LEN) continue;
+          const scale = visLen / m;
+          arrows.push({
+              id: `jforce-${boneId}`,
+              boneId,
+              // Proximal tip of the limb segment = bone start.
+              position: 0,
+              vector: { x: v.x * scale, y: v.y * scale, z: v.z * scale },
+              // Muted gray so it doesn't overwhelm the user's configured forces.
+              color: '#6b7280',
+          });
+      }
+      return arrows;
+  }, [torqueDistribution]);
+
+  // --- TIMELINE PEAK ANALYSIS ---
+  //
+  // Samples the start -> end animation at fixed t steps, runs each frame
+  // through the same constraint-accommodating solver the playback loop uses,
+  // then computes the torque distribution at every frame. Aggregates the
+  // PEAK demand per joint action across the entire timeline, along with the
+  // t% at which the peak occurred. Peak (not average) is the right metric
+  // for identifying the limiting/hardest point in the ROM -- that's what 1RM
+  // is gated by and what calibration needs to verify.
+  //
+  // Computed lazily: only runs when the user is on the 'timeline' tab, so
+  // switching to other tabs doesn't eat 25 solver calls per dependency tick.
+  interface TimelinePeak {
+      boneId: string;
+      jointGroup: JointGroup;
+      action: string;
+      peakTorque: number;
+      peakEffort: number;
+      peakFramePct: number; // 0-100, the t% where the peak occurred
+  }
+  // One sample of the resistance and difficulty profiles. t ∈ [0, 1] along
+  // the start → end timeline. resistance = total torque demand summed
+  // across all joint actions (how much mechanical work the muscles must
+  // produce). difficulty = max effort across all actions at this frame,
+  // where effort = torque / capacity (what fraction of the limiting
+  // action's capacity is in use — this is what gates 1RM).
+  interface TimelineProfilePoint {
+      t: number;
+      resistance: number;
+      difficulty: number;
+  }
+  // Per-action effort time-series across the ROM. Each entry in `efforts`
+  // corresponds to the matching `profile[i].t` frame. Actions that don't
+  // appear at a given frame get 0.
+  interface ActionTimeSeries {
+      boneId: string;
+      jointGroup: JointGroup;
+      action: string;
+      efforts: number[];
+  }
+  interface TimelineAnalysisResult {
+      peaks: TimelinePeak[];
+      limitingPeak: TimelinePeak | null;
+      framesAnalyzed: number;
+      framesSkipped: number; // solver failures
+      profile: TimelineProfilePoint[];
+      actionSeries: ActionTimeSeries[];
+  }
+
+  const timelineAnalysis = useMemo<TimelineAnalysisResult | null>(() => {
+      if (activeTab !== 'timeline') return null;
+      if (forces.length === 0) return null;
+
+      const FRAMES: number = 25;
+      const EMPTY_LOCK = new Set<string>();
+      const peakMap = new Map<string, TimelinePeak>();
+      const profile: TimelineProfilePoint[] = [];
+      // Per-action time series: key = "${boneId}::${action}", value = effort
+      // at each successfully-analyzed frame. Frame index maps to profile[].
+      const seriesMap = new Map<string, { boneId: string; jointGroup: JointGroup; action: string; efforts: number[] }>();
+      let framesAnalyzed = 0;
+      let framesSkipped = 0;
+
+      for (let i = 0; i < FRAMES; i++) {
+          const t = FRAMES === 1 ? 0 : i / (FRAMES - 1);
+
+          // Build interpolated frame (same interpolation the playback uses).
+          const framePosture: Posture = {};
+          Object.keys(startPosture).forEach(boneId => {
+              const startV = startPosture[boneId];
+              const endV = endPosture[boneId] || startV;
+              if (boneId.includes('Clavicle')) {
+                  framePosture[boneId] = interpolateVector(startV, endV, t);
+              } else {
+                  framePosture[boneId] = slerpDirection(startV, endV, t);
+              }
+          });
+          const frameTwists: Record<string, number> = {};
+          const allTwistKeys = new Set([...Object.keys(startTwists), ...Object.keys(endTwists)]);
+          allTwistKeys.forEach(boneId => {
+              const startT = startTwists[boneId] || 0;
+              const endT = endTwists[boneId] || 0;
+              frameTwists[boneId] = interpolateScalar(startT, endT, t);
+          });
+
+          // Project onto constraint manifold.
+          const solved = solveConstraintsAccommodating(framePosture, EMPTY_LOCK, frameTwists);
+          if (!solved) { framesSkipped++; continue; }
+          framesAnalyzed++;
+
+          const dist = calculateTorqueDistribution(
+              solved.posture, solved.twists, forces, jointCapacities, constraints, t
+          );
+
+          // Per-frame profile: sum of torques (resistance, mechanical work)
+          // and max effort (difficulty, how close the limiting action is to
+          // failure). Resistance sums Phase A + Phase B demand torques as
+          // the system currently sees them — which is what determines the
+          // required muscle output regardless of how strong those muscles are.
+          let frameResistance = 0;
+          let frameDifficulty = 0;
+          for (const d of dist.demands) {
+              frameResistance += d.torqueMagnitude;
+              if (d.effort > frameDifficulty) frameDifficulty = d.effort;
+          }
+          profile.push({ t, resistance: frameResistance, difficulty: frameDifficulty });
+
+          // Build a set of actions present at this frame so we can push 0
+          // for actions that appeared in earlier frames but not this one.
+          const frameActions = new Set<string>();
+
+          for (const d of dist.demands) {
+              const key = `${d.boneId}::${d.action}`;
+              frameActions.add(key);
+
+              // Peak tracking (unchanged).
+              const prev = peakMap.get(key);
+              if (!prev || d.torqueMagnitude > prev.peakTorque) {
+                  peakMap.set(key, {
+                      boneId: d.boneId,
+                      jointGroup: d.jointGroup,
+                      action: d.action,
+                      peakTorque: d.torqueMagnitude,
+                      peakEffort: d.effort,
+                      peakFramePct: t * 100,
+                  });
+              }
+
+              // Time-series tracking: append this frame's effort.
+              let series = seriesMap.get(key);
+              if (!series) {
+                  // First time seeing this action — backfill 0s for all
+                  // previously analyzed frames where it didn't appear.
+                  const backfill = new Array(framesAnalyzed - 1).fill(0);
+                  series = { boneId: d.boneId, jointGroup: d.jointGroup, action: d.action, efforts: backfill };
+                  seriesMap.set(key, series);
+              }
+              series.efforts.push(d.effort);
+          }
+
+          // Push 0 for any series that existed but had no demand this frame.
+          for (const [key, series] of seriesMap) {
+              if (!frameActions.has(key)) {
+                  series.efforts.push(0);
+              }
+          }
+      }
+
+      const peaks = Array.from(peakMap.values());
+      let limitingPeak: TimelinePeak | null = null;
+      for (const p of peaks) {
+          if (!limitingPeak || p.peakEffort > limitingPeak.peakEffort) limitingPeak = p;
+      }
+
+      // --- 1RM GLOBAL NORMALIZATION ---
+      //
+      // The system treats force magnitudes as an arbitrary unit — the user
+      // only defines relative magnitudes between forces, not absolute Newtons.
+      // To make the numbers meaningful we choose a single global scale factor
+      // such that the highest effort anywhere across the ROM equals exactly
+      // 1.0 (the 1RM sticking point). Everything else then reads as a
+      // fraction of that limiting effort:
+      //   100% = the one action at the one frame that gates the lift
+      //   40%  = this action is at 40% of the limiting action's capacity usage
+      //
+      // Shape is invariant under this scaling (it multiplies every value by
+      // the same constant), but the absolute numbers become comparable and
+      // semantically meaningful. All displayed efforts, peak bars, difficulty
+      // profile values, and resistance profile values share this scale.
+      const globalMaxEffort = limitingPeak ? limitingPeak.peakEffort : 0;
+      const actionSeries = Array.from(seriesMap.values());
+      if (globalMaxEffort > 1e-9) {
+          const scale = 1 / globalMaxEffort;
+          for (const p of peaks) {
+              p.peakEffort *= scale;
+              p.peakTorque *= scale;
+          }
+          for (const pt of profile) {
+              pt.difficulty *= scale;
+              pt.resistance *= scale;
+          }
+          // Scale every entry in every action time series by the same factor.
+          for (const s of actionSeries) {
+              for (let i = 0; i < s.efforts.length; i++) {
+                  s.efforts[i] *= scale;
+              }
+          }
+      }
+
+      return { peaks, limitingPeak, framesAnalyzed, framesSkipped, profile, actionSeries };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, startPosture, endPosture, startTwists, endTwists, forces, constraints, jointCapacities, jointLimits]);
 
   const resolveKinematics = (boneId: string, proposedVector: Vector3, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } => {
       const projected = projectDirOntoConstraints(boneId, proposedVector, currentPosture, currentTwists);
@@ -2072,12 +3032,86 @@ const BioModelPage: React.FC = () => {
   const handleScapulaChange = (axis: 'elevation' | 'protraction', val: number) => {
       if (!selectedBone || isNaN(val)) return;
       if (isPlaying) setIsPlaying(false);
+
       const current = posture[selectedBone];
-      let newVec = { ...current };
-      if (axis === 'elevation') newVec.y = -val;
-      else if (axis === 'protraction') newVec.z = -val;
-      const resolved = resolveKinematics(selectedBone, newVec, posture, twists);
-      updatePostureState(resolved.posture, resolved.twists);
+      if (!current) return;
+
+      // Target offset: the user controls one component (y for elevation,
+      // z for protraction) while the other stays at its current value.
+      const component = axis === 'elevation' ? 'y' : 'z';
+      const startVal = axis === 'elevation' ? -current.y : -current.z;
+      const totalDelta = val - startVal;
+      if (Math.abs(totalDelta) < 0.01) return;
+
+      // Clamp against scapula DIR limits.
+      let clampedVal = val;
+      const scapGroup = getBoneJointGroup(selectedBone);
+      if (scapGroup) {
+          const dims = limitDimensionsForGroup(scapGroup);
+          const dirDim = dims.find(d => d.kind === 'dir' && d.component === component);
+          if (dirDim) {
+              const eff = getEffectiveLimit(dirDim.key, selectedBone, posture, twists);
+              // Scapula offset is stored negated: display val = -stored.
+              // Limits are on the stored value (getDimensionValue reads stored).
+              // Convert: stored = -val. Clamp stored against eff, convert back.
+              if (eff) {
+                  const storedTarget = -val;
+                  const storedClamped = clamp(storedTarget, eff.min, eff.max);
+                  clampedVal = -storedClamped;
+              }
+          }
+      }
+      const clampedDelta = clampedVal - startVal;
+      if (Math.abs(clampedDelta) < 0.01) return;
+
+      // Lock the scapula (and its mirror partner in symmetry mode) so
+      // the solver moves downstream bones (humerus, forearm) to satisfy
+      // constraints rather than fighting the user's input.
+      const lockedSet = new Set<string>([selectedBone]);
+      const oppBone = symmetryMode ? getOppositeBone(selectedBone) : null;
+      if (oppBone) lockedSet.add(oppBone);
+
+      // Adaptive step-halving loop (same pattern as handleHingeChange).
+      const NOMINAL_STEPS = Math.max(4, Math.min(20, Math.ceil(Math.abs(clampedDelta) / 0.5)));
+      const NOMINAL_STEP = 1 / NOMINAL_STEPS;
+      const MIN_STEP = NOMINAL_STEP / 64;
+
+      let workingPosture: Posture = { ...posture };
+      let workingTwists: Record<string, number> = { ...twists };
+      let lastAcceptedPosture: Posture = workingPosture;
+      let lastAcceptedTwists: Record<string, number> = workingTwists;
+
+      let progress = 0;
+      let step = NOMINAL_STEP;
+      while (progress < 1 - 1e-9) {
+          const nextProgress = Math.min(1, progress + step);
+          const stepVal = startVal + clampedDelta * nextProgress;
+
+          // Build tentative posture with the scapula offset at the
+          // interpolated value.
+          const cur = workingPosture[selectedBone];
+          let newVec = { ...cur };
+          if (axis === 'elevation') newVec.y = -stepVal;
+          else newVec.z = -stepVal;
+
+          let tentative: Posture = { ...workingPosture, [selectedBone]: newVec };
+          if (symmetryMode) tentative = mirrorPosture(tentative, selectedBone);
+
+          const solved = solveConstraintsAccommodating(tentative, lockedSet, workingTwists);
+          if (solved !== null) {
+              workingPosture = solved.posture;
+              workingTwists = solved.twists;
+              lastAcceptedPosture = solved.posture;
+              lastAcceptedTwists = solved.twists;
+              progress = nextProgress;
+              step = Math.min(NOMINAL_STEP, step * 1.5);
+          } else {
+              step = step / 2;
+              if (step < MIN_STEP) break;
+          }
+      }
+
+      updatePostureState(lastAcceptedPosture, lastAcceptedTwists);
   };
 
   const handleHingeChange = (val: number) => {
@@ -2093,8 +3127,22 @@ const BioModelPage: React.FC = () => {
       // local-frame rotation would both be wrong.
       const startVec = hingeAngleToDir(selectedBone, dirToHingeAngle(selectedBone, rawStart));
 
+      // Clamp the requested angle to the effective joint limit before any
+      // work. For hinges (elbow/knee/ankle), the hinge angle matches the
+      // single action-based limit dimension.
+      let clampedVal = val;
+      const hingeGroup = getBoneJointGroup(selectedBone);
+      if (hingeGroup) {
+          const dims = limitDimensionsForGroup(hingeGroup);
+          const actionDim = dims.find(d => d.kind === 'action');
+          if (actionDim) {
+              const eff = getEffectiveLimit(actionDim.key, selectedBone, posture, twists);
+              if (eff) clampedVal = clamp(val, eff.min, eff.max);
+          }
+      }
+
       const startAngle = dirToHingeAngle(selectedBone, startVec) * 180 / Math.PI;
-      const totalDelta = val - startAngle;
+      const totalDelta = clampedVal - startAngle;
       if (Math.abs(totalDelta) < 0.01) return;
 
       // Lock set: only the moved hinge bone's parent-local direction is fixed
@@ -2106,27 +3154,45 @@ const BioModelPage: React.FC = () => {
           if (opp) lockedSet.add(opp);
       }
 
-      // Roughly 1° per micro-step, capped to keep responsiveness, with a
-      // floor so very tiny drags still get a few steps for path continuity.
-      const STEPS = Math.max(4, Math.min(30, Math.ceil(Math.abs(totalDelta))));
+      // Adaptive step-halving loop. We advance "progress" from 0 to 1 along
+      // the hinge angle delta. Each iteration tries a nominal step; on
+      // solver success we advance and optionally grow the next step; on
+      // failure we halve the step and try again, down to a minimum. This
+      // prevents hard-stop mid-drag when the straight-line path through
+      // hinge space dips near infeasibility at intermediate points --
+      // smaller steps keep the warm-started solver in its basin of
+      // attraction.
+      const NOMINAL_STEPS = Math.max(4, Math.min(30, Math.ceil(Math.abs(totalDelta))));
+      const NOMINAL_STEP = 1 / NOMINAL_STEPS;
+      const MIN_STEP = NOMINAL_STEP / 64; // give up after 6 halvings
+
       let workingPosture: Posture = { ...posture };
       let workingTwists: Record<string, number> = { ...twists };
       let lastAcceptedPosture: Posture = workingPosture;
       let lastAcceptedTwists: Record<string, number> = workingTwists;
 
-      for (let i = 1; i <= STEPS; i++) {
-          const stepAngle = startAngle + (totalDelta * i) / STEPS;
+      let progress = 0;
+      let step = NOMINAL_STEP;
+      while (progress < 1 - 1e-9) {
+          const nextProgress = Math.min(1, progress + step);
+          const stepAngle = startAngle + totalDelta * nextProgress;
           const stepDir = hingeAngleToDir(selectedBone, stepAngle * Math.PI / 180);
 
           let tentative: Posture = { ...workingPosture, [selectedBone]: stepDir };
           if (symmetryMode) tentative = mirrorPosture(tentative, selectedBone);
 
           const solved = solveConstraintsAccommodating(tentative, lockedSet, workingTwists);
-          if (solved === null) break;
-          workingPosture = solved.posture;
-          workingTwists = solved.twists;
-          lastAcceptedPosture = solved.posture;
-          lastAcceptedTwists = solved.twists;
+          if (solved !== null) {
+              workingPosture = solved.posture;
+              workingTwists = solved.twists;
+              lastAcceptedPosture = solved.posture;
+              lastAcceptedTwists = solved.twists;
+              progress = nextProgress;
+              step = Math.min(NOMINAL_STEP, step * 1.5); // re-grow after success
+          } else {
+              step = step / 2;
+              if (step < MIN_STEP) break;
+          }
       }
 
       updatePostureState(lastAcceptedPosture, lastAcceptedTwists);
@@ -2160,12 +3226,13 @@ const BioModelPage: React.FC = () => {
 
         setTargetPos(endTarget);
 
-        // Incremental IK + accommodation solver. Each step advances the
-        // tip along the delta, computes 2-bone IK, optionally mirrors, and
-        // lets the solver move free bones (scapula, other arm, twists) to
-        // satisfy constraints. Breaks on solver failure so the input
-        // hard-stops at the last valid step rather than rejecting wholesale.
-        const STEPS = Math.max(4, Math.min(40, Math.ceil(dist / 2)));
+        // Incremental IK + accommodation solver with adaptive halving.
+        // On solver failure we halve the sub-step and retry, keeping the
+        // warm-started solver inside its basin of attraction so the drag
+        // doesn't hard-stop partway through.
+        const NOMINAL_STEPS = Math.max(4, Math.min(40, Math.ceil(dist / 2)));
+        const NOMINAL_STEP = 1 / NOMINAL_STEPS;
+        const MIN_STEP = NOMINAL_STEP / 64;
         const rootFrame0 = createRootFrame({ x: 0, y: 1, z: 0 });
 
         const lockedSet = new Set<string>([rootBone, childBone]);
@@ -2181,25 +3248,38 @@ const BioModelPage: React.FC = () => {
         let lastAcceptedPosture: Posture = workingPosture;
         let lastAcceptedTwists: Record<string, number> = workingTwists;
 
-        for (let i = 1; i <= STEPS; i++) {
+        let progress = 0;
+        let step = NOMINAL_STEP;
+        while (progress < 1 - 1e-9) {
+            const nextProgress = Math.min(1, progress + step);
             const stepTarget: Vector3 = {
-                x: startTarget.x + (delta.x * i) / STEPS,
-                y: startTarget.y + (delta.y * i) / STEPS,
-                z: startTarget.z + (delta.z * i) / STEPS,
+                x: startTarget.x + delta.x * nextProgress,
+                y: startTarget.y + delta.y * nextProgress,
+                z: startTarget.z + delta.z * nextProgress,
             };
             const currentPole = mul(workingPosture[rootBone], len1);
             const solution = solveTwoBoneIK({ x: 0, y: 0, z: 0 }, stepTarget, len1, len2, currentPole);
-            if (!solution) break;
+            if (!solution) {
+                step = step / 2;
+                if (step < MIN_STEP) break;
+                continue;
+            }
             const transported = transportFrame(rootFrame0, solution.vec1);
             const childVecLocal = worldToLocal(transported, solution.vec2);
             let tentative: Posture = { ...workingPosture, [rootBone]: solution.vec1, [childBone]: childVecLocal };
             if (symmetryMode) tentative = mirrorPosture(tentative, rootBone);
             const solved = solveConstraintsAccommodating(tentative, lockedSet, workingTwists);
-            if (solved === null) break;
-            workingPosture = solved.posture;
-            workingTwists = solved.twists;
-            lastAcceptedPosture = solved.posture;
-            lastAcceptedTwists = solved.twists;
+            if (solved !== null) {
+                workingPosture = solved.posture;
+                workingTwists = solved.twists;
+                lastAcceptedPosture = solved.posture;
+                lastAcceptedTwists = solved.twists;
+                progress = nextProgress;
+                step = Math.min(NOMINAL_STEP, step * 1.5);
+            } else {
+                step = step / 2;
+                if (step < MIN_STEP) break;
+            }
         }
 
         updatePostureState(lastAcceptedPosture, lastAcceptedTwists);
@@ -2222,7 +3302,24 @@ const BioModelPage: React.FC = () => {
     if (!startDir) return;
 
     const startComp = startDir[axis];
-    const targetComp = Math.max(-1, Math.min(1, internalVal / boneLen));
+    let targetComp = Math.max(-1, Math.min(1, internalVal / boneLen));
+
+    // Clamp against the DIR limit for this bone's joint group. Limits are
+    // stored in right-normalized form — for left-side bones we flip X
+    // before clamping, then flip back.
+    const dirGroup = getBoneJointGroup(selectedBone);
+    if (dirGroup) {
+        const dims = limitDimensionsForGroup(dirGroup);
+        const dirDim = dims.find(d => d.kind === 'dir' && d.component === axis);
+        if (dirDim) {
+            const eff = getEffectiveLimit(dirDim.key, selectedBone, posture, twists);
+            if (eff) {
+                const flipped = axis === 'x' && selectedBone.startsWith('l') ? -targetComp : targetComp;
+                const clamped = clamp(flipped, eff.min, eff.max);
+                targetComp = axis === 'x' && selectedBone.startsWith('l') ? -clamped : clamped;
+            }
+        }
+    }
     const totalDelta = targetComp - startComp;
     if (Math.abs(totalDelta) < 1e-4) return;
 
@@ -2233,9 +3330,12 @@ const BioModelPage: React.FC = () => {
     // handles the constraint.
     const lockedSet = new Set<string>();
 
-    // ~0.04 (~2.3°) per micro-step, capped for responsiveness with a floor
-    // for path continuity on tiny drags.
-    const STEPS = Math.max(4, Math.min(40, Math.ceil(Math.abs(totalDelta) / 0.04)));
+    // Adaptive step-halving loop. Nominal step is ~2.3° in the locked
+    // Cartesian component; halves on solver failure down to a minimum.
+    const NOMINAL_STEPS = Math.max(4, Math.min(40, Math.ceil(Math.abs(totalDelta) / 0.04)));
+    const NOMINAL_STEP = 1 / NOMINAL_STEPS;
+    const MIN_STEP = NOMINAL_STEP / 64;
+
     let workingPosture: Posture = { ...posture };
     let workingTwists: Record<string, number> = { ...twists };
     let lastAcceptedPosture: Posture = workingPosture;
@@ -2243,8 +3343,11 @@ const BioModelPage: React.FC = () => {
 
     const oppBone = symmetryMode ? getOppositeBone(selectedBone) : null;
 
-    for (let i = 1; i <= STEPS; i++) {
-        const stepComp = startComp + (totalDelta * i) / STEPS;
+    let progress = 0;
+    let step = NOMINAL_STEP;
+    while (progress < 1 - 1e-9) {
+        const nextProgress = Math.min(1, progress + step);
+        const stepComp = startComp + totalDelta * nextProgress;
 
         const cur = workingPosture[selectedBone];
         const theta = initialThetaForAxis(axis, cur);
@@ -2254,8 +3357,6 @@ const BioModelPage: React.FC = () => {
 
         const axisLocks: AxisLock[] = [{ boneId: selectedBone, axis, value: stepComp }];
         if (oppBone) {
-            // Mirror negates X, keeps Y/Z. So the opposite bone's locked
-            // Cartesian value is -stepComp only when we're sliding X.
             const mirroredVal = axis === 'x' ? -stepComp : stepComp;
             axisLocks.push({ boneId: oppBone, axis, value: mirroredVal });
         }
@@ -2263,11 +3364,17 @@ const BioModelPage: React.FC = () => {
         const solved = solveConstraintsAccommodating(
             tentative, lockedSet, workingTwists, axisLocks
         );
-        if (solved === null) break;
-        workingPosture = solved.posture;
-        workingTwists = solved.twists;
-        lastAcceptedPosture = solved.posture;
-        lastAcceptedTwists = solved.twists;
+        if (solved !== null) {
+            workingPosture = solved.posture;
+            workingTwists = solved.twists;
+            lastAcceptedPosture = solved.posture;
+            lastAcceptedTwists = solved.twists;
+            progress = nextProgress;
+            step = Math.min(NOMINAL_STEP, step * 1.5);
+        } else {
+            step = step / 2;
+            if (step < MIN_STEP) break;
+        }
     }
 
     const finalDir = lastAcceptedPosture[selectedBone];
@@ -2285,8 +3392,23 @@ const BioModelPage: React.FC = () => {
     if (!selectedBone || isNaN(val)) return;
     if (isPlaying) setIsPlaying(false);
 
-    const limits = ROTATION_LIMITS[selectedBone];
-    const clampedVal = limits ? clamp(val, limits.min, limits.max) : val;
+    // Clamp against the External Rotation action limit for this bone's
+    // joint group. Falls back to the static ROTATION_LIMITS table if the
+    // bone doesn't belong to a configured joint group. Slider value is in
+    // display convention (positive = external rotation for both sides).
+    let clampedVal = val;
+    const rotGroup = getBoneJointGroup(selectedBone);
+    if (rotGroup) {
+        const dims = limitDimensionsForGroup(rotGroup);
+        const twistDim = dims.find(d => d.kind === 'action' && d.action?.isBoneAxis);
+        if (twistDim) {
+            const eff = getEffectiveLimit(twistDim.key, selectedBone, posture, twists);
+            if (eff) clampedVal = clamp(val, eff.min, eff.max);
+        }
+    } else {
+        const rlim = ROTATION_LIMITS[selectedBone];
+        if (rlim) clampedVal = clamp(val, rlim.min, rlim.max);
+    }
 
     // Negate so that increasing slider = external rotation for both arms.
     const storeVal = selectedBone.startsWith('l') ? clampedVal : -clampedVal;
@@ -2305,35 +3427,44 @@ const BioModelPage: React.FC = () => {
     const oppBone = symmetryMode ? getOppositeBone(selectedBone) : null;
     if (oppBone) lockedTwistSet.add(oppBone);
 
-    // ~1° per micro-step.
-    const STEPS = Math.max(4, Math.min(30, Math.ceil(Math.abs(totalDelta))));
+    // Adaptive step-halving loop (nominal ~1° per step).
+    const NOMINAL_STEPS = Math.max(4, Math.min(30, Math.ceil(Math.abs(totalDelta))));
+    const NOMINAL_STEP = 1 / NOMINAL_STEPS;
+    const MIN_STEP = NOMINAL_STEP / 64;
+
     let workingPosture: Posture = { ...posture };
     let workingTwists: Record<string, number> = { ...twists };
     let lastAcceptedPosture: Posture = workingPosture;
     let lastAcceptedTwists: Record<string, number> = workingTwists;
 
-    for (let i = 1; i <= STEPS; i++) {
-        const stepTwist = startTwist + (totalDelta * i) / STEPS;
+    let progress = 0;
+    let step = NOMINAL_STEP;
+    while (progress < 1 - 1e-9) {
+        const nextProgress = Math.min(1, progress + step);
+        const stepTwist = startTwist + totalDelta * nextProgress;
         let tentativeTwists = { ...workingTwists, [selectedBone]: stepTwist };
         if (oppBone) tentativeTwists[oppBone] = -stepTwist;
 
-        // Mirror the pose from the user's side to the opposite side so the
-        // solver starts from a symmetric configuration. Without this the
-        // opposite side drifts away from the mirror over successive steps.
         let tentativePosture: Posture = { ...workingPosture };
         if (symmetryMode) tentativePosture = mirrorPosture(tentativePosture, selectedBone);
 
         const solved = solveConstraintsAccommodating(
             tentativePosture, lockedSet, tentativeTwists, [], lockedTwistSet
         );
-        if (solved === null) break;
-        workingPosture = solved.posture;
-        workingTwists = solved.twists;
-        // Preserve the user's intended twist value.
-        workingTwists[selectedBone] = stepTwist;
-        if (oppBone) workingTwists[oppBone] = -stepTwist;
-        lastAcceptedPosture = workingPosture;
-        lastAcceptedTwists = { ...workingTwists };
+        if (solved !== null) {
+            workingPosture = solved.posture;
+            workingTwists = solved.twists;
+            // Preserve the user's intended twist value.
+            workingTwists[selectedBone] = stepTwist;
+            if (oppBone) workingTwists[oppBone] = -stepTwist;
+            lastAcceptedPosture = workingPosture;
+            lastAcceptedTwists = { ...workingTwists };
+            progress = nextProgress;
+            step = Math.min(NOMINAL_STEP, step * 1.5);
+        } else {
+            step = step / 2;
+            if (step < MIN_STEP) break;
+        }
     }
 
     updatePostureState(lastAcceptedPosture, lastAcceptedTwists);
@@ -2385,23 +3516,22 @@ const BioModelPage: React.FC = () => {
 
   const updateForce = (id: string, field: keyof ForceConfig, value: any) => {
     if (typeof value === 'number' && isNaN(value)) return;
-    let srcSide: 'l' | 'r' | null = null;
-    setForces(prev => {
-        const updated = prev.map(f => f.id === id ? { ...f, [field]: value } : f);
-        const source = updated.find(f => f.id === id);
-        if (source) srcSide = sideOf(source.boneId);
-        return updated;
-    });
+    // Resolve source side SYNCHRONOUSLY from the captured forces array.
+    // Mutating a variable inside the setForces updater and reading it
+    // afterward doesn't work — React runs updaters lazily, so the read
+    // races with render and the sync call silently no-ops.
+    const existing = forces.find(f => f.id === id);
+    const effectiveBoneId =
+        field === 'boneId' ? (value as string) : (existing?.boneId ?? '');
+    const srcSide = sideOf(effectiveBoneId);
+    setForces(prev => prev.map(f => f.id === id ? { ...f, [field]: value } : f));
     if (symmetryMode && srcSide) applyWholesaleSync(srcSide);
   };
 
   const deleteForce = (id: string) => {
-    let srcSide: 'l' | 'r' | null = null;
-    setForces(prev => {
-        const target = prev.find(f => f.id === id);
-        if (target) srcSide = sideOf(target.boneId);
-        return prev.filter(f => f.id !== id);
-    });
+    const target = forces.find(f => f.id === id);
+    const srcSide = target ? sideOf(target.boneId) : null;
+    setForces(prev => prev.filter(f => f.id !== id));
     if (symmetryMode && srcSide) applyWholesaleSync(srcSide);
   };
 
@@ -2459,6 +3589,7 @@ const BioModelPage: React.FC = () => {
 
   const switchPoseMode = (mode: 'start' | 'end') => {
       setPoseMode(mode);
+      setCurrentRomT(mode === 'start' ? 0 : 1);
       if (mode === 'start') {
           setPosture(startPosture);
           setTwists(startTwists);
@@ -2469,12 +3600,16 @@ const BioModelPage: React.FC = () => {
       setTargetPos(null);
   };
 
-  const copyStartToEnd = () => {
-      setEndPosture(startPosture);
-      setEndTwists(startTwists);
-      if (poseMode === 'end') {
-          setPosture(startPosture);
-          setTwists(startTwists);
+  // Copies the currently-active pose (start or end) onto the other end of
+  // the timeline. Always copies "from active → other", so the button label
+  // flips based on poseMode.
+  const copyActivePose = () => {
+      if (poseMode === 'start') {
+          setEndPosture(startPosture);
+          setEndTwists(startTwists);
+      } else {
+          setStartPosture(endPosture);
+          setStartTwists(endTwists);
       }
   };
 
@@ -2565,6 +3700,10 @@ const BioModelPage: React.FC = () => {
             setPosture(solved.posture);
             setTwists(solved.twists);
         }
+        // Update ROM position so force profiles evaluate at the correct t
+        // during playback (the live torqueDistribution + joint force arrows
+        // pick this up through the currentRomT dependency).
+        setCurrentRomT(t);
         animationRef.current = requestAnimationFrame(animate);
       };
       animationRef.current = requestAnimationFrame(animate);
@@ -2699,7 +3838,7 @@ const BioModelPage: React.FC = () => {
                 color: f.pulley ? '#06b6d4' : '#ef4444',
                 pulley: f.pulley
             }))}
-            reactionForces={[...reactionForces, ...scapulaActionIndicators]}
+            reactionForces={[...jointForceArrows, ...scapulaActionIndicators]}
             planes={visualConstraintPlanes}
             selectedBone={selectedBone}
             onSelectBone={handleBoneSelect} 
@@ -2720,7 +3859,9 @@ const BioModelPage: React.FC = () => {
             <button onClick={() => setActiveTab('constraints')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'constraints' ? 'bg-white text-violet-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Constraints"><Axis3d className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('kinetics')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'kinetics' ? 'bg-white text-orange-500 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="External Forces"><Zap className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('torque')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'torque' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Analysis"><Scale className="w-5 h-5" /></button>
+            <button onClick={() => setActiveTab('timeline')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'timeline' ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Timeline Peaks"><TrendingUp className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('capacities')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'capacities' ? 'bg-white text-purple-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Strength Capacity"><Gauge className="w-5 h-5" /></button>
+            <button onClick={() => setActiveTab('limits')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'limits' ? 'bg-white text-rose-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Joint Limits"><Lock className="w-5 h-5" /></button>
           </div>
 
           <div className="flex items-center gap-3 mb-6 shrink-0">
@@ -2728,12 +3869,16 @@ const BioModelPage: React.FC = () => {
             {activeTab === 'constraints' && <Axis3d className="w-5 h-5 text-violet-600" />}
             {activeTab === 'kinetics' && <Zap className="w-5 h-5 text-orange-500" />}
             {activeTab === 'torque' && <Scale className="w-5 h-5 text-gray-800" />}
+            {activeTab === 'timeline' && <TrendingUp className="w-5 h-5 text-emerald-600" />}
             {activeTab === 'capacities' && <Gauge className="w-5 h-5 text-purple-600" />}
+            {activeTab === 'limits' && <Lock className="w-5 h-5 text-rose-600" />}
             <h3 className="text-lg font-bold text-gray-900">
                 {activeTab === 'kinematics' ? 'Motion Editor' :
                  activeTab === 'constraints' ? 'Constraints' :
                  activeTab === 'kinetics' ? 'External Forces' :
-                 activeTab === 'capacities' ? 'Joint Capacities' : 'Joint Analysis'}
+                 activeTab === 'capacities' ? 'Joint Capacities' :
+                 activeTab === 'limits' ? 'Joint Limits' :
+                 activeTab === 'timeline' ? 'Timeline Peaks' : 'Joint Analysis'}
             </h3>
           </div>
 
@@ -2743,7 +3888,7 @@ const BioModelPage: React.FC = () => {
                     <div className="flex justify-between items-center mb-3">
                         <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Pose Timeline</span>
                         <div className="flex gap-2">
-                            <button onClick={copyStartToEnd} className="bg-white border border-gray-200 text-gray-500 p-1.5 rounded-lg hover:text-indigo-600 hover:border-indigo-200 transition-colors" title="Copy Start to End"><Copy className="w-3 h-3" /></button>
+                            <button onClick={copyActivePose} className="bg-white border border-gray-200 text-gray-500 p-1.5 rounded-lg hover:text-indigo-600 hover:border-indigo-200 transition-colors" title={poseMode === 'start' ? 'Copy Start to End' : 'Copy End to Start'}><Copy className="w-3 h-3" /></button>
                         </div>
                     </div>
                     <div className="flex gap-1 bg-gray-200 p-1 rounded-xl mb-4">
@@ -2855,14 +4000,17 @@ const BioModelPage: React.FC = () => {
                               <button onClick={() => addConstraint(selectedBone, 'arc')} className="flex-1 py-3 bg-amber-500 text-white font-bold rounded-xl shadow-lg shadow-amber-200 hover:bg-amber-600 transition-all flex items-center justify-center gap-2">
                                   <Plus className="w-4 h-4" /> Arc
                               </button>
+                              <button onClick={() => addConstraint(selectedBone, 'fixed')} className="flex-1 py-3 bg-rose-500 text-white font-bold rounded-xl shadow-lg shadow-rose-200 hover:bg-rose-600 transition-all flex items-center justify-center gap-2">
+                                  <Lock className="w-4 h-4" /> Fixed
+                              </button>
                           </div>
 
                           {(constraints[selectedBone] || []).map((c, idx) => (
-                              <div key={c.id} className={`bg-white border rounded-2xl p-4 transition-all ${c.active ? (c.type === 'arc' ? 'border-amber-200' : 'border-violet-200') + ' shadow-sm' : 'border-gray-100 opacity-70'}`}>
+                              <div key={c.id} className={`bg-white border rounded-2xl p-4 transition-all ${c.active ? (c.type === 'arc' ? 'border-amber-200' : c.type === 'fixed' ? 'border-rose-200' : 'border-violet-200') + ' shadow-sm' : 'border-gray-100 opacity-70'}`}>
                                   <div className="flex items-center justify-between mb-4">
                                       <div className="flex items-center gap-3">
-                                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs ${c.active ? (c.type === 'arc' ? 'bg-amber-100 text-amber-700' : 'bg-violet-100 text-violet-700') : 'bg-gray-100 text-gray-500'}`}>{idx + 1}</div>
-                                          <span className="font-bold text-gray-900 text-sm">{c.type === 'arc' ? 'Arc' : 'Planar'} {idx + 1}</span>
+                                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs ${c.active ? (c.type === 'arc' ? 'bg-amber-100 text-amber-700' : c.type === 'fixed' ? 'bg-rose-100 text-rose-700' : 'bg-violet-100 text-violet-700') : 'bg-gray-100 text-gray-500'}`}>{c.type === 'fixed' ? <Lock className="w-3 h-3" /> : idx + 1}</div>
+                                          <span className="font-bold text-gray-900 text-sm">{c.type === 'arc' ? 'Arc' : c.type === 'fixed' ? 'Fixed Point' : 'Planar'} {idx + 1}</span>
                                       </div>
                                       <div className="flex items-center gap-2">
                                           <button
@@ -2992,7 +4140,104 @@ const BioModelPage: React.FC = () => {
                                         <div><label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Force Name</label><input type="text" value={f.name} onChange={(e) => updateForce(f.id, 'name', e.target.value)} className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-medium text-gray-900 outline-none focus:border-orange-500"/></div>
                                         <div><label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Acting On</label><div className="relative"><select value={f.boneId} onChange={(e) => updateForce(f.id, 'boneId', e.target.value)} className="w-full appearance-none bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-medium text-gray-700 outline-none focus:border-orange-500">{Object.entries(BONE_NAMES).map(([id, name]) => (<option key={id} value={id}>{name}</option>))}</select><ChevronLeft className="w-4 h-4 text-gray-400 absolute right-4 top-1/2 -translate-y-1/2 -rotate-90 pointer-events-none" /></div></div>
                                         <div><label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Application Point</label><div className="flex items-center gap-4"><span className="text-xs font-bold text-gray-500">Proximal</span><input type="range" min="0" max="1" step="0.05" value={isNaN(f.position) ? 0.5 : f.position} onChange={(e) => updateForce(f.id, 'position', parseFloat(e.target.value))} className="flex-1 bio-range text-orange-500"/><span className="text-xs font-bold text-gray-500">Distal</span></div></div>
-                                        <div className="bg-orange-50 border border-orange-100 p-4 rounded-xl"><div className="flex justify-between mb-2"><label className="font-bold text-orange-800 text-xs">Force (N)</label><span className="font-mono text-orange-600 font-bold text-xs">{f.magnitude} N</span></div><input type="range" min="1" max="30" step="1" value={isNaN(f.magnitude) ? 10 : f.magnitude} onChange={(e) => updateForce(f.id, 'magnitude', parseFloat(e.target.value))} className="bio-range w-full text-orange-500"/></div>
+                                        <div className="bg-orange-50 border border-orange-100 p-4 rounded-xl"><div className="flex justify-between mb-2"><label className="font-bold text-orange-800 text-xs">Magnitude (relative)</label><span className="font-mono text-orange-600 font-bold text-xs">{f.magnitude}</span></div><input type="range" min="1" max="30" step="1" value={isNaN(f.magnitude) ? 10 : f.magnitude} onChange={(e) => updateForce(f.id, 'magnitude', parseFloat(e.target.value))} className="bio-range w-full text-orange-500"/><p className="text-[9px] text-orange-500 mt-1">Arbitrary unit — only relative magnitudes between forces matter.</p></div>
+                                        {/* Resistance profile: piecewise-linear curve over ROM t */}
+                                        <details className="group bg-gray-50 border border-gray-200 rounded-xl">
+                                            <summary className="flex items-center justify-between p-4 cursor-pointer hover:bg-gray-100 transition-colors rounded-xl">
+                                                <span className="text-[10px] font-bold uppercase tracking-wide text-gray-500 flex items-center gap-1">
+                                                    <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
+                                                    Resistance Profile
+                                                </span>
+                                                <span className="text-[9px] font-mono text-gray-400">
+                                                    {f.profile ? `${f.profile.points.length} pts` : 'flat'}
+                                                </span>
+                                            </summary>
+                                            <div className="px-4 pb-4 space-y-3">
+                                                <p className="text-[9px] text-gray-500 leading-relaxed">Multiplier on magnitude across the ROM (start → end). Models cams, bands, lever profiles.</p>
+                                                {(() => {
+                                                    const prof = f.profile || { points: [{ t: 0, multiplier: 1 }, { t: 1, multiplier: 1 }] };
+                                                    const pts = prof.points;
+                                                    // Mini SVG preview
+                                                    const W = 260, H = 50, PAD = 4;
+                                                    const plotW = W - PAD * 2, plotH = H - PAD * 2;
+                                                    const maxM = Math.max(...pts.map(p => p.multiplier), 1);
+                                                    const svgPath = pts.map((p, i) => {
+                                                        const x = PAD + p.t * plotW;
+                                                        const y = PAD + plotH - (p.multiplier / maxM) * plotH;
+                                                        return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+                                                    }).join(' ');
+                                                    return (
+                                                        <>
+                                                            <svg viewBox={`0 0 ${W} ${H}`} className="w-full bg-white rounded-lg border border-gray-100" style={{ display: 'block' }}>
+                                                                <line x1={PAD} x2={PAD + plotW} y1={PAD + plotH} y2={PAD + plotH} stroke="#e5e7eb" strokeWidth="1" />
+                                                                <path d={svgPath} fill="none" stroke="#f97316" strokeWidth="1.5" strokeLinejoin="round" />
+                                                                {pts.map((p, i) => (
+                                                                    <circle key={i} cx={PAD + p.t * plotW} cy={PAD + plotH - (p.multiplier / maxM) * plotH} r="3" fill="#f97316" stroke="white" strokeWidth="1" />
+                                                                ))}
+                                                                <text x={PAD} y={H - 1} fontSize="7" fill="#9ca3af">start</text>
+                                                                <text x={PAD + plotW} y={H - 1} textAnchor="end" fontSize="7" fill="#9ca3af">end</text>
+                                                                <text x={PAD} y={PAD + 6} fontSize="7" fill="#9ca3af">{maxM.toFixed(1)}×</text>
+                                                            </svg>
+                                                            <div className="space-y-1">
+                                                                {pts.map((p, i) => (
+                                                                    <div key={i} className="flex items-center gap-2">
+                                                                        <span className="text-[9px] font-mono text-gray-400 w-6 shrink-0">@{(p.t * 100).toFixed(0)}%</span>
+                                                                        <input type="number" step="0.1" min="0" value={p.multiplier}
+                                                                            onChange={(e) => {
+                                                                                const v = parseFloat(e.target.value);
+                                                                                if (isNaN(v) || v < 0) return;
+                                                                                const newPts = [...pts];
+                                                                                newPts[i] = { ...newPts[i], multiplier: v };
+                                                                                updateForce(f.id, 'profile', { points: newPts });
+                                                                            }}
+                                                                            className="flex-1 bg-white border border-gray-200 rounded px-2 py-0.5 text-xs font-mono text-center"
+                                                                        />
+                                                                        <span className="text-[9px] text-gray-400">×</span>
+                                                                        {pts.length > 2 && (
+                                                                            <button onClick={() => {
+                                                                                const newPts = pts.filter((_, j) => j !== i);
+                                                                                updateForce(f.id, 'profile', { points: newPts });
+                                                                            }} className="text-gray-300 hover:text-red-400 text-xs">×</button>
+                                                                        )}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                            <div className="flex gap-2">
+                                                                <button onClick={() => {
+                                                                    // Add point at the midpoint of the widest gap
+                                                                    const sorted = [...pts].sort((a, b) => a.t - b.t);
+                                                                    let maxGap = 0, gapIdx = 0;
+                                                                    for (let i = 0; i < sorted.length - 1; i++) {
+                                                                        const gap = sorted[i + 1].t - sorted[i].t;
+                                                                        if (gap > maxGap) { maxGap = gap; gapIdx = i; }
+                                                                    }
+                                                                    const newT = (sorted[gapIdx].t + sorted[gapIdx + 1].t) / 2;
+                                                                    const newM = evaluateProfile(prof, newT);
+                                                                    const newPts = [...pts, { t: newT, multiplier: newM }].sort((a, b) => a.t - b.t);
+                                                                    updateForce(f.id, 'profile', { points: newPts });
+                                                                }} className="flex-1 py-1.5 bg-gray-100 text-gray-500 text-[9px] font-bold rounded-lg hover:bg-gray-200">+ Point</button>
+                                                                <button onClick={() => {
+                                                                    updateForce(f.id, 'profile', undefined as any);
+                                                                }} className="flex-1 py-1.5 bg-gray-100 text-gray-400 text-[9px] font-bold rounded-lg hover:bg-red-50 hover:text-red-400">Reset Flat</button>
+                                                            </div>
+                                                            {/* Presets */}
+                                                            <div className="flex gap-1 flex-wrap">
+                                                                {[
+                                                                    { label: 'Ascending', pts: [{ t: 0, multiplier: 0.5 }, { t: 1, multiplier: 1.5 }] },
+                                                                    { label: 'Descending', pts: [{ t: 0, multiplier: 1.5 }, { t: 1, multiplier: 0.5 }] },
+                                                                    { label: 'Peaked', pts: [{ t: 0, multiplier: 0.6 }, { t: 0.5, multiplier: 1.4 }, { t: 1, multiplier: 0.6 }] },
+                                                                    { label: 'Bell', pts: [{ t: 0, multiplier: 0.4 }, { t: 0.35, multiplier: 1.2 }, { t: 0.65, multiplier: 1.2 }, { t: 1, multiplier: 0.4 }] },
+                                                                ].map(preset => (
+                                                                    <button key={preset.label} onClick={() => updateForce(f.id, 'profile', { points: preset.pts })}
+                                                                        className="px-2 py-1 bg-white border border-gray-200 rounded text-[8px] font-bold text-gray-500 hover:border-orange-300 hover:text-orange-600"
+                                                                    >{preset.label}</button>
+                                                                ))}
+                                                            </div>
+                                                        </>
+                                                    );
+                                                })()}
+                                            </div>
+                                        </details>
                                         {f.pulley ? (
                                             <div className="bg-cyan-50 border border-cyan-100 p-4 rounded-xl space-y-3">
                                                 <div className="flex justify-between items-center">
@@ -3011,7 +4256,39 @@ const BioModelPage: React.FC = () => {
                                                 ))}
                                             </div>
                                         ) : (
-                                            <div><label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-4 block">Direction Vector</label><div className="space-y-4">{['x', 'y', 'z'].map(axis => (<div key={axis}><div className="flex justify-between mb-1"><label className="font-bold text-gray-500 text-xs uppercase">{axis} Axis</label><span className="font-mono text-gray-400 text-xs">{f[axis as keyof ForceConfig]}</span></div><input type="range" min="-1" max="1" step="0.1" value={isNaN(f[axis as keyof ForceConfig] as number) ? 0 : f[axis as keyof ForceConfig] as number} onChange={(e) => updateForce(f.id, axis as keyof ForceConfig, parseFloat(e.target.value))} className="bio-range w-full text-gray-900"/></div>))}</div></div>
+                                            <div>
+                                                <div className="flex items-center justify-between mb-4">
+                                                    <label className="text-[10px] font-bold uppercase tracking-wide text-gray-400">Direction Vector</label>
+                                                    {/* Bone-local toggle */}
+                                                    <button
+                                                        onClick={() => updateForce(f.id, 'localFrame', !f.localFrame)}
+                                                        className={`px-2 py-1 rounded-lg text-[9px] font-bold uppercase tracking-wide transition-all border ${f.localFrame ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-gray-50 border-gray-200 text-gray-400 hover:text-gray-600'}`}
+                                                        title={f.localFrame
+                                                            ? 'Direction is in the bone\'s local frame — rotates with the limb.'
+                                                            : 'Direction is in world space — stays fixed regardless of limb orientation.'}
+                                                    >
+                                                        {f.localFrame ? 'Bone-Local' : 'World'}
+                                                    </button>
+                                                </div>
+                                                {f.localFrame && (
+                                                    <div className="mb-3 -mt-2 space-y-1">
+                                                        <p className="text-[9px] text-indigo-500">Direction rotates with the limb. X = hinge axis, Y = along bone, Z = flex direction.</p>
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={!!f.localFrameIgnoreTwist}
+                                                                onChange={(e) => updateForce(f.id, 'localFrameIgnoreTwist', e.target.checked || undefined)}
+                                                                className="rounded border-indigo-300 text-indigo-600"
+                                                            />
+                                                            <span className="text-[9px] font-bold text-indigo-500">Ignore Twist (IR/ER)</span>
+                                                        </label>
+                                                        {f.localFrameIgnoreTwist && (
+                                                            <p className="text-[8px] text-indigo-400 pl-5">Force tracks swing (flex/abd) but not axial rotation. Typical for lever machines.</p>
+                                                        )}
+                                                    </div>
+                                                )}
+                                                <div className="space-y-4">{['x', 'y', 'z'].map(axis => (<div key={axis}><div className="flex justify-between mb-1"><label className="font-bold text-gray-500 text-xs uppercase">{axis} Axis</label><span className="font-mono text-gray-400 text-xs">{f[axis as keyof ForceConfig]}</span></div><input type="range" min="-1" max="1" step="0.1" value={isNaN(f[axis as keyof ForceConfig] as number) ? 0 : f[axis as keyof ForceConfig] as number} onChange={(e) => updateForce(f.id, axis as keyof ForceConfig, parseFloat(e.target.value))} className="bio-range w-full text-gray-900"/></div>))}</div>
+                                            </div>
                                         )}
                                         <div className="pt-8"><button onClick={() => deleteForce(f.id)} className="w-full py-3 bg-red-50 text-red-500 font-bold rounded-xl hover:bg-red-100 transition-colors flex items-center justify-center gap-2"><Trash2 className="w-4 h-4" /> Delete Force</button></div>
                                      </>
@@ -3037,16 +4314,42 @@ const BioModelPage: React.FC = () => {
                        </div>
                    ) : (
                        <div className="flex-1 overflow-y-auto pr-2 space-y-4">
-                           {torqueDistribution.limitingAction && (
-                               <div className="bg-red-50 border border-red-100 p-4 rounded-xl">
-                                   <p className="text-[9px] font-bold uppercase tracking-wide text-red-400 mb-1">Limiting Factor</p>
-                                   <p className="font-bold text-red-800 text-sm">{torqueDistribution.limitingAction.action}</p>
-                                   <p className="text-[10px] text-red-500 font-medium">Highest relative demand</p>
-                               </div>
-                           )}
-                           {/* Group demands by joint, show per-joint percentage breakdown */}
+                           {/* Display mode toggle: 1RM-local (default) vs raw */}
+                           <div className="bg-gray-50 rounded-xl p-1 flex gap-1">
+                               <button
+                                   onClick={() => setTorqueDisplayMode('1rm-local')}
+                                   className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wide transition-all ${torqueDisplayMode === '1rm-local' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                                   title="Normalize so the hardest action at this pose is 100% (treats current pose as loaded to 1RM)"
+                               >
+                                   1RM · Current Pose
+                               </button>
+                               <button
+                                   onClick={() => setTorqueDisplayMode('raw')}
+                                   className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wide transition-all ${torqueDisplayMode === 'raw' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                                   title="Raw torque/capacity ratio. Only meaningful if capacity table is calibrated to the same unit as your force magnitudes."
+                               >
+                                   Raw
+                               </button>
+                           </div>
                            {(() => {
-                               // Group demands by "Side JointGroup" (e.g., "Right Shoulder")
+                               // Compute the global normalization scale for this frame.
+                               // 1rm-local: scale so the hardest action here reads 100%.
+                               // raw: no scaling (multiplier = 1, showing raw effort × 100).
+                               let scale = 1;
+                               if (torqueDisplayMode === '1rm-local') {
+                                   let maxEffort = 0;
+                                   for (const d of torqueDistribution.demands) {
+                                       if (d.effort > maxEffort) maxEffort = d.effort;
+                                   }
+                                   scale = maxEffort > 1e-9 ? 1 / maxEffort : 1;
+                               }
+                               // Build the limiting factor display using the highest raw
+                               // effort (which is invariant under uniform scaling).
+                               let limiting: JointActionDemand | null = null;
+                               for (const d of torqueDistribution.demands) {
+                                   if (!limiting || d.effort > limiting.effort) limiting = d;
+                               }
+                               // Group by joint/side for the bar display.
                                const groups: Record<string, JointActionDemand[]> = {};
                                for (const d of torqueDistribution.demands) {
                                    const side = d.boneId.startsWith('l') ? 'Left' : d.boneId.startsWith('r') ? 'Right' : '';
@@ -3054,57 +4357,523 @@ const BioModelPage: React.FC = () => {
                                    if (!groups[key]) groups[key] = [];
                                    groups[key].push(d);
                                }
-                               const rotationActions = new Set(['Internal Rotation', 'External Rotation']);
-                               return Object.entries(groups).map(([groupName, groupDemands]) => {
-                                   const nonRotation = groupDemands.filter(d => !rotationActions.has(d.action.replace(/^(Left|Right)\s+\w+\s+/, '')));
-                                   const rotation = groupDemands.filter(d => rotationActions.has(d.action.replace(/^(Left|Right)\s+\w+\s+/, '')));
-                                   const nonRotTotal = nonRotation.reduce((s, d) => s + d.torqueMagnitude, 0);
-                                   nonRotation.sort((a, b) => b.torqueMagnitude - a.torqueMagnitude);
-                                   return (
-                                       <div key={groupName} className="bg-white border border-gray-100 rounded-2xl p-4">
-                                           <h4 className="font-bold text-gray-900 text-sm mb-3">{groupName}</h4>
-                                           <div className="space-y-2">
-                                               {nonRotation.map((d, i) => {
-                                                   const pct = nonRotTotal > 0 ? (d.torqueMagnitude / nonRotTotal * 100) : 0;
-                                                   const actionName = d.action.replace(/^(Left|Right)\s+\w+\s+/, '');
-                                                   const barColor = d.effort > 0.8 ? 'bg-red-400' : d.effort > 0.5 ? 'bg-amber-400' : 'bg-indigo-400';
-                                                   return (
-                                                       <div key={`${d.boneId}-${d.action}-${i}`}>
-                                                           <div className="flex justify-between items-center mb-1">
-                                                               <span className="font-bold text-gray-700 text-xs">{actionName}</span>
-                                                               <span className="font-mono text-xs font-bold text-gray-500">{pct.toFixed(1)}%</span>
-                                                           </div>
-                                                           <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                                                               <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
-                                                           </div>
-                                                       </div>
-                                                   );
-                                               })}
-                                               {rotation.map((d, i) => {
-                                                   const actionName = d.action.replace(/^(Left|Right)\s+\w+\s+/, '');
-                                                   const barColor = d.effort > 0.8 ? 'bg-red-400' : d.effort > 0.5 ? 'bg-amber-400' : 'bg-indigo-400';
-                                                   return (
-                                                       <div key={`${d.boneId}-${d.action}-rot-${i}`} className={nonRotation.length > 0 ? 'border-t border-gray-100 pt-2 mt-1' : ''}>
-                                                           <div className="flex justify-between items-center mb-1">
-                                                               <span className="font-bold text-gray-700 text-xs">{actionName}</span>
-                                                               <span className="font-mono text-xs font-bold text-gray-500">100.0%</span>
-                                                           </div>
-                                                           <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                                                               <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: '100%' }} />
-                                                           </div>
-                                                       </div>
-                                                   );
-                                               })}
+                               return (
+                                   <>
+                                       {limiting && (
+                                           <div className="bg-red-50 border border-red-100 p-4 rounded-xl">
+                                               <p className="text-[9px] font-bold uppercase tracking-wide text-red-400 mb-1">Limiting Factor</p>
+                                               <p className="font-bold text-red-800 text-sm">{limiting.action}</p>
+                                               <p className="text-[10px] text-red-500 font-medium">
+                                                   {torqueDisplayMode === '1rm-local'
+                                                       ? 'Highest demand at current pose · reads 100%'
+                                                       : `Raw effort: ${(limiting.effort * 100).toFixed(0)}% of capacity`}
+                                               </p>
                                            </div>
-                                       </div>
-                                   );
-                               });
+                                       )}
+                                       {Object.entries(groups).map(([groupName, groupDemands]) => {
+                                           const sorted = [...groupDemands].sort((a, b) => b.effort - a.effort);
+                                           return (
+                                               <div key={groupName} className="bg-white border border-gray-100 rounded-2xl p-4">
+                                                   <h4 className="font-bold text-gray-900 text-sm mb-3">{groupName}</h4>
+                                                   <div className="space-y-2">
+                                                       {sorted.map((d, i) => {
+                                                           const actionName = d.action.replace(/^(Left|Right)\s+\w+\s+/, '');
+                                                           const pct = d.effort * scale * 100;
+                                                           const barColor = d.effort > 0.8 ? 'bg-red-400' : d.effort > 0.5 ? 'bg-amber-400' : 'bg-indigo-400';
+                                                           return (
+                                                               <div key={`${d.boneId}-${d.action}-${i}`}>
+                                                                   <div className="flex justify-between items-center mb-1">
+                                                                       <span className="font-bold text-gray-700 text-xs">{actionName}</span>
+                                                                       <span className="font-mono text-xs font-bold text-gray-500">{pct.toFixed(0)}%</span>
+                                                                   </div>
+                                                                   <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                                       <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                                                                   </div>
+                                                               </div>
+                                                           );
+                                                       })}
+                                                   </div>
+                                               </div>
+                                           );
+                                       })}
+                                   </>
+                               );
                            })()}
                        </div>
                    )}
                </div>
           )}
-          
+
+          {activeTab === 'timeline' && (
+              <div className="flex-1 flex flex-col animate-in fade-in slide-in-from-right-4 duration-300">
+                  {!timelineAnalysis || timelineAnalysis.peaks.length === 0 ? (
+                      <div className="flex-1 flex flex-col items-center justify-center text-center opacity-50 border-2 border-dashed border-gray-100 rounded-3xl min-h-[150px]">
+                          <TrendingUp className="w-10 h-10 text-gray-300 mb-3" />
+                          <p className="text-gray-500 font-bold text-sm">Add forces and set<br/>start/end poses to<br/>see timeline peaks</p>
+                      </div>
+                  ) : (
+                      <div className="flex-1 overflow-y-auto pr-2 space-y-4">
+                          <div className="bg-emerald-50 border border-emerald-100 p-4 rounded-xl">
+                              <p className="text-[9px] font-bold uppercase tracking-wide text-emerald-500 mb-1">Peak Analysis · 1RM Normalized</p>
+                              <p className="text-[11px] text-emerald-900 font-medium leading-relaxed">
+                                  Values are % of the 1RM limiting capacity. The system picks a global scale factor so the hardest action at the hardest frame reads 100% — everything else is a fraction of that. Small % tag is where in the ROM the peak occurred.
+                              </p>
+                              <p className="text-[10px] text-emerald-500 font-mono mt-2">
+                                  {timelineAnalysis.framesAnalyzed} frames analyzed
+                                  {timelineAnalysis.framesSkipped > 0 && ` · ${timelineAnalysis.framesSkipped} skipped (solver failure)`}
+                              </p>
+                          </div>
+                          {timelineAnalysis.limitingPeak && (
+                              <div className="bg-red-50 border border-red-100 p-4 rounded-xl">
+                                  <p className="text-[9px] font-bold uppercase tracking-wide text-red-400 mb-1">Limiting Factor</p>
+                                  <p className="font-bold text-red-800 text-sm">{timelineAnalysis.limitingPeak.action}</p>
+                                  <p className="text-[10px] text-red-500 font-medium">
+                                      Peaks at {timelineAnalysis.limitingPeak.peakFramePct.toFixed(0)}% of range
+                                  </p>
+                              </div>
+                          )}
+                          {/* Resistance + Difficulty profiles — two stacked line graphs.
+                            *
+                            * Both curves are NORMALIZED to their own peak, matching the
+                            * 1RM design assumption: the system doesn't know absolute
+                            * Newtons (capacities and user force magnitudes are on
+                            * arbitrary scales), so only the *shape* of each curve is
+                            * meaningful. The raw peak value is shown in the header as
+                            * a reference but the graph Y axis is always 0% → 100%.
+                            *
+                            * Comparing the two shapes is the real diagnostic:
+                            *   - Identical shapes: difficulty tracks mechanical load
+                            *     directly, no strength-curve effects.
+                            *   - Different shapes: capacity varies across the ROM, so
+                            *     some positions feel harder than their raw resistance
+                            *     would suggest. That's the strength curve manifesting.
+                            */}
+                          {timelineAnalysis.profile.length > 1 && (() => {
+                              const profile = timelineAnalysis.profile;
+                              const W = 296, H = 80, PAD_L = 28, PAD_R = 8, PAD_T = 8, PAD_B = 18;
+                              const plotW = W - PAD_L - PAD_R;
+                              const plotH = H - PAD_T - PAD_B;
+                              const tx = (t: number) => PAD_L + t * plotW;
+
+                              // Find peaks for normalization and annotation.
+                              const resPeak = profile.reduce((m, p) => p.resistance > m.resistance ? p : m, profile[0]);
+                              const diffPeak = profile.reduce((m, p) => p.difficulty > m.difficulty ? p : m, profile[0]);
+                              const resMaxRaw = resPeak.resistance;
+                              const diffMaxRaw = diffPeak.difficulty;
+
+                              const makePath = (
+                                  sel: (p: TimelineProfilePoint) => number,
+                                  norm: number
+                              ) => {
+                                  const denom = norm > 1e-6 ? norm : 1;
+                                  return profile.map((p, i) => {
+                                      const x = tx(p.t);
+                                      const y = PAD_T + plotH - (sel(p) / denom) * plotH;
+                                      return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+                                  }).join(' ');
+                              };
+
+                              const renderGraph = (
+                                  title: string,
+                                  desc: string,
+                                  sel: (p: TimelineProfilePoint) => number,
+                                  norm: number,
+                                  color: string,
+                                  fillColor: string,
+                                  peak: TimelineProfilePoint,
+                                  rawPeakLabel: string,
+                              ) => {
+                                  const linePath = makePath(sel, norm);
+                                  const areaPath = linePath + ` L${tx(1).toFixed(1)},${(PAD_T + plotH).toFixed(1)} L${tx(0).toFixed(1)},${(PAD_T + plotH).toFixed(1)} Z`;
+                                  const peakX = tx(peak.t);
+                                  const denom = norm > 1e-6 ? norm : 1;
+                                  const peakY = PAD_T + plotH - (sel(peak) / denom) * plotH;
+                                  return (
+                                      <div className="bg-white border border-gray-100 rounded-2xl p-4">
+                                          <div className="flex items-baseline justify-between mb-1">
+                                              <h4 className="font-bold text-gray-900 text-sm">{title}</h4>
+                                              <span className="text-[9px] font-mono font-bold text-gray-400">peak @ {(peak.t * 100).toFixed(0)}%</span>
+                                          </div>
+                                          <p className="text-[10px] text-gray-500 leading-snug mb-2">{desc}</p>
+                                          <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ display: 'block' }}>
+                                              {[0, 0.25, 0.5, 0.75, 1].map(g => (
+                                                  <line key={`gv-${g}`} x1={tx(g)} x2={tx(g)} y1={PAD_T} y2={PAD_T + plotH} stroke="#f3f4f6" strokeWidth="1" />
+                                              ))}
+                                              {[0, 0.25, 0.5, 0.75, 1].map(g => {
+                                                  const y = PAD_T + plotH - g * plotH;
+                                                  return <line key={`gh-${g}`} x1={PAD_L} x2={PAD_L + plotW} y1={y} y2={y} stroke="#f3f4f6" strokeWidth="1" />;
+                                              })}
+                                              <text x={PAD_L - 4} y={PAD_T + 4} textAnchor="end" fontSize="8" fill="#9ca3af" fontFamily="monospace">100%</text>
+                                              <text x={PAD_L - 4} y={PAD_T + plotH + 2} textAnchor="end" fontSize="8" fill="#9ca3af" fontFamily="monospace">0</text>
+                                              <text x={tx(0)} y={H - 4} textAnchor="start" fontSize="8" fill="#9ca3af" fontFamily="monospace">start</text>
+                                              <text x={tx(1)} y={H - 4} textAnchor="end" fontSize="8" fill="#9ca3af" fontFamily="monospace">end</text>
+                                              <path d={areaPath} fill={fillColor} />
+                                              <path d={linePath} fill="none" stroke={color} strokeWidth="1.75" strokeLinejoin="round" strokeLinecap="round" />
+                                              <line x1={peakX} x2={peakX} y1={PAD_T} y2={PAD_T + plotH} stroke={color} strokeWidth="1" strokeDasharray="2 2" opacity="0.5" />
+                                              <circle cx={peakX} cy={peakY} r="2.5" fill={color} stroke="white" strokeWidth="1" />
+                                          </svg>
+                                          <p className="text-[9px] text-gray-400 font-mono mt-1 text-right">raw peak: {rawPeakLabel}</p>
+                                      </div>
+                                  );
+                              };
+                              return (
+                                  <>
+                                      {renderGraph(
+                                          'Resistance Profile',
+                                          'Total mechanical load on the chain across the ROM, normalized to its peak. Pure physics — ignores muscle strength.',
+                                          p => p.resistance,
+                                          resMaxRaw,
+                                          '#3b82f6',
+                                          'rgba(59, 130, 246, 0.12)',
+                                          resPeak,
+                                          resMaxRaw.toFixed(1),
+                                      )}
+                                      {renderGraph(
+                                          'Difficulty Profile',
+                                          'Hardest joint action\'s effort (τ / capacity) at each point, normalized to its peak. Under 1RM assumption this always hits 100% at the sticking point.',
+                                          p => p.difficulty,
+                                          diffMaxRaw,
+                                          '#ef4444',
+                                          'rgba(239, 68, 68, 0.12)',
+                                          diffPeak,
+                                          (diffMaxRaw * 100).toFixed(0) + '% raw effort',
+                                      )}
+                                  </>
+                              );
+                          })()}
+                          {(() => {
+                              // Group peaks by "Side JointGroup" like the Joint Analysis tab.
+                              const groups: Record<string, TimelinePeak[]> = {};
+                              for (const p of timelineAnalysis.peaks) {
+                                  const side = p.boneId.startsWith('l') ? 'Left' : p.boneId.startsWith('r') ? 'Right' : '';
+                                  const key = `${side} ${p.jointGroup}`.trim();
+                                  if (!groups[key]) groups[key] = [];
+                                  groups[key].push(p);
+                              }
+
+                              // Index actionSeries by key for O(1) lookup in render.
+                              const seriesLookup = new Map<string, ActionTimeSeries>();
+                              for (const s of timelineAnalysis.actionSeries) {
+                                  seriesLookup.set(`${s.boneId}::${s.action}`, s);
+                              }
+
+                              // Mini sparkline renderer. Shared by per-action and per-joint.
+                              const renderSparkline = (
+                                  efforts: number[],
+                                  color: string,
+                                  fillColor: string,
+                                  height: number = 16,
+                              ) => {
+                                  if (efforts.length < 2) return null;
+                                  const profPts = timelineAnalysis.profile;
+                                  const W = 260, H = height, PAD = 1;
+                                  const plotW = W - PAD * 2, plotH = H - PAD * 2;
+                                  // Y axis: always 0 to 1 (1RM normalized)
+                                  const pathD = efforts.map((e, i) => {
+                                      const t = profPts[i] ? profPts[i].t : (efforts.length > 1 ? i / (efforts.length - 1) : 0);
+                                      const x = PAD + t * plotW;
+                                      const y = PAD + plotH - Math.min(e, 1) * plotH;
+                                      return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+                                  }).join(' ');
+                                  const lastX = PAD + plotW;
+                                  const baseY = PAD + plotH;
+                                  const areaD = pathD + ` L${lastX.toFixed(1)},${baseY.toFixed(1)} L${PAD.toFixed(1)},${baseY.toFixed(1)} Z`;
+                                  return (
+                                      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ display: 'block', height: `${height}px` }} preserveAspectRatio="none">
+                                          <path d={areaD} fill={fillColor} />
+                                          <path d={pathD} fill="none" stroke={color} strokeWidth="1.25" strokeLinejoin="round" />
+                                      </svg>
+                                  );
+                              };
+
+                              return Object.entries(groups).map(([groupName, groupPeaks]) => {
+                                  const sorted = [...groupPeaks].sort((a, b) => b.peakEffort - a.peakEffort);
+
+                                  // Per-joint aggregate sparkline: max effort across all
+                                  // actions in this group at each frame index.
+                                  const nFrames = timelineAnalysis.profile.length;
+                                  const jointEfforts = new Array(nFrames).fill(0);
+                                  for (const p of sorted) {
+                                      const series = seriesLookup.get(`${p.boneId}::${p.action}`);
+                                      if (!series) continue;
+                                      for (let i = 0; i < Math.min(nFrames, series.efforts.length); i++) {
+                                          if (series.efforts[i] > jointEfforts[i]) jointEfforts[i] = series.efforts[i];
+                                      }
+                                  }
+
+                                  return (
+                                      <div key={groupName} className="bg-white border border-gray-100 rounded-2xl p-4">
+                                          <h4 className="font-bold text-gray-900 text-sm mb-1">{groupName}</h4>
+                                          {/* Per-joint aggregate sparkline */}
+                                          <div className="mb-3 rounded overflow-hidden">
+                                              {renderSparkline(jointEfforts, '#6b7280', 'rgba(107, 114, 128, 0.1)', 20)}
+                                          </div>
+                                          <div className="space-y-3">
+                                              {sorted.map((p, i) => {
+                                                  const pct = p.peakEffort * 100;
+                                                  const actionName = p.action.replace(/^(Left|Right)\s+\w+\s+/, '');
+                                                  const lineColor = p.peakEffort > 0.8 ? '#f87171' : p.peakEffort > 0.5 ? '#fbbf24' : '#34d399';
+                                                  const fillColor = p.peakEffort > 0.8 ? 'rgba(248, 113, 113, 0.15)' : p.peakEffort > 0.5 ? 'rgba(251, 191, 36, 0.15)' : 'rgba(52, 211, 153, 0.15)';
+                                                  const barColor = p.peakEffort > 0.8 ? 'bg-red-400' : p.peakEffort > 0.5 ? 'bg-amber-400' : 'bg-emerald-400';
+
+                                                  // Look up this action's time series.
+                                                  const series = seriesLookup.get(`${p.boneId}::${p.action}`);
+
+                                                  return (
+                                                      <div key={`${p.boneId}-${p.action}-${i}`}>
+                                                          <div className="flex justify-between items-center mb-1">
+                                                              <span className="font-bold text-gray-700 text-xs">{actionName}</span>
+                                                              <div className="flex items-center gap-2">
+                                                                  <span className="text-[9px] font-mono font-bold text-gray-400">@{p.peakFramePct.toFixed(0)}%</span>
+                                                                  <span className="font-mono text-xs font-bold text-gray-500">{pct.toFixed(0)}%</span>
+                                                              </div>
+                                                          </div>
+                                                          <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                              <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                                                          </div>
+                                                          {/* Per-action sparkline */}
+                                                          {series && series.efforts.length > 1 && (
+                                                              <div className="mt-1 rounded overflow-hidden">
+                                                                  {renderSparkline(series.efforts, lineColor, fillColor, 16)}
+                                                              </div>
+                                                          )}
+                                                      </div>
+                                                  );
+                                              })}
+                                          </div>
+                                      </div>
+                                  );
+                              });
+                          })()}
+                      </div>
+                  )}
+              </div>
+          )}
+
+          {activeTab === 'limits' && (
+              <div className="flex-1 flex flex-col animate-in fade-in slide-in-from-right-4 duration-300">
+                  <div className="bg-rose-50 p-4 rounded-xl border border-rose-100 mb-6">
+                      <p className="text-xs text-rose-900 font-medium leading-relaxed">
+                          Passive end-range for each joint. When a joint is at its limit and a force pushes it further into the stop, the passive anatomy absorbs the load and muscle demand drops to zero. 2-DOF joints (shoulder, hip, scapula) use DIR component bounds on the stored vector; hinges and twists use action angles. Limits are shared bilaterally with automatic sign handling.
+                      </p>
+                      <p className="text-[10px] text-rose-500 font-mono mt-2">
+                          Wired into slider clamping and torque demand zeroing. Defaults are population-average ROM — edit to match the subject.
+                      </p>
+                  </div>
+                  <div className="flex-1 overflow-y-auto pr-2 space-y-4">
+                      {(Object.keys(JOINT_ACTIONS) as JointGroup[]).map(group => {
+                          const bones = GROUP_BONES[group];
+                          const dims = limitDimensionsForGroup(group);
+                          return (
+                              <div key={group} className="bg-white border border-gray-100 rounded-2xl p-4">
+                                  <h4 className="font-bold text-gray-900 text-sm mb-3">{group}</h4>
+                                  <div className="space-y-4">
+                                      {dims.map(dim => {
+                                          const key = dim.key;
+                                          const limit = jointLimits[key] || { min: dim.displayMin, max: dim.displayMax };
+                                          // Live values for left/right (null for Spine).
+                                          const lVal = bones ? getDimensionValue(dim, bones.left, posture, twists) : null;
+                                          const rVal = bones ? getDimensionValue(dim, bones.right, posture, twists) : null;
+                                          // Track range: display bounds, widened if user-set limits exceed them.
+                                          const margin = dim.kind === 'dir' ? 0.1 : 20;
+                                          const trackMin = Math.min(dim.displayMin, limit.min - margin);
+                                          const trackMax = Math.max(dim.displayMax, limit.max + margin);
+                                          const trackSpan = trackMax - trackMin;
+                                          const pct = (v: number) => ((v - trackMin) / trackSpan) * 100;
+                                          // "At limit" tolerance: 1° for actions, 0.02 for dir components.
+                                          const tol = dim.kind === 'dir' ? 0.02 : 1;
+                                          const atLimit = (v: number | null) => {
+                                              if (v === null) return false;
+                                              return v <= limit.min + tol || v >= limit.max - tol;
+                                          };
+                                          // Format values for display.
+                                          const fmt = (v: number) =>
+                                              dim.kind === 'dir' ? v.toFixed(2) : v.toFixed(0) + '°';
+                                          // Step size and number-input step per dimension.
+                                          const inputStep = dim.kind === 'dir' ? 0.05 : 5;
+                                          // Effective limits after coupling (for visualization annotation).
+                                          let effMin = limit.min;
+                                          let effMax = limit.max;
+                                          if (limit.coupling) {
+                                              const source = jointLimits[limit.coupling.dependsOn];
+                                              // Use the LIVE source value on the right-side bone (or left if no right).
+                                              const srcDim = allLimitDimensions.find(d => d.dim.key === limit.coupling!.dependsOn);
+                                              if (srcDim && GROUP_BONES[srcDim.group]) {
+                                                  const srcBone = GROUP_BONES[srcDim.group]!.right;
+                                                  const srcVal = getDimensionValue(srcDim.dim, srcBone, posture, twists);
+                                                  effMin = limit.min + limit.coupling.slopeMin * srcVal;
+                                                  effMax = limit.max + limit.coupling.slopeMax * srcVal;
+                                              }
+                                              void source;
+                                          }
+                                          return (
+                                              <div key={key} className="space-y-2">
+                                                  <div className="flex items-center justify-between">
+                                                      <span className="font-bold text-gray-700 text-xs">
+                                                          {dim.label}
+                                                      </span>
+                                                      {bones && (
+                                                          <div className="flex items-center gap-2 text-[9px] font-mono">
+                                                              <span className={`px-1.5 py-0.5 rounded ${atLimit(lVal) ? 'bg-rose-100 text-rose-700' : 'bg-gray-50 text-gray-500'}`}>
+                                                                  L {lVal !== null ? fmt(lVal) : '—'}
+                                                              </span>
+                                                              <span className={`px-1.5 py-0.5 rounded ${atLimit(rVal) ? 'bg-rose-100 text-rose-700' : 'bg-gray-50 text-gray-500'}`}>
+                                                                  R {rVal !== null ? fmt(rVal) : '—'}
+                                                              </span>
+                                                          </div>
+                                                      )}
+                                                  </div>
+                                                  {/* Visualization track */}
+                                                  <div className="relative h-5">
+                                                      <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-1.5 bg-gray-100 rounded-full" />
+                                                      {/* Configured hard limits (darker rose) */}
+                                                      <div
+                                                          className="absolute top-1/2 -translate-y-1/2 h-1.5 bg-rose-200 rounded-full"
+                                                          style={{ left: `${pct(limit.min)}%`, width: `${pct(limit.max) - pct(limit.min)}%` }}
+                                                      />
+                                                      {/* Effective (coupled) limits (rose if different from hard) */}
+                                                      {limit.coupling && (effMin !== limit.min || effMax !== limit.max) && (
+                                                          <div
+                                                              className="absolute top-1/2 -translate-y-1/2 h-1.5 bg-rose-400 rounded-full"
+                                                              style={{ left: `${pct(effMin)}%`, width: `${pct(effMax) - pct(effMin)}%` }}
+                                                          />
+                                                      )}
+                                                      {/* Soft zones on each edge */}
+                                                      {limit.softZone && limit.softZone > 0 && (
+                                                          <>
+                                                              <div
+                                                                  className="absolute top-1/2 -translate-y-1/2 h-1.5 bg-rose-300/60 rounded-l-full"
+                                                                  style={{ left: `${pct(effMin)}%`, width: `${(limit.softZone / trackSpan) * 100}%` }}
+                                                              />
+                                                              <div
+                                                                  className="absolute top-1/2 -translate-y-1/2 h-1.5 bg-rose-300/60 rounded-r-full"
+                                                                  style={{ left: `${pct(effMax - limit.softZone)}%`, width: `${(limit.softZone / trackSpan) * 100}%` }}
+                                                              />
+                                                          </>
+                                                      )}
+                                                      {lVal !== null && (
+                                                          <div
+                                                              className="absolute top-1/2 w-2 h-2 -mt-1 -ml-1 rounded-full bg-blue-500 border border-white shadow"
+                                                              style={{ left: `${clamp(pct(lVal), 0, 100)}%` }}
+                                                              title={`Left: ${fmt(lVal)}`}
+                                                          />
+                                                      )}
+                                                      {rVal !== null && (
+                                                          <div
+                                                              className="absolute top-1/2 w-2 h-2 -mt-1 -ml-1 rounded-full bg-indigo-600 border border-white shadow"
+                                                              style={{ left: `${clamp(pct(rVal), 0, 100)}%` }}
+                                                              title={`Right: ${fmt(rVal)}`}
+                                                          />
+                                                      )}
+                                                  </div>
+                                                  <div className="flex gap-2 items-center">
+                                                      <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400">Min</label>
+                                                      <input
+                                                          type="number"
+                                                          step={inputStep}
+                                                          value={limit.min}
+                                                          onChange={(e) => {
+                                                              const v = parseFloat(e.target.value);
+                                                              if (!isNaN(v)) updateLimit(key, { min: Math.min(v, limit.max) });
+                                                          }}
+                                                          className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 font-mono text-xs text-gray-700 outline-none focus:border-rose-400"
+                                                      />
+                                                      <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400">Max</label>
+                                                      <input
+                                                          type="number"
+                                                          step={inputStep}
+                                                          value={limit.max}
+                                                          onChange={(e) => {
+                                                              const v = parseFloat(e.target.value);
+                                                              if (!isNaN(v)) updateLimit(key, { max: Math.max(v, limit.min) });
+                                                          }}
+                                                          className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 font-mono text-xs text-gray-700 outline-none focus:border-rose-400"
+                                                      />
+                                                  </div>
+                                                  <details className="group">
+                                                      <summary className="text-[9px] font-bold uppercase tracking-wide text-gray-400 cursor-pointer hover:text-rose-500 list-none flex items-center gap-1">
+                                                          <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
+                                                          Advanced
+                                                      </summary>
+                                                      <div className="mt-2 space-y-2 pl-4">
+                                                          <div className="flex gap-2 items-center">
+                                                              <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 w-16 shrink-0">Soft Zone</label>
+                                                              <input
+                                                                  type="number"
+                                                                  step={inputStep}
+                                                                  min="0"
+                                                                  value={limit.softZone ?? 0}
+                                                                  onChange={(e) => {
+                                                                      const v = parseFloat(e.target.value);
+                                                                      if (!isNaN(v)) updateLimit(key, { softZone: v > 0 ? v : undefined });
+                                                                  }}
+                                                                  className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 font-mono text-xs text-gray-700 outline-none focus:border-rose-400"
+                                                                  title="End-range ramp width (same units as min/max). 0 = hard stop."
+                                                              />
+                                                              <span className="text-[9px] text-gray-400 font-mono">{dim.unit || ''}</span>
+                                                          </div>
+                                                          <div className="flex gap-2 items-center">
+                                                              <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 w-16 shrink-0">Couple To</label>
+                                                              <select
+                                                                  value={limit.coupling?.dependsOn || ''}
+                                                                  onChange={(e) => {
+                                                                      if (!e.target.value) {
+                                                                          updateLimit(key, { coupling: undefined });
+                                                                      } else {
+                                                                          updateLimit(key, { coupling: { dependsOn: e.target.value, slopeMin: 0, slopeMax: 0 } });
+                                                                      }
+                                                                  }}
+                                                                  className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 text-[10px] text-gray-700 outline-none focus:border-rose-400"
+                                                              >
+                                                                  <option value="">None (independent)</option>
+                                                                  {allLimitDimensions.map(({ group: g, dim: d }) => {
+                                                                      if (d.key === key) return null;
+                                                                      return <option key={d.key} value={d.key}>{g} {d.label}</option>;
+                                                                  }).filter(Boolean)}
+                                                              </select>
+                                                          </div>
+                                                          {limit.coupling && (
+                                                              <div className="flex gap-2 items-center">
+                                                                  <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 w-16 shrink-0">Slope</label>
+                                                                  <input
+                                                                      type="number"
+                                                                      step="0.05"
+                                                                      value={limit.coupling.slopeMin}
+                                                                      onChange={(e) => {
+                                                                          const v = parseFloat(e.target.value);
+                                                                          if (!isNaN(v) && limit.coupling) updateLimit(key, { coupling: { ...limit.coupling, slopeMin: v } });
+                                                                      }}
+                                                                      className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 font-mono text-xs text-gray-700 outline-none focus:border-rose-400"
+                                                                      title="Shift in min per unit of coupled source."
+                                                                  />
+                                                                  <span className="text-[8px] text-gray-400 font-mono">min</span>
+                                                                  <input
+                                                                      type="number"
+                                                                      step="0.05"
+                                                                      value={limit.coupling.slopeMax}
+                                                                      onChange={(e) => {
+                                                                          const v = parseFloat(e.target.value);
+                                                                          if (!isNaN(v) && limit.coupling) updateLimit(key, { coupling: { ...limit.coupling, slopeMax: v } });
+                                                                      }}
+                                                                      className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 font-mono text-xs text-gray-700 outline-none focus:border-rose-400"
+                                                                      title="Shift in max per unit of coupled source."
+                                                                  />
+                                                                  <span className="text-[8px] text-gray-400 font-mono">max</span>
+                                                              </div>
+                                                          )}
+                                                      </div>
+                                                  </details>
+                                              </div>
+                                          );
+                                      })}
+                                  </div>
+                              </div>
+                          );
+                      })}
+                  </div>
+              </div>
+          )}
+
           {activeTab === 'capacities' && (
                <div className="flex-1 flex flex-col animate-in fade-in slide-in-from-right-4 duration-300">
                    <div className="bg-purple-50 p-4 rounded-xl border border-purple-100 mb-6">
