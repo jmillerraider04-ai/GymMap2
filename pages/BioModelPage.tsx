@@ -133,9 +133,10 @@ interface BoneConstraint {
     id: string;
     active: boolean;
     type: 'planar' | 'arc' | 'fixed';
+    position?: number; // 0 (proximal) to 1 (distal) — where along the bone (default 1)
     // Planar fields
-    normal: Vector3;   // direction the limb CANNOT move in — tip locked to plane perpendicular to this
-    center: Vector3;   // world-space point the plane/fixed-point passes through (distal tip at time of creation)
+    normal: Vector3;   // direction the limb CANNOT move in
+    center: Vector3;   // world-space point the constraint passes through
     // Arc fields (used when type === 'arc')
     pivot?: Vector3;   // world-space center of rotation (machine axle)
     axis?: Vector3;    // rotation axis direction
@@ -784,10 +785,8 @@ const BioModelPage: React.FC = () => {
     locations['Spine'] = { x: 0, y: CONFIG.TORSO_LEN/2, z: 0 };
     const neckBase = { x: 0, y: -CONFIG.TORSO_LEN/2, z: 0 }; 
     
-    // Spine: proximal end = pelvis (the fixed joint center for moment arms),
-    // distal end = neckBase (where clavicles attach).
-    boneStartPoints['spine'] = locations['Spine']; // pelvis
-    boneEndPoints['spine'] = neckBase;              // neck
+    boneStartPoints['spine'] = neckBase;
+    boneEndPoints['spine'] = locations['Spine'];
 
     const lClavOffset = currentPosture['lClavicle'] || { x: -25, y: 0, z: 0 };
     const rClavOffset = currentPosture['rClavicle'] || { x: 25, y: 0, z: 0 };
@@ -804,7 +803,6 @@ const BioModelPage: React.FC = () => {
     locations['rHip'] = { x: CONFIG.HIP_WIDTH, y: CONFIG.TORSO_LEN/2, z: 0 };
 
     const rootFrame = createRootFrame({x: 0, y: 1, z: 0});
-    jointFrames['spine'] = rootFrame;
     jointFrames['lClavicle'] = rootFrame;
     jointFrames['rClavicle'] = rootFrame;
     jointFrames['lShoulder'] = rootFrame;
@@ -906,7 +904,7 @@ const BioModelPage: React.FC = () => {
       const violates = (samplePosture: Posture): boolean => {
           const kin = calculateKinematics(samplePosture, baseTwists);
           for (const { boneId: bid, c } of allCons) {
-              const tip = kin.boneEndPoints[bid];
+              const tip = getConstraintPoint(bid, c, kin);
               if (!tip) continue;
               const L = BONE_LENGTHS[bid] || 0;
               const TOL = Math.max(SOLVER_MIN_TOL, L * SOLVER_TOL_SCALE);
@@ -993,6 +991,14 @@ const BioModelPage: React.FC = () => {
       setConstraints(prev => syncConstraintsFromSide(prev, src));
   };
 
+  // World-space point where a constraint applies, interpolated along the bone.
+  const getConstraintPoint = (boneId: string, c: BoneConstraint, kin: ReturnType<typeof calculateKinematics>): Vector3 | null => {
+      const seg = kin.boneStartPoints[boneId];
+      const end = kin.boneEndPoints[boneId];
+      if (!seg || !end) return null;
+      return add(seg, mul(sub(end, seg), c.position ?? 1));
+  };
+
   const addConstraint = (boneId: string, type: 'planar' | 'arc' | 'fixed' = 'planar') => {
       const kin = calculateKinematics(posture, twists);
       const tip = kin.boneEndPoints[boneId];
@@ -1074,7 +1080,7 @@ const BioModelPage: React.FC = () => {
                       radius: c.radius
                   });
               } else {
-                  const tip = kin.boneEndPoints[boneId] || c.center;
+                  const tip = getConstraintPoint(boneId, c, kin) || c.center;
                   out.push({
                       id: c.id,
                       center: tip,
@@ -1892,15 +1898,14 @@ const BioModelPage: React.FC = () => {
   const BONE_ORDER = ['lClavicle', 'rClavicle', 'lHumerus', 'rHumerus', 'lFemur', 'rFemur', 'lForearm', 'rForearm', 'lTibia', 'rTibia', 'lFoot', 'rFoot'];
 
   const BONE_PARENTS: Record<string, string | undefined> = {
-    spine: undefined,
-    lClavicle: 'spine',
-    rClavicle: 'spine',
+    lClavicle: undefined,
+    rClavicle: undefined,
     lHumerus: 'lClavicle',
     rHumerus: 'rClavicle',
     lForearm: 'lHumerus',
     rForearm: 'rHumerus',
-    lFemur: 'spine',
-    rFemur: 'spine',
+    lFemur: undefined,
+    rFemur: undefined,
     lTibia: 'lFemur',
     rTibia: 'rFemur',
     lFoot: 'lTibia',
@@ -1908,7 +1913,6 @@ const BioModelPage: React.FC = () => {
   };
 
   const BONE_TO_JOINT_GROUP: Record<string, JointGroup> = {
-    spine: 'Spine',
     lClavicle: 'Scapula', rClavicle: 'Scapula',
     lHumerus: 'Shoulder', rHumerus: 'Shoulder',
     lForearm: 'Elbow',   rForearm: 'Elbow',
@@ -2863,6 +2867,7 @@ const BioModelPage: React.FC = () => {
       jointGroup: JointGroup;
       action: string;
       efforts: number[];
+      torques: number[];   // raw torque magnitude per frame (for computing proportions)
   }
   interface TimelineAnalysisResult {
       peaks: TimelinePeak[];
@@ -2883,7 +2888,7 @@ const BioModelPage: React.FC = () => {
       const profile: TimelineProfilePoint[] = [];
       // Per-action time series: key = "${boneId}::${action}", value = effort
       // at each successfully-analyzed frame. Frame index maps to profile[].
-      const seriesMap = new Map<string, { boneId: string; jointGroup: JointGroup; action: string; efforts: number[] }>();
+      const seriesMap = new Map<string, { boneId: string; jointGroup: JointGroup; action: string; efforts: number[]; torques: number[] }>();
       let framesAnalyzed = 0;
       let framesSkipped = 0;
 
@@ -2958,16 +2963,18 @@ const BioModelPage: React.FC = () => {
                   // First time seeing this action — backfill 0s for all
                   // previously analyzed frames where it didn't appear.
                   const backfill = new Array(framesAnalyzed - 1).fill(0);
-                  series = { boneId: d.boneId, jointGroup: d.jointGroup, action: d.action, efforts: backfill };
+                  series = { boneId: d.boneId, jointGroup: d.jointGroup, action: d.action, efforts: backfill, torques: [...backfill] };
                   seriesMap.set(key, series);
               }
               series.efforts.push(d.effort);
+              series.torques.push(d.torqueMagnitude);
           }
 
           // Push 0 for any series that existed but had no demand this frame.
           for (const [key, series] of seriesMap) {
               if (!frameActions.has(key)) {
                   series.efforts.push(0);
+                  series.torques.push(0);
               }
           }
       }
@@ -4030,7 +4037,35 @@ const BioModelPage: React.FC = () => {
                                       </div>
                                   </div>
 
-                                  {c.active && c.type !== 'arc' && (
+                                  {c.active && (
+                                      <div className="mb-3">
+                                          <label className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Application Point</label>
+                                          <div className="flex items-center gap-4">
+                                              <span className="text-xs font-bold text-gray-500">Proximal</span>
+                                              <input type="range" min="0" max="1" step="0.05"
+                                                  value={c.position ?? 1}
+                                                  onChange={(e) => {
+                                                      const newPos = parseFloat(e.target.value);
+                                                      const kin = calculateKinematics(posture, twists);
+                                                      const seg = kin.boneStartPoints[selectedBone];
+                                                      const end = kin.boneEndPoints[selectedBone];
+                                                      if (seg && end) {
+                                                          const newCenter = add(seg, mul(sub(end, seg), newPos));
+                                                          if (c.type === 'arc' && c.pivot && c.axis) {
+                                                              const snapped = snapArcToTip(c.pivot, c.axis, newCenter);
+                                                              updateConstraint(selectedBone, c.id, { position: newPos, center: newCenter, pivot: snapped.pivot, radius: snapped.radius });
+                                                          } else {
+                                                              updateConstraint(selectedBone, c.id, { position: newPos, center: newCenter });
+                                                          }
+                                                      }
+                                                  }}
+                                                  className="flex-1 bio-range text-violet-500" />
+                                              <span className="text-xs font-bold text-gray-500">Distal</span>
+                                          </div>
+                                      </div>
+                                  )}
+
+                                  {c.active && c.type !== 'arc' && c.type !== 'fixed' && (
                                       <div className="space-y-4">
                                           <div>
                                               <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 mb-2 block">Plane Presets</label>
@@ -4598,11 +4633,17 @@ const BioModelPage: React.FC = () => {
                                   // actions in this group at each frame index.
                                   const nFrames = timelineAnalysis.profile.length;
                                   const jointEfforts = new Array(nFrames).fill(0);
+                                  // Per-joint total torque at each frame (for computing
+                                  // per-action proportions below).
+                                  const jointTotalTorque = new Array(nFrames).fill(0);
                                   for (const p of sorted) {
                                       const series = seriesLookup.get(`${p.boneId}::${p.action}`);
                                       if (!series) continue;
                                       for (let i = 0; i < Math.min(nFrames, series.efforts.length); i++) {
                                           if (series.efforts[i] > jointEfforts[i]) jointEfforts[i] = series.efforts[i];
+                                      }
+                                      for (let i = 0; i < Math.min(nFrames, series.torques.length); i++) {
+                                          jointTotalTorque[i] += series.torques[i];
                                       }
                                   }
 
@@ -4636,10 +4677,13 @@ const BioModelPage: React.FC = () => {
                                                           <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                                                               <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
                                                           </div>
-                                                          {/* Per-action sparkline */}
-                                                          {series && series.efforts.length > 1 && (
+                                                          {/* Per-action sparkline: proportion of joint's total force */}
+                                                          {series && series.torques.length > 1 && (
                                                               <div className="mt-1 rounded overflow-hidden">
-                                                                  {renderSparkline(series.efforts, lineColor, fillColor, 16)}
+                                                                  {renderSparkline(
+                                                                      series.torques.map((t, i) => jointTotalTorque[i] > 1e-9 ? t / jointTotalTorque[i] : 0),
+                                                                      lineColor, fillColor, 16
+                                                                  )}
                                                               </div>
                                                           )}
                                                       </div>
