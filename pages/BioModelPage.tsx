@@ -4,6 +4,7 @@ import BioMan, { Posture, Vector3, VisualForce, VisualPlane } from '../component
 import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, BrainCircuit, Axis3d, Plus, Trash2, TrendingUp } from 'lucide-react';
 
 const DEFAULT_POSTURE: Posture = {
+  spine: { x: 0, y: -1, z: 0 },  // pointing UP from pelvis to ribcage (y-down)
   lClavicle: { x: -25, y: 0, z: 0 },
   rClavicle: { x: 25, y: 0, z: 0 },
   lHumerus: { x: 0, y: 1, z: 0 },
@@ -54,6 +55,7 @@ const BONE_NAMES: Record<string, string> = {
 };
 
 const BONE_LENGTHS: Record<string, number> = {
+  spine: 60,   // pelvis → ribcage (= CONFIG.TORSO_LEN)
   lClavicle: 25, rClavicle: 25,
   lHumerus: 44, lForearm: 39,
   rHumerus: 44, rForearm: 39,
@@ -350,10 +352,12 @@ const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
     // happen to disagree here, which is fine as long as nothing mixes them.
     'Elbow.action.Extension': { min: 0, max: 160 },
 
-    // --- Spine (fixed in the model today; defined for static analysis) ---
-    'Spine.action.Flexion':          { min: -30, max: 80 },
-    'Spine.action.Lateral Flexion L':{ min: -35, max: 35 },
-    'Spine.action.Rotation L':       { min: -45, max: 45 },
+    // --- Spine: passive bone, DIR limits on direction vector.
+    // Default {0,-1,0} = upright. Y goes from -1 (upright) toward 0 (horizontal).
+    // Z goes from 0 (upright) toward -1 (leaning forward). X stays near 0. ---
+    'Spine.dir.x': { min: -0.5,  max: 0.5  },
+    'Spine.dir.y': { min: -1.02, max: -0.1 },
+    'Spine.dir.z': { min: -0.95, max: 0.5  },
 
     // --- Hip (femur unit direction, right-normalized) ---
     // Standing rest: (0, 1, 0). Flexion forward curls y toward -0.5 with
@@ -781,31 +785,57 @@ const BioModelPage: React.FC = () => {
     const boneStartPoints: Record<string, Vector3> = {};
     const jointFrames: Record<string, Frame> = {};
 
-    locations['Spine'] = { x: 0, y: CONFIG.TORSO_LEN/2, z: 0 };
-    const neckBase = { x: 0, y: -CONFIG.TORSO_LEN/2, z: 0 }; 
-    
-    boneStartPoints['spine'] = neckBase;
-    boneEndPoints['spine'] = locations['Spine'];
+    const rootFrame = createRootFrame({x: 0, y: 1, z: 0});
+    const pelvisPos = { x: 0, y: CONFIG.TORSO_LEN / 2, z: 0 };
+    locations['Spine'] = pelvisPos;
+
+    // --- Spine bone: pelvis → ribcage ---
+    // Direction stored in posture as a unit vector (default {0,-1,0} = upright).
+    // The spine is a passive 2-DOF bone — the solver can tilt it to
+    // accommodate constraints, but there are no dedicated user controls.
+    const spineDir = currentPosture['spine'] || { x: 0, y: -1, z: 0 };
+    const spineWorldDir = normalize(spineDir); // root bone → local = world
+    const spineLen = BONE_LENGTHS['spine'] || CONFIG.TORSO_LEN;
+    const neckBase = {
+        x: pelvisPos.x + spineWorldDir.x * spineLen,
+        y: pelvisPos.y + spineWorldDir.y * spineLen,
+        z: pelvisPos.z + spineWorldDir.z * spineLen,
+    };
+    boneStartPoints['spine'] = pelvisPos;
+    boneEndPoints['spine'] = neckBase;
+    jointFrames['spine'] = rootFrame; // spine's parent frame = root
+
+    // Spine frame: transported from root along the spine's world direction.
+    // This becomes the parent frame for clavicles and arms, so everything
+    // above the pelvis tilts with the spine.
+    const spineFrame = transportFrame(rootFrame, spineWorldDir);
 
     const lClavOffset = currentPosture['lClavicle'] || { x: -25, y: 0, z: 0 };
     const rClavOffset = currentPosture['rClavicle'] || { x: 25, y: 0, z: 0 };
 
-    locations['lShoulder'] = { x: neckBase.x + lClavOffset.x, y: neckBase.y + lClavOffset.y, z: neckBase.z + lClavOffset.z };
-    locations['rShoulder'] = { x: neckBase.x + rClavOffset.x, y: neckBase.y + rClavOffset.y, z: neckBase.z + rClavOffset.z };
-    
+    // Clavicle offsets are interpreted in the SPINE frame (not root frame)
+    // so they tilt with the spine.
+    const lClavWorld = localToWorld(spineFrame, lClavOffset);
+    const rClavWorld = localToWorld(spineFrame, rClavOffset);
+    locations['lShoulder'] = { x: neckBase.x + lClavWorld.x, y: neckBase.y + lClavWorld.y, z: neckBase.z + lClavWorld.z };
+    locations['rShoulder'] = { x: neckBase.x + rClavWorld.x, y: neckBase.y + rClavWorld.y, z: neckBase.z + rClavWorld.z };
+
     boneStartPoints['lClavicle'] = neckBase;
     boneStartPoints['rClavicle'] = neckBase;
     boneEndPoints['lClavicle'] = locations['lShoulder'];
     boneEndPoints['rClavicle'] = locations['rShoulder'];
 
-    locations['lHip'] = { x: -CONFIG.HIP_WIDTH, y: CONFIG.TORSO_LEN/2, z: 0 };
-    locations['rHip'] = { x: CONFIG.HIP_WIDTH, y: CONFIG.TORSO_LEN/2, z: 0 };
+    // Hips stay at pelvis level — legs are independent of spine tilt.
+    locations['lHip'] = { x: -CONFIG.HIP_WIDTH, y: pelvisPos.y, z: 0 };
+    locations['rHip'] = { x: CONFIG.HIP_WIDTH, y: pelvisPos.y, z: 0 };
 
-    const rootFrame = createRootFrame({x: 0, y: 1, z: 0});
-    jointFrames['lClavicle'] = rootFrame;
-    jointFrames['rClavicle'] = rootFrame;
-    jointFrames['lShoulder'] = rootFrame;
-    jointFrames['rShoulder'] = rootFrame;
+    // Clavicles and arms use the spine frame as their parent, so the
+    // entire upper body tilts with the spine.
+    jointFrames['lClavicle'] = spineFrame;
+    jointFrames['rClavicle'] = spineFrame;
+    jointFrames['lShoulder'] = spineFrame;
+    jointFrames['rShoulder'] = spineFrame;
+    // Legs use the root frame (pelvis-relative, independent of spine).
     jointFrames['lHip'] = rootFrame;
     jointFrames['rHip'] = rootFrame;
 
@@ -859,8 +889,8 @@ const BioModelPage: React.FC = () => {
 
     calculateChain('lFemur', 'lTibia', 'lFoot', locations['lHip'], rootFrame, BONE_LENGTHS.lFemur, BONE_LENGTHS.lTibia, BONE_LENGTHS.lFoot);
     calculateChain('rFemur', 'rTibia', 'rFoot', locations['rHip'], rootFrame, BONE_LENGTHS.rFemur, BONE_LENGTHS.rTibia, BONE_LENGTHS.rFoot);
-    calculateChain('lHumerus', 'lForearm', '', locations['lShoulder'], rootFrame, BONE_LENGTHS.lHumerus, BONE_LENGTHS.lForearm, 0);
-    calculateChain('rHumerus', 'rForearm', '', locations['rShoulder'], rootFrame, BONE_LENGTHS.rHumerus, BONE_LENGTHS.rForearm, 0);
+    calculateChain('lHumerus', 'lForearm', '', locations['lShoulder'], spineFrame, BONE_LENGTHS.lHumerus, BONE_LENGTHS.lForearm, 0);
+    calculateChain('rHumerus', 'rForearm', '', locations['rShoulder'], spineFrame, BONE_LENGTHS.rHumerus, BONE_LENGTHS.rForearm, 0);
 
     return { locations, boneEndPoints, boneStartPoints, jointFrames };
   };
@@ -1886,11 +1916,12 @@ const BioModelPage: React.FC = () => {
       return list;
   }, [selectedBone, posture, twists]);
 
-  const BONE_ORDER = ['lClavicle', 'rClavicle', 'lHumerus', 'rHumerus', 'lFemur', 'rFemur', 'lForearm', 'rForearm', 'lTibia', 'rTibia', 'lFoot', 'rFoot'];
+  const BONE_ORDER = ['spine', 'lClavicle', 'rClavicle', 'lHumerus', 'rHumerus', 'lFemur', 'rFemur', 'lForearm', 'rForearm', 'lTibia', 'rTibia', 'lFoot', 'rFoot'];
 
   const BONE_PARENTS: Record<string, string | undefined> = {
-    lClavicle: undefined,
-    rClavicle: undefined,
+    spine: undefined,
+    lClavicle: 'spine',
+    rClavicle: 'spine',
     lHumerus: 'lClavicle',
     rHumerus: 'rClavicle',
     lForearm: 'lHumerus',
@@ -1904,6 +1935,7 @@ const BioModelPage: React.FC = () => {
   };
 
   const BONE_TO_JOINT_GROUP: Record<string, JointGroup> = {
+    spine: 'Spine',
     lClavicle: 'Scapula', rClavicle: 'Scapula',
     lHumerus: 'Shoulder', rHumerus: 'Shoulder',
     lForearm: 'Elbow',   rForearm: 'Elbow',
@@ -1972,7 +2004,7 @@ const BioModelPage: React.FC = () => {
       'Scapula':  { left: 'lClavicle', right: 'rClavicle' },
       'Shoulder': { left: 'lHumerus',  right: 'rHumerus'  },
       'Elbow':    { left: 'lForearm',  right: 'rForearm'  },
-      'Spine':    null,
+      'Spine':    { left: 'spine',     right: 'spine'     }, // single bone, same for both
       'Hip':      { left: 'lFemur',    right: 'rFemur'    },
       'Knee':     { left: 'lTibia',    right: 'rTibia'    },
       'Ankle':    { left: 'lFoot',     right: 'rFoot'     },
@@ -2056,7 +2088,7 @@ const BioModelPage: React.FC = () => {
   }
 
   const limitDimensionsForGroup = (group: JointGroup): LimitDimension[] => {
-      if (group === 'Shoulder' || group === 'Hip') {
+      if (group === 'Shoulder' || group === 'Hip' || group === 'Spine') {
           const twist = JOINT_ACTIONS[group].find(a => a.isBoneAxis);
           const dirs: LimitDimension[] = [
               { kind: 'dir', key: `${group}.dir.x`, label: 'DIR X  (lateral / medial)', component: 'x', displayMin: -1.1, displayMax: 1.1, unit: '' },
@@ -2506,7 +2538,7 @@ const BioModelPage: React.FC = () => {
       // 2-DOF free bones live on the full unit sphere; 1-DOF axis-locked
       // bones live on a locked circle of the sphere; 1-DOF hinge bones live
       // on their parent's local y-z plane.
-      const isUnitDirBone = (b: string) => /Humerus|Forearm|Femur|Tibia|Foot/.test(b);
+      const isUnitDirBone = (b: string) => /Humerus|Forearm|Femur|Tibia|Foot/.test(b) || b === 'spine';
       const freeBones2D = Object.keys(posture).filter(
           b => isUnitDirBone(b)
             && !isHingeBone(b)
@@ -3472,6 +3504,7 @@ const BioModelPage: React.FC = () => {
 
   const isScapula = selectedBone ? selectedBone.includes('Clavicle') : false;
   const isHinge = selectedBone ? /Forearm|Tibia|Foot/.test(selectedBone) : false;
+  const isSpine = selectedBone === 'spine';
 
   const getHingeConfig = (bone: string) => {
       if (bone.includes('Forearm')) return { label: 'Elbow Flexion', min: 0, max: 160, default: 0 };
@@ -3562,7 +3595,8 @@ const BioModelPage: React.FC = () => {
         setSelectedBone(boneId);
         const boneIsHinge = /Forearm|Tibia|Foot/.test(boneId);
         
-        if (boneIsHinge) {
+        if (boneIsHinge || boneId === 'spine') {
+            // Spine: no direct controls — positioned only by the solver.
             setTargetPos(null);
         } else {
             const currentP = poseMode === 'start' ? startPosture : endPosture;
@@ -3904,10 +3938,10 @@ const BioModelPage: React.FC = () => {
                         <div className="flex items-center justify-between"><span className="font-bold text-gray-900 text-sm">{BONE_NAMES[selectedBone]}</span><span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{poseMode === 'start' ? 'Start' : 'End'} Editing</span></div>
 
                         {selectedBone === 'spine' ? (
-                            <div className="flex flex-col items-center justify-center border-2 border-dashed border-gray-100 rounded-xl py-8">
-                                <Lock className="w-8 h-8 text-gray-300 mb-2" />
-                                <p className="text-xs font-bold text-gray-400 text-center uppercase tracking-wide">Static Root Segment</p>
-                                <p className="text-[10px] text-gray-300 text-center mt-1">Movement not supported</p>
+                            <div className="flex flex-col items-center justify-center border-2 border-dashed border-gray-100 rounded-xl py-8 px-4">
+                                <ArrowDownUp className="w-8 h-8 text-gray-300 mb-2" />
+                                <p className="text-xs font-bold text-gray-400 text-center uppercase tracking-wide">Passive Spine</p>
+                                <p className="text-[10px] text-gray-300 text-center mt-1 leading-relaxed">No direct controls. The solver tilts the spine to accommodate constraints on other bones. Torque demands at the spine are detected from forces in the chain.</p>
                             </div>
                         ) : isHinge ? (
                             <div>
