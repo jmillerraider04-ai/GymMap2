@@ -402,7 +402,7 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
         return { frame1: frame1Twisted, frame2: frame2Twisted, frame3: frame3Twisted, end1, end2 };
     };
 
-    const rootFrame = createRootFrame({x:0, y:1, z:0}); 
+    const rootFrame = createRootFrame({x:0, y:1, z:0});
 
     // Dynamic Clavicles
     const lClavOffset = posture['lClavicle'] || { x: -25, y: 0, z: 0 };
