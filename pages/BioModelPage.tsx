@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import BioMan, { Posture, Vector3, VisualForce, VisualPlane } from '../components/BioMan';
-import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, BrainCircuit, Axis3d, Plus, Trash2, TrendingUp } from 'lucide-react';
+import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, ChevronDown, BrainCircuit, Axis3d, Plus, Trash2, TrendingUp, Activity } from 'lucide-react';
 
 const DEFAULT_POSTURE: Posture = {
   lClavicle: { x: -25, y: 0, z: 0 },
@@ -164,6 +164,33 @@ interface JointCapacityProfile {
     [action: string]: CapacityConfig;
 }
 
+// --- MUSCLES ---
+//
+// A muscle is an anatomically-named tissue from a fixed catalog. The user
+// assigns muscles to specific (joint, action) pairs and gives each one a
+// {base, peak, angle} contribution profile, evaluated by the same cosine
+// bell as joint capacities. The numbers here are dimensionless contribution
+// weights — what matters is each muscle's value RELATIVE to the others on
+// the same action at the same angle. The Muscles tab visualises this as a
+// stacked-area normalized to 100% across the joint's ROM.
+interface MuscleDef {
+    id: string;
+    name: string;
+    region: string;  // grouping for the "add muscle" dropdown
+}
+
+interface MuscleContribution {
+    base: number;     // contribution at the worst angle
+    peak: number;     // contribution at the peak angle
+    angle: number;    // peak angle (degrees)
+}
+
+// Outer key: `${JointGroup}.${actionKey(directionName)}`, where directionName
+// is either ActionAxis.positiveAction or .negativeAction (each direction is
+// its own section because flexors and extensors are different muscles).
+// Inner key: muscle id from MUSCLE_CATALOG.
+type MuscleAssignmentMap = Record<string, Record<string, MuscleContribution>>;
+
 interface ActionAxis {
     positiveAction: string;
     negativeAction: string;
@@ -301,6 +328,353 @@ const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
         'lateralFlexion': createCap(70, 130, 0),
         'rotation': createCap(70, 120, 0)
     }
+};
+
+// Hardcoded muscle catalog focused on what matters for hypertrophy / strength
+// training analysis. Grouped by region for the "add muscle" dropdown.
+const MUSCLE_CATALOG: MuscleDef[] = [
+    // Chest
+    { id: 'pec-clavicular', name: 'Pectoralis Major (Clavicular)', region: 'Chest' },
+    { id: 'pec-sternal',    name: 'Pectoralis Major (Sternal)',    region: 'Chest' },
+    { id: 'pec-minor',      name: 'Pectoralis Minor',              region: 'Chest' },
+    // Shoulders
+    { id: 'delt-front', name: 'Anterior Deltoid',  region: 'Shoulders' },
+    { id: 'delt-side',  name: 'Lateral Deltoid',   region: 'Shoulders' },
+    { id: 'delt-rear',  name: 'Posterior Deltoid', region: 'Shoulders' },
+    // Back
+    { id: 'lats',              name: 'Latissimus Dorsi',     region: 'Back' },
+    { id: 'traps-upper',       name: 'Trapezius (Upper)',    region: 'Back' },
+    { id: 'traps-mid',         name: 'Trapezius (Middle)',   region: 'Back' },
+    { id: 'traps-lower',       name: 'Trapezius (Lower)',    region: 'Back' },
+    { id: 'rhomboids',         name: 'Rhomboids',            region: 'Back' },
+    { id: 'teres-major',       name: 'Teres Major',          region: 'Back' },
+    { id: 'teres-minor',       name: 'Teres Minor',          region: 'Back' },
+    { id: 'infraspinatus',     name: 'Infraspinatus',        region: 'Back' },
+    { id: 'supraspinatus',     name: 'Supraspinatus',        region: 'Back' },
+    { id: 'subscapularis',     name: 'Subscapularis',        region: 'Back' },
+    { id: 'serratus-anterior', name: 'Serratus Anterior',    region: 'Back' },
+    { id: 'levator-scapulae',  name: 'Levator Scapulae',     region: 'Back' },
+    // Arms
+    { id: 'biceps-long',     name: 'Biceps Brachii (Long Head)',     region: 'Arms' },
+    { id: 'biceps-short',    name: 'Biceps Brachii (Short Head)',    region: 'Arms' },
+    { id: 'brachialis',      name: 'Brachialis',                     region: 'Arms' },
+    { id: 'brachioradialis', name: 'Brachioradialis',                region: 'Arms' },
+    { id: 'triceps-long',    name: 'Triceps Brachii (Long Head)',    region: 'Arms' },
+    { id: 'triceps-lateral', name: 'Triceps Brachii (Lateral Head)', region: 'Arms' },
+    { id: 'triceps-medial',  name: 'Triceps Brachii (Medial Head)',  region: 'Arms' },
+    // Core
+    { id: 'rectus-abdominis',  name: 'Rectus Abdominis',   region: 'Core' },
+    { id: 'obliques-external', name: 'External Obliques',  region: 'Core' },
+    { id: 'obliques-internal', name: 'Internal Obliques',  region: 'Core' },
+    { id: 'erector-spinae',    name: 'Erector Spinae',     region: 'Core' },
+    { id: 'quadratus-lumborum',name: 'Quadratus Lumborum', region: 'Core' },
+    // Hips
+    { id: 'glute-max',  name: 'Gluteus Maximus',     region: 'Hips' },
+    { id: 'glute-med',  name: 'Gluteus Medius',      region: 'Hips' },
+    { id: 'glute-min',  name: 'Gluteus Minimus',     region: 'Hips' },
+    { id: 'iliopsoas',  name: 'Iliopsoas',           region: 'Hips' },
+    { id: 'tfl',        name: 'Tensor Fasciae Latae',region: 'Hips' },
+    { id: 'sartorius',  name: 'Sartorius',           region: 'Hips' },
+    // Adductors
+    { id: 'adductor-magnus', name: 'Adductor Magnus', region: 'Adductors' },
+    { id: 'adductor-longus', name: 'Adductor Longus', region: 'Adductors' },
+    { id: 'adductor-brevis', name: 'Adductor Brevis', region: 'Adductors' },
+    { id: 'gracilis',        name: 'Gracilis',        region: 'Adductors' },
+    { id: 'pectineus',       name: 'Pectineus',       region: 'Adductors' },
+    // Quads
+    { id: 'rectus-femoris',     name: 'Rectus Femoris',     region: 'Quads' },
+    { id: 'vastus-lateralis',   name: 'Vastus Lateralis',   region: 'Quads' },
+    { id: 'vastus-medialis',    name: 'Vastus Medialis',    region: 'Quads' },
+    { id: 'vastus-intermedius', name: 'Vastus Intermedius', region: 'Quads' },
+    // Hamstrings
+    { id: 'biceps-femoris',  name: 'Biceps Femoris',  region: 'Hamstrings' },
+    { id: 'semitendinosus',  name: 'Semitendinosus',  region: 'Hamstrings' },
+    { id: 'semimembranosus', name: 'Semimembranosus', region: 'Hamstrings' },
+    // Calves
+    { id: 'gastrocnemius',     name: 'Gastrocnemius',     region: 'Calves' },
+    { id: 'soleus',            name: 'Soleus',            region: 'Calves' },
+    { id: 'tibialis-anterior', name: 'Tibialis Anterior', region: 'Calves' },
+];
+
+// Default muscle assignments per joint action. Numbers are dimensionless
+// contribution weights — only their RATIO at a given angle matters. The
+// defaults below encode rough EMG/anatomy consensus for which muscles drive
+// which actions and where in the ROM each peaks. Easy to tweak in the UI.
+//
+// Section key format: `${JointGroup}.${actionKey(directionName)}` —
+// directionName is positiveAction OR negativeAction from JOINT_ACTIONS.
+//
+// IMPORTANT - peak-angle convention:
+//   The bell evaluates against `directionAngle`, which equals +rawAngle for
+//   the positive-direction section and -rawAngle for the negative-direction
+//   section (in distributeMuscleLoadForFrame). So a muscle that's most
+//   active during one action when the joint is in the OPPOSITE direction
+//   needs a NEGATIVE peak angle in that section.
+//
+//   Examples:
+//   • Adductor magnus is most effective at hip extension when the hip is
+//     deeply flexed → in 'Hip.extension', peak = -90 (means "peak when
+//     section angle is -90, i.e. when raw flexion is +90").
+//   • Pec sternal is most effective at shoulder extension when the arm is
+//     elevated forward (mid-range pulldown) → 'Shoulder.extension' peak
+//     at -45 means "peak when arm is 45° flexed forward".
+//   • Glutes are most effective at hip extension near full extension →
+//     peak at +20 (hip is slightly hyperextended).
+//   • Biceps long head is most effective at elbow flexion when elbow is
+//     more open (early in the curl) → 'Elbow.flexion' peak at ~30.
+//   • Brachioradialis takes over later in the curl → peak at ~110.
+//
+// SCAPULOHUMERAL RHYTHM:
+//   We don't have scapular rotations as joint actions, so any muscle whose
+//   primary scapular role contributes to a shoulder action via S/H rhythm
+//   (mainly lower traps + serratus anterior assisting overhead motion) is
+//   added to the relevant shoulder section with a small contribution
+//   peaking near full elevation.
+const m = (base: number, peak: number, angle: number): MuscleContribution => ({ base, peak, angle });
+const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
+    // --- SHOULDER ---
+    'Shoulder.flexion': {
+        'delt-front':       m(40, 100, 90),
+        'pec-clavicular':   m(35, 80, 30),
+        'biceps-long':      m(15, 30, 60),
+        'biceps-short':     m(15, 25, 60),
+        // S/H rhythm assist: lower traps upwardly rotate the scapula,
+        // enabling overhead motion. Small contribution peaking near
+        // full elevation.
+        'traps-lower':      m(5, 18, 150),
+        'serratus-anterior':m(5, 15, 150),
+    },
+    'Shoulder.extension': {
+        // Lats: best in mid range, fall off at full elevation.
+        'lats':         m(50, 110, 30),
+        'delt-rear':    m(35, 75, 30),
+        'teres-major':  m(40, 85, 30),
+        // Pecs (both heads) extend the shoulder when the arm is elevated
+        // forward (the "stretched" position). They peak in extension when
+        // the arm is still flexed → negative section angle.
+        'pec-sternal':  m(30, 70, -45),
+        // Triceps long head crosses the shoulder posteriorly → assists
+        // shoulder extension (mostly with the arm overhead).
+        'triceps-long': m(20, 50, 60),
+    },
+    'Shoulder.abduction': {
+        'delt-side':     m(40, 100, 90),
+        'supraspinatus': m(50, 90, 15),
+        // Front delt assists abduction (shares anterior fibers).
+        'delt-front':    m(15, 35, 60),
+        // S/H rhythm: lower traps + serratus.
+        'traps-lower':      m(5, 18, 150),
+        'serratus-anterior':m(5, 15, 150),
+    },
+    'Shoulder.adduction': {
+        'lats':        m(45, 100, 60),
+        // Pec sternal is the strongest adductor when the arm is elevated.
+        'pec-sternal': m(45, 100, 90),
+        'teres-major': m(35, 75, 60),
+        // Biceps assist adduction with the arm above the horizontal.
+        'biceps-long':  m(8, 18, 120),
+        'biceps-short': m(8, 18, 120),
+        // Triceps long head adduction assist.
+        'triceps-long': m(8, 20, 120),
+    },
+    'Shoulder.horizontalAdduction': {
+        'pec-sternal':     m(50, 110, 0),
+        'pec-clavicular':  m(40, 90, 30),
+        'delt-front':      m(35, 75, 30),
+    },
+    'Shoulder.horizontalAbduction': {
+        'delt-rear':     m(50, 110, 0),
+        'infraspinatus': m(35, 70, 0),
+        'teres-minor':   m(30, 60, 0),
+        // Note: traps + rhomboids are scapular retractors, NOT humeral
+        // horizontal abductors. They were removed from this section per
+        // the corrected anatomy.
+    },
+    'Shoulder.internalRotation': {
+        'subscapularis': m(50, 100, 0),
+        'lats':          m(35, 75, -30),
+        'pec-sternal':   m(30, 65, 0),
+        'teres-major':   m(30, 60, 0),
+        'delt-front':    m(20, 40, 30),
+    },
+    'Shoulder.externalRotation': {
+        'infraspinatus': m(50, 100, 0),
+        'teres-minor':   m(40, 85, 0),
+        'delt-rear':     m(25, 55, 0),
+    },
+
+    // --- ELBOW ---
+    // Convention quirk: Elbow positiveAction = Extension. The "Flexion"
+    // section here is the negativeAction direction (biceps territory).
+    // Peak angles are in degrees of flexion (the section's natural axis).
+    'Elbow.flexion': {
+        // Biceps work best with elbow more open (length-tension peak
+        // earlier in the curl).
+        'biceps-long':     m(40, 95, 30),
+        'biceps-short':    m(40, 95, 30),
+        'brachialis':      m(60, 110, 90),
+        // Brachioradialis takes over later in the curl.
+        'brachioradialis': m(30, 80, 110),
+    },
+    'Elbow.extension': {
+        'triceps-long':    m(35, 80, 30),
+        'triceps-lateral': m(45, 95, 60),
+        'triceps-medial':  m(40, 85, 90),
+    },
+
+    // --- HIP ---
+    'Hip.flexion': {
+        'iliopsoas':      m(60, 110, 30),
+        'rectus-femoris': m(40, 85, 60),
+        'tfl':            m(30, 60, 30),
+        'sartorius':      m(20, 45, 60),
+    },
+    'Hip.extension': {
+        // Glutes peak at full extension (and mild hyperextension).
+        // Section angle = -rawFlexion, so "near full extension" = +20.
+        'glute-max':       m(60, 130, 20),
+        // Hamstrings peak in mid-range hip extension (hip ~30° flexed
+        // = section angle -30).
+        'semitendinosus':  m(35, 80, -30),
+        'semimembranosus': m(35, 80, -30),
+        // Adductor magnus is most active at hip extension when the hip
+        // is deeply flexed (its line of pull becomes posterior to the
+        // hip axis with the femur forward). Peak at deep flexion =
+        // section angle -90.
+        'adductor-magnus': m(40, 100, -90),
+        // biceps-femoris: short head removed from hip extension entirely
+        // — short head is purely a knee flexor. Long head would do hip
+        // extension but the catalog doesn't distinguish heads, so we
+        // treat the entry as "short head" per the user's preference.
+    },
+    'Hip.abduction': {
+        'glute-med': m(50, 110, 30),
+        'glute-min': m(35, 75, 30),
+        'tfl':       m(30, 65, 20),
+        'glute-max': m(20, 45, 30),  // upper fibers
+    },
+    'Hip.adduction': {
+        'adductor-magnus': m(50, 110, 60),
+        'adductor-longus': m(40, 85, 45),
+        'adductor-brevis': m(30, 65, 30),
+        'gracilis':        m(20, 45, 30),
+        'pectineus':       m(20, 45, 0),
+    },
+    'Hip.horizontalAdduction': {
+        // Per user feedback: all adductors contribute to horizontal
+        // adduction.
+        'adductor-magnus': m(40, 90, 0),
+        'adductor-longus': m(40, 85, 0),
+        'adductor-brevis': m(30, 65, 0),
+        'gracilis':        m(20, 45, 0),
+        'pectineus':       m(30, 65, 0),
+        'iliopsoas':       m(20, 45, 0),
+    },
+    'Hip.horizontalAbduction': {
+        'glute-max': m(45, 95, 0),
+        'glute-med': m(35, 75, 0),
+        'tfl':       m(25, 55, 0),
+    },
+    'Hip.internalRotation': {
+        'glute-med':       m(30, 65, 0),  // anterior fibers
+        'glute-min':       m(25, 55, 0),
+        'tfl':             m(25, 55, 0),
+        'adductor-longus': m(20, 45, 30),
+    },
+    'Hip.externalRotation': {
+        'glute-max': m(45, 100, 0),
+        'sartorius': m(20, 45, 30),
+    },
+
+    // --- KNEE ---
+    // Same Elbow convention quirk: positiveAction = Extension; "Flexion" is
+    // negativeAction. Peak angles in 'Knee.flexion' are degrees of flexion.
+    'Knee.flexion': {
+        'biceps-femoris':  m(45, 100, 60),
+        'semitendinosus':  m(40, 90, 60),
+        'semimembranosus': m(40, 90, 60),
+        'gastrocnemius':   m(20, 45, 30),
+        'sartorius':       m(15, 35, 60),
+        'gracilis':        m(15, 35, 60),
+    },
+    'Knee.extension': {
+        'rectus-femoris':     m(40, 85, 60),
+        'vastus-lateralis':   m(50, 110, 90),
+        'vastus-medialis':    m(50, 110, 90),
+        'vastus-intermedius': m(45, 100, 90),
+    },
+
+    // --- ANKLE ---
+    // positiveAction = Dorsi Flexion. "Plantar Flexion" is negativeAction.
+    'Ankle.dorsiFlexion': {
+        'tibialis-anterior': m(50, 100, 0),
+    },
+    'Ankle.plantarFlexion': {
+        'gastrocnemius': m(50, 110, 15),
+        'soleus':        m(60, 120, 15),
+    },
+
+    // --- SPINE ---
+    'Spine.flexion': {
+        'rectus-abdominis':  m(50, 110, 30),
+        'obliques-external': m(35, 75, 30),
+        'obliques-internal': m(35, 75, 30),
+    },
+    'Spine.extension': {
+        'erector-spinae':     m(60, 130, 0),
+        'quadratus-lumborum': m(25, 50, 0),
+    },
+    'Spine.lateralFlexionL': {
+        'obliques-external':  m(40, 85, 0),
+        'obliques-internal':  m(40, 85, 0),
+        'quadratus-lumborum': m(40, 85, 0),
+        'erector-spinae':     m(30, 65, 0),
+    },
+    'Spine.lateralFlexionR': {
+        'obliques-external':  m(40, 85, 0),
+        'obliques-internal':  m(40, 85, 0),
+        'quadratus-lumborum': m(40, 85, 0),
+        'erector-spinae':     m(30, 65, 0),
+    },
+    'Spine.rotationL': {
+        'obliques-external': m(45, 100, 0),  // contralateral
+        'obliques-internal': m(40, 85, 0),   // ipsilateral
+        'erector-spinae':    m(20, 45, 0),
+    },
+    'Spine.rotationR': {
+        'obliques-external': m(45, 100, 0),
+        'obliques-internal': m(40, 85, 0),
+        'erector-spinae':    m(20, 45, 0),
+    },
+
+    // --- SCAPULA ---
+    'Scapula.elevation': {
+        'traps-upper':      m(60, 120, 0),
+        'levator-scapulae': m(45, 90, 0),
+        'rhomboids':        m(25, 55, 0),
+    },
+    'Scapula.depression': {
+        'traps-lower': m(50, 110, 0),
+        'pec-minor':   m(30, 65, 0),
+        'lats':        m(25, 55, 0),
+    },
+    'Scapula.protraction': {
+        'serratus-anterior': m(60, 130, 0),
+        'pec-minor':         m(30, 65, 0),
+    },
+    'Scapula.retraction': {
+        'traps-mid':   m(55, 115, 0),
+        'rhomboids':   m(50, 110, 0),
+        'traps-lower': m(30, 65, 0),
+    },
+};
+
+// Stable color per muscle id — hashes id → HSL hue. Saturation/lightness
+// fixed so the stacked-area legend stays visually coherent.
+const muscleColor = (id: string): string => {
+    let h = 0;
+    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+    return `hsl(${h % 360}, 62%, 58%)`;
 };
 
 // Default joint limits. Key scheme:
@@ -745,7 +1119,7 @@ const mirrorTwists = (twists: Record<string, number>, sourceBoneId: string): Rec
 };
 
 const BioModelPage: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'timeline' | 'capacities' | 'constraints' | 'limits'>('kinematics');
+  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'timeline' | 'capacities' | 'constraints' | 'limits' | 'muscles'>('kinematics');
   const [poseMode, setPoseMode] = useState<'start' | 'end'>('start');
   const [startPosture, setStartPosture] = useState<Posture>(DEFAULT_POSTURE);
   const [endPosture, setEndPosture] = useState<Posture>(DEFAULT_POSTURE);
@@ -767,6 +1141,12 @@ const BioModelPage: React.FC = () => {
   const [editingForceId, setEditingForceId] = useState<string | null>(null);
   const [jointCapacities, setJointCapacities] = useState<Record<JointGroup, JointCapacityProfile>>(DEFAULT_CAPACITIES);
   const [jointLimits, setJointLimits] = useState<JointLimitsMap>(DEFAULT_JOINT_LIMITS);
+  // Muscle assignments per (joint group, action direction). Seeded with
+  // anatomy/EMG-consensus defaults from DEFAULT_MUSCLE_ASSIGNMENTS — the
+  // user can edit them in the Muscles tab. Outer key is `${group}.${actionKey}`,
+  // inner key is muscle id from MUSCLE_CATALOG, value is the {base, peak, angle}
+  // contribution profile evaluated by the same cosine bell as joint capacities.
+  const [muscleAssignments, setMuscleAssignments] = useState<MuscleAssignmentMap>(DEFAULT_MUSCLE_ASSIGNMENTS);
   // Joint Analysis tab display mode:
   //   '1rm-local' — normalize so the hardest action at the current pose reads
   //                 100%. Interprets the pose as "loaded to 1RM right now."
@@ -775,6 +1155,24 @@ const BioModelPage: React.FC = () => {
   //                 the user has calibrated f.magnitude to match the capacity
   //                 table's unit scale, which defaults don't.
   const [torqueDisplayMode, setTorqueDisplayMode] = useState<'1rm-local' | 'raw'>('1rm-local');
+  // 'joint' (default) shows per-joint-action demand bars; 'muscle' swaps in
+  // the muscle activation rollup. Same toggle pattern in both Joint Analysis
+  // and Timeline Peaks for consistency.
+  const [analysisView, setAnalysisView] = useState<'joint' | 'muscle'>('joint');
+  const [timelineView, setTimelineView] = useState<'joint' | 'muscle'>('joint');
+  // Muscles tab expand state. Members are either `${group}` (joint group
+  // header expanded → show its action rows) or `${group}.${actionKey}`
+  // (action row expanded → show its graph + per-muscle controls). Empty by
+  // default so the tab opens fully collapsed and the user only expands what
+  // they want to edit.
+  const [expandedMuscleSections, setExpandedMuscleSections] = useState<Set<string>>(new Set());
+  const toggleMuscleSection = (key: string) => {
+      setExpandedMuscleSections(prev => {
+          const next = new Set(prev);
+          if (next.has(key)) next.delete(key); else next.add(key);
+          return next;
+      });
+  };
   
   // Removed reactionForces state — replaced by the jointForceArrows memo
   // below which derives net proximal force per bone from torqueDistribution.
@@ -2804,6 +3202,132 @@ const BioModelPage: React.FC = () => {
       // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [posture, twists, forces, jointCapacities, constraints, jointLimits, currentRomT]);
 
+  // --- Muscle activation distribution ---
+  //
+  // For each joint-action demand, look up the muscles assigned to that
+  // direction and split the demand's effort across them according to each
+  // muscle's bell-curve weight at the joint's current angle in this
+  // direction's natural sense. Sum across all demands per (side, muscle).
+  //
+  // The result is a sorted list — most-activated muscle first — with each
+  // muscle's "activation" being the cumulative effort it took on across
+  // every joint action it participates in. Display normalizes against the
+  // current frame's max so the heaviest-loaded muscle reads 100%.
+  type MuscleActivation = {
+      key: string;       // `${side}|${muscleId}` for keying / dedup
+      side: string;      // 'Left', 'Right', or '' (centre — spine/scapula edge cases)
+      muscleId: string;
+      muscleName: string;
+      activation: number;
+  };
+
+  // Per-frame helper: distributes joint-action demands across assigned
+  // muscles. Returns `Record<"${side}|${muscleId}", activation>`. Used by
+  // the live `muscleActivation` memo and by the timeline frame loop —
+  // anywhere we need "given these demands at this pose, how loaded is
+  // each muscle right now."
+  const distributeMuscleLoadForFrame = (
+      demands: JointActionDemand[],
+      framePosture: Posture,
+      frameTwists: Record<string, number>,
+      assignments: MuscleAssignmentMap,
+  ): Record<string, { side: string; muscleId: string; activation: number }> => {
+      const acc: Record<string, { side: string; muscleId: string; activation: number }> = {};
+
+      // Distribute a (signed) effort across the muscles assigned to one
+      // section. Positive effort = activation; negative effort = inhibition
+      // for muscles in the opposite-direction section (antagonist rule).
+      // angleInDirection is the joint angle measured positive in this
+      // section's direction (so each muscle's bell evaluates correctly).
+      const distributeToSection = (
+          sectionKey: string,
+          angleInDirection: number,
+          side: string,
+          effortSigned: number,
+      ) => {
+          const assigned = assignments[sectionKey];
+          if (!assigned) return;
+          const ids = Object.keys(assigned);
+          if (ids.length === 0) return;
+          let total = 0;
+          const weights: { id: string; w: number }[] = [];
+          for (const id of ids) {
+              const c = assigned[id];
+              const w = evaluateCapacity({ base: c.base, specific: c.peak, angle: c.angle }, angleInDirection);
+              weights.push({ id, w });
+              total += w;
+          }
+          if (total < 1e-9) return;
+          for (const { id, w } of weights) {
+              const share = w / total;
+              const key = `${side}|${id}`;
+              if (!acc[key]) acc[key] = { side, muscleId: id, activation: 0 };
+              acc[key].activation += effortSigned * share;
+          }
+      };
+
+      for (const d of demands) {
+          // Parse `${side} ${group} ${directionName}` back out of d.action.
+          let s = d.action;
+          let side = '';
+          if (s.startsWith('Left '))  { side = 'Left';  s = s.slice(5); }
+          else if (s.startsWith('Right ')) { side = 'Right'; s = s.slice(6); }
+          s = s.replace(new RegExp(`^${d.jointGroup}\\s+`), '');
+          const directionName = s.trim();
+
+          // Find the ActionAxis matching the demand direction so we can read
+          // the current joint angle. Flip sign when reading from a negative-
+          // direction section so the angle reads "positive in this direction's
+          // territory" — the same convention each muscle's peak angle uses.
+          const ax = JOINT_ACTIONS[d.jointGroup]?.find(
+              a => a.positiveAction === directionName || a.negativeAction === directionName
+          );
+          if (!ax) continue;
+          const isPositive = ax.positiveAction === directionName;
+          const rawAngle = getActionAngle(d.boneId, ax, framePosture, frameTwists);
+          const directionAngle = isPositive ? rawAngle : -rawAngle;
+
+          const sectionKey = `${d.jointGroup}.${actionKey(directionName)}`;
+          // 1) PRIMARY: muscles assigned to this direction get positive
+          //    activation, distributed by their bell-weighted share.
+          distributeToSection(sectionKey, directionAngle, side, d.effort);
+
+          // 2) ANTAGONIST: muscles assigned to the OPPOSITE direction get
+          //    negative activation of the same magnitude, distributed by
+          //    their own bell-weighted share at the opposite-direction angle
+          //    (which is just -directionAngle).
+          //
+          //    Net effect: a muscle that is purely a flexor disappears
+          //    entirely under pure extension demand (negative → clamped
+          //    away by the > 1e-6 filter). A multi-joint muscle whose
+          //    actions partially oppose each other across joints sees its
+          //    net activation lowered when the opposing demand is loaded —
+          //    e.g. biceps under simultaneous elbow flexion + shoulder
+          //    extension demand, or gastroc under plantarflexion + knee
+          //    extension demand.
+          const oppositeName = isPositive ? ax.negativeAction : ax.positiveAction;
+          const oppositeKey = `${d.jointGroup}.${actionKey(oppositeName)}`;
+          distributeToSection(oppositeKey, -directionAngle, side, -d.effort);
+      }
+      return acc;
+  };
+
+  const muscleActivation = useMemo<MuscleActivation[]>(() => {
+      if (!torqueDistribution || torqueDistribution.demands.length === 0) return [];
+      const acc = distributeMuscleLoadForFrame(torqueDistribution.demands, posture, twists, muscleAssignments);
+      return Object.entries(acc)
+          .map(([key, a]) => ({
+              key,
+              side: a.side,
+              muscleId: a.muscleId,
+              muscleName: MUSCLE_CATALOG.find(m => m.id === a.muscleId)?.name || a.muscleId,
+              activation: a.activation,
+          }))
+          .filter(a => a.activation > 1e-6)
+          .sort((a, b) => b.activation - a.activation);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [torqueDistribution, muscleAssignments, posture, twists]);
+
   // --- JOINT FORCE ARROWS ---
   //
   // Subtle arrows on the proximal tip of each limb segment showing the net
@@ -2897,6 +3421,27 @@ const BioModelPage: React.FC = () => {
       efforts: number[];
       torques: number[];   // raw torque magnitude per frame (for computing proportions)
   }
+  // Per-muscle peak across the timeline. Same shape as TimelinePeak but
+  // keyed by (side, muscleId) instead of (boneId, action). The 1RM
+  // normalization step rescales `peakActivation` so the heaviest-loaded
+  // muscle anywhere in the ROM reads exactly 1.0 — making muscle peaks
+  // self-comparable but on a different scale than the joint-action peaks
+  // (which are scaled to the limiting joint action). The muscle view in
+  // the UI applies its own muscle-relative scale on top of this.
+  interface MusclePeak {
+      side: string;
+      muscleId: string;
+      muscleName: string;
+      peakActivation: number;
+      peakFramePct: number;
+  }
+  // Time series of activation per muscle across frames, parallel to profile[].
+  interface MuscleTimeSeries {
+      side: string;
+      muscleId: string;
+      muscleName: string;
+      activations: number[];
+  }
   interface TimelineAnalysisResult {
       peaks: TimelinePeak[];
       limitingPeak: TimelinePeak | null;
@@ -2904,6 +3449,13 @@ const BioModelPage: React.FC = () => {
       framesSkipped: number; // solver failures
       profile: TimelineProfilePoint[];
       actionSeries: ActionTimeSeries[];
+      // Muscle-view counterparts. Same frames, same global 1RM scale on
+      // joint-action efforts, then per-muscle activation derived from those
+      // efforts via distributeMuscleLoadForFrame and normalized so the
+      // peak-loaded muscle = 1.0 across the timeline.
+      musclePeaks: MusclePeak[];
+      muscleSeries: MuscleTimeSeries[];
+      limitingMuscle: MusclePeak | null;
   }
 
   const timelineAnalysis = useMemo<TimelineAnalysisResult | null>(() => {
@@ -2917,6 +3469,13 @@ const BioModelPage: React.FC = () => {
       // Per-action time series: key = "${boneId}::${action}", value = effort
       // at each successfully-analyzed frame. Frame index maps to profile[].
       const seriesMap = new Map<string, { boneId: string; jointGroup: JointGroup; action: string; efforts: number[]; torques: number[] }>();
+      // Per-muscle time series: key = "${side}|${muscleId}". Same frame
+      // indexing as profile[]. Activation values here are the raw sums
+      // (pre-normalization) — the global 1RM rescale below multiplies them
+      // by the same scale the joint demands get, then a muscle-relative
+      // scale fixes the limiting muscle to 1.0.
+      const muscleSeriesMap = new Map<string, { side: string; muscleId: string; activations: number[] }>();
+      const musclePeakMap = new Map<string, { side: string; muscleId: string; peakActivation: number; peakFramePct: number }>();
       let framesAnalyzed = 0;
       let framesSkipped = 0;
 
@@ -3014,6 +3573,48 @@ const BioModelPage: React.FC = () => {
                   series.torques.push(0);
               }
           }
+
+          // --- Per-muscle activation for this frame ---
+          // Distribute this frame's joint demands across assigned muscles
+          // using the bell-curve weights at the joint's current angle.
+          // Track per-(side, muscle) activation in time series + peak map.
+          const frameMuscle = distributeMuscleLoadForFrame(dist.demands, framePose, frameTw, muscleAssignments);
+          const frameMuscleKeys = new Set<string>();
+          for (const [key, m] of Object.entries(frameMuscle)) {
+              // Clamp net-negative activation to 0 — antagonist demands can
+              // drive a muscle's net below 0, but we don't display negative
+              // activation. Same convention as the live filter on the
+              // muscleActivation memo. A muscle whose net comes out 0 still
+              // gets a 0 sample so the sparkline aligns; muscles whose peak
+              // stays at 0 across the whole timeline get filtered out below.
+              const a = Math.max(0, m.activation);
+              frameMuscleKeys.add(key);
+              let series = muscleSeriesMap.get(key);
+              if (!series) {
+                  // First sighting: backfill 0s for prior frames the same
+                  // way actionSeries does. profile.length already includes
+                  // this frame, so subtract 1.
+                  const backfill = new Array(Math.max(0, profile.length - 1)).fill(0);
+                  series = { side: m.side, muscleId: m.muscleId, activations: backfill };
+                  muscleSeriesMap.set(key, series);
+              }
+              series.activations.push(a);
+
+              // Peak tracking.
+              const prevPeak = musclePeakMap.get(key);
+              if (!prevPeak || a > prevPeak.peakActivation) {
+                  musclePeakMap.set(key, {
+                      side: m.side,
+                      muscleId: m.muscleId,
+                      peakActivation: a,
+                      peakFramePct: t * 100,
+                  });
+              }
+          }
+          // Push 0 for any muscle series that existed but had no activation this frame.
+          for (const [key, series] of muscleSeriesMap) {
+              if (!frameMuscleKeys.has(key)) series.activations.push(0);
+          }
       }
 
       const peaks = Array.from(peakMap.values());
@@ -3057,9 +3658,50 @@ const BioModelPage: React.FC = () => {
           }
       }
 
-      return { peaks, limitingPeak, framesAnalyzed, framesSkipped, profile, actionSeries };
+      // --- Muscle peak normalization ---
+      // Find the highest muscle activation peak across the timeline and
+      // scale all muscle data so it reads exactly 1.0. This is a separate
+      // scale from the joint 1RM scale because muscle activation values
+      // are sums-across-multiple-joint-actions and can exceed any single
+      // joint's effort. Display in the UI then multiplies by 100 for %.
+      let muscleMaxRaw = 0;
+      for (const mp of musclePeakMap.values()) {
+          if (mp.peakActivation > muscleMaxRaw) muscleMaxRaw = mp.peakActivation;
+      }
+      if (muscleMaxRaw > 1e-9) {
+          const mScale = 1 / muscleMaxRaw;
+          for (const mp of musclePeakMap.values()) mp.peakActivation *= mScale;
+          for (const ms of muscleSeriesMap.values()) {
+              for (let i = 0; i < ms.activations.length; i++) ms.activations[i] *= mScale;
+          }
+      }
+
+      const musclePeaks: MusclePeak[] = Array.from(musclePeakMap.values())
+          // Drop muscles whose timeline peak is essentially zero — happens
+          // when a muscle is purely antagonised across the whole rep (its
+          // bell-share contributions all came in negative and got clamped).
+          .filter(mp => mp.peakActivation > 1e-6)
+          .map(mp => ({
+          side: mp.side,
+          muscleId: mp.muscleId,
+          muscleName: MUSCLE_CATALOG.find(m => m.id === mp.muscleId)?.name || mp.muscleId,
+          peakActivation: mp.peakActivation,
+          peakFramePct: mp.peakFramePct,
+      }));
+      const muscleSeries: MuscleTimeSeries[] = Array.from(muscleSeriesMap.values()).map(ms => ({
+          side: ms.side,
+          muscleId: ms.muscleId,
+          muscleName: MUSCLE_CATALOG.find(m => m.id === ms.muscleId)?.name || ms.muscleId,
+          activations: ms.activations,
+      }));
+      let limitingMuscle: MusclePeak | null = null;
+      for (const mp of musclePeaks) {
+          if (!limitingMuscle || mp.peakActivation > limitingMuscle.peakActivation) limitingMuscle = mp;
+      }
+
+      return { peaks, limitingPeak, framesAnalyzed, framesSkipped, profile, actionSeries, musclePeaks, muscleSeries, limitingMuscle };
       // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, startPosture, endPosture, startTwists, endTwists, forces, constraints, jointCapacities, jointLimits]);
+  }, [activeTab, startPosture, endPosture, startTwists, endTwists, forces, constraints, jointCapacities, jointLimits, muscleAssignments]);
 
   const resolveKinematics = (boneId: string, proposedVector: Vector3, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } => {
       const projected = projectDirOntoConstraints(boneId, proposedVector, currentPosture, currentTwists);
@@ -3662,6 +4304,48 @@ const BioModelPage: React.FC = () => {
       }
   };
 
+  // --- Muscle assignment CRUD ---
+  // actionSection key format: `${group}.${actionKey(directionName)}`. Direction
+  // names are ActionAxis.positiveAction OR .negativeAction strings — each
+  // direction is a distinct section because the muscles that produce flexion
+  // and extension are completely different.
+  const addMuscleToAction = (sectionKey: string, muscleId: string) => {
+      setMuscleAssignments(prev => {
+          const existing = prev[sectionKey] || {};
+          if (existing[muscleId]) return prev; // already assigned
+          return {
+              ...prev,
+              [sectionKey]: {
+                  ...existing,
+                  [muscleId]: { base: 30, peak: 80, angle: 90 },
+              },
+          };
+      });
+  };
+  const removeMuscleFromAction = (sectionKey: string, muscleId: string) => {
+      setMuscleAssignments(prev => {
+          const section = prev[sectionKey];
+          if (!section || !section[muscleId]) return prev;
+          const next = { ...section };
+          delete next[muscleId];
+          return { ...prev, [sectionKey]: next };
+      });
+  };
+  const updateMuscleContribution = (sectionKey: string, muscleId: string, field: keyof MuscleContribution, value: number) => {
+      if (isNaN(value)) return;
+      setMuscleAssignments(prev => {
+          const section = prev[sectionKey] || {};
+          const cur = section[muscleId] || { base: 30, peak: 80, angle: 90 };
+          return {
+              ...prev,
+              [sectionKey]: {
+                  ...section,
+                  [muscleId]: { ...cur, [field]: value },
+              },
+          };
+      });
+  };
+
   const updateCapacity = (group: JointGroup, action: string, field: keyof CapacityConfig, value: number) => {
     if (isNaN(value)) return;
     setJointCapacities(prev => ({
@@ -3742,12 +4426,16 @@ const BioModelPage: React.FC = () => {
             newTwists[boneId] = interpolateScalar(startT, endT, t);
         });
 
-        // Playback is purely visual — just show the interpolated pose.
-        // No constraint solving, no physics projection. Timeline Peaks has
-        // its own analysis pipeline that handles physics properly. Keeping
-        // playback simple avoids solver failures freezing the animation.
-        setPosture(newPosture);
-        setTwists(newTwists);
+        // Project the interpolated frame onto the constraint manifold so
+        // constrained tips (e.g., a hand fixed to a barbell point) stay
+        // on their constraints during playback. With empty input-bone sets
+        // the solver treats all bones as free and enforces all active
+        // constraints. On solver failure, fall back to the raw interpolated
+        // pose to avoid freezing the animation — Timeline Peaks does the
+        // same.
+        const solved = solveConstraintsAccommodating(newPosture, new Set<string>(), newTwists);
+        setPosture(solved ? solved.posture : newPosture);
+        setTwists(solved ? solved.twists : newTwists);
         // Update ROM position so force profiles evaluate at the correct t
         // during playback (the live torqueDistribution + joint force arrows
         // pick this up through the currentRomT dependency).
@@ -3910,6 +4598,7 @@ const BioModelPage: React.FC = () => {
             <button onClick={() => setActiveTab('timeline')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'timeline' ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Timeline Peaks"><TrendingUp className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('capacities')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'capacities' ? 'bg-white text-purple-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Strength Capacity"><Gauge className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('limits')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'limits' ? 'bg-white text-rose-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Joint Limits"><Lock className="w-5 h-5" /></button>
+            <button onClick={() => setActiveTab('muscles')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'muscles' ? 'bg-white text-teal-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Muscles"><Activity className="w-5 h-5" /></button>
           </div>
 
           <div className="flex items-center gap-3 mb-6 shrink-0">
@@ -3920,12 +4609,14 @@ const BioModelPage: React.FC = () => {
             {activeTab === 'timeline' && <TrendingUp className="w-5 h-5 text-emerald-600" />}
             {activeTab === 'capacities' && <Gauge className="w-5 h-5 text-purple-600" />}
             {activeTab === 'limits' && <Lock className="w-5 h-5 text-rose-600" />}
+            {activeTab === 'muscles' && <Activity className="w-5 h-5 text-teal-600" />}
             <h3 className="text-lg font-bold text-gray-900">
                 {activeTab === 'kinematics' ? 'Motion Editor' :
                  activeTab === 'constraints' ? 'Constraints' :
                  activeTab === 'kinetics' ? 'External Forces' :
                  activeTab === 'capacities' ? 'Joint Capacities' :
                  activeTab === 'limits' ? 'Joint Limits' :
+                 activeTab === 'muscles' ? 'Muscles' :
                  activeTab === 'timeline' ? 'Timeline Peaks' : 'Joint Analysis'}
             </h3>
           </div>
@@ -4407,6 +5098,21 @@ const BioModelPage: React.FC = () => {
                                    Raw
                                </button>
                            </div>
+                           {/* View toggle: joint actions (default) vs muscle activation. */}
+                           <div className="bg-gray-50 rounded-xl p-1 flex gap-1">
+                               <button
+                                   onClick={() => setAnalysisView('joint')}
+                                   className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wide transition-all ${analysisView === 'joint' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                               >
+                                   Joint Actions
+                               </button>
+                               <button
+                                   onClick={() => setAnalysisView('muscle')}
+                                   className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wide transition-all ${analysisView === 'muscle' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                               >
+                                   Muscles
+                               </button>
+                           </div>
                            {(() => {
                                // Compute the global normalization scale for this frame.
                                // 1rm-local: scale so the hardest action here reads 100%.
@@ -4446,7 +5152,52 @@ const BioModelPage: React.FC = () => {
                                                </p>
                                            </div>
                                        )}
-                                       {Object.entries(groups).map(([groupName, groupDemands]) => {
+                                       {/* Muscle activation roll-up. Splits each
+                                         * joint-action demand across its assigned
+                                         * muscles using their angle-weighted
+                                         * relative shares, then sums per (side,
+                                         * muscle). Same display scale as the
+                                         * joint demands above (1RM-local: max
+                                         * muscle reads 100%; raw: passes through).
+                                         */}
+                                       {analysisView === 'muscle' && muscleActivation.length > 0 && (() => {
+                                           const muscleScale = torqueDisplayMode === '1rm-local'
+                                               ? (muscleActivation[0].activation > 1e-9 ? 1 / muscleActivation[0].activation : 1)
+                                               : 1;
+                                           return (
+                                               <div className="bg-white border border-gray-100 rounded-2xl p-4">
+                                                   <div className="flex items-center gap-2 mb-3">
+                                                       <Activity className="w-4 h-4 text-teal-600" />
+                                                       <h4 className="font-bold text-gray-900 text-sm">Muscle Activation</h4>
+                                                   </div>
+                                                   <div className="space-y-2">
+                                                       {muscleActivation.map(ma => {
+                                                           const pct = ma.activation * muscleScale * 100;
+                                                           const barColor = pct > 80 ? 'bg-red-400' : pct > 50 ? 'bg-amber-400' : 'bg-teal-400';
+                                                           const sideTag = ma.side ? `${ma.side[0]} ` : '';
+                                                           return (
+                                                               <div key={ma.key}>
+                                                                   <div className="flex justify-between items-center mb-1">
+                                                                       <div className="flex items-center gap-2 min-w-0">
+                                                                           <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: muscleColor(ma.muscleId) }} />
+                                                                           <span className="font-bold text-gray-700 text-xs truncate">
+                                                                               {sideTag && <span className="text-gray-400 font-mono">{sideTag}</span>}
+                                                                               {ma.muscleName}
+                                                                           </span>
+                                                                       </div>
+                                                                       <span className="font-mono text-xs font-bold text-gray-500 ml-2">{pct.toFixed(0)}%</span>
+                                                                   </div>
+                                                                   <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                                       <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                                                                   </div>
+                                                               </div>
+                                                           );
+                                                       })}
+                                                   </div>
+                                               </div>
+                                           );
+                                       })()}
+                                       {analysisView === 'joint' && Object.entries(groups).map(([groupName, groupDemands]) => {
                                            const sorted = [...groupDemands].sort((a, b) => b.effort - a.effort);
                                            return (
                                                <div key={groupName} className="bg-white border border-gray-100 rounded-2xl p-4">
@@ -4499,12 +5250,40 @@ const BioModelPage: React.FC = () => {
                                   {timelineAnalysis.framesSkipped > 0 && ` · ${timelineAnalysis.framesSkipped} skipped (solver failure)`}
                               </p>
                           </div>
-                          {timelineAnalysis.limitingPeak && (
+                          {/* View toggle: joint actions (default) vs muscles. */}
+                          <div className="bg-gray-50 rounded-xl p-1 flex gap-1">
+                              <button
+                                  onClick={() => setTimelineView('joint')}
+                                  className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wide transition-all ${timelineView === 'joint' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                              >
+                                  Joint Actions
+                              </button>
+                              <button
+                                  onClick={() => setTimelineView('muscle')}
+                                  className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wide transition-all ${timelineView === 'muscle' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                              >
+                                  Muscles
+                              </button>
+                          </div>
+                          {/* Limiting factor swaps with view: limiting joint action vs limiting muscle. */}
+                          {timelineView === 'joint' && timelineAnalysis.limitingPeak && (
                               <div className="bg-red-50 border border-red-100 p-4 rounded-xl">
                                   <p className="text-[9px] font-bold uppercase tracking-wide text-red-400 mb-1">Limiting Factor</p>
                                   <p className="font-bold text-red-800 text-sm">{timelineAnalysis.limitingPeak.action}</p>
                                   <p className="text-[10px] text-red-500 font-medium">
                                       Peaks at {timelineAnalysis.limitingPeak.peakFramePct.toFixed(0)}% of range
+                                  </p>
+                              </div>
+                          )}
+                          {timelineView === 'muscle' && timelineAnalysis.limitingMuscle && (
+                              <div className="bg-red-50 border border-red-100 p-4 rounded-xl">
+                                  <p className="text-[9px] font-bold uppercase tracking-wide text-red-400 mb-1">Most Activated Muscle</p>
+                                  <p className="font-bold text-red-800 text-sm">
+                                      {timelineAnalysis.limitingMuscle.side && <span className="text-red-400 font-mono">{timelineAnalysis.limitingMuscle.side[0]} </span>}
+                                      {timelineAnalysis.limitingMuscle.muscleName}
+                                  </p>
+                                  <p className="text-[10px] text-red-500 font-medium">
+                                      Peaks at {timelineAnalysis.limitingMuscle.peakFramePct.toFixed(0)}% of range
                                   </p>
                               </div>
                           )}
@@ -4617,7 +5396,7 @@ const BioModelPage: React.FC = () => {
                                   </>
                               );
                           })()}
-                          {(() => {
+                          {timelineView === 'joint' && (() => {
                               // Group peaks by "Side JointGroup" like the Joint Analysis tab.
                               const groups: Record<string, TimelinePeak[]> = {};
                               for (const p of timelineAnalysis.peaks) {
@@ -4720,6 +5499,128 @@ const BioModelPage: React.FC = () => {
                                                                       series.torques.map((t, i) => jointTotalTorque[i] > 1e-9 ? t / jointTotalTorque[i] : 0),
                                                                       lineColor, fillColor, 16
                                                                   )}
+                                                              </div>
+                                                          )}
+                                                      </div>
+                                                  );
+                                              })}
+                                          </div>
+                                      </div>
+                                  );
+                              });
+                          })()}
+                          {timelineView === 'muscle' && (() => {
+                              // Group muscle peaks by anatomical region.
+                              // Mirrors the joint view's "Side JointGroup"
+                              // grouping but uses MUSCLE_CATALOG.region.
+                              const regionMap = new Map<string, MusclePeak[]>();
+                              for (const mp of timelineAnalysis.musclePeaks) {
+                                  const region = MUSCLE_CATALOG.find(m => m.id === mp.muscleId)?.region || 'Other';
+                                  if (!regionMap.has(region)) regionMap.set(region, []);
+                                  regionMap.get(region)!.push(mp);
+                              }
+                              if (regionMap.size === 0) {
+                                  return (
+                                      <div className="bg-white border border-gray-100 rounded-2xl p-6 text-center">
+                                          <p className="text-xs text-gray-400">No muscle activation across this timeline. Make sure the loaded joint actions have assigned muscles in the Muscles tab.</p>
+                                      </div>
+                                  );
+                              }
+
+                              // Lookup table for activation series by `${side}|${id}`.
+                              const muscleSeriesLookup = new Map<string, MuscleTimeSeries>();
+                              for (const ms of timelineAnalysis.muscleSeries) {
+                                  muscleSeriesLookup.set(`${ms.side}|${ms.muscleId}`, ms);
+                              }
+
+                              // Sparkline (duplicate of the joint view's renderer
+                              // because it lives inside the joint IIFE — keeping
+                              // both blocks self-contained is simpler than
+                              // hoisting).
+                              const renderSparkline = (
+                                  values: number[],
+                                  color: string,
+                                  fillColor: string,
+                                  height: number = 16,
+                              ) => {
+                                  if (values.length < 2) return null;
+                                  const profPts = timelineAnalysis.profile;
+                                  const W = 260, H = height, PAD = 1;
+                                  const plotW = W - PAD * 2, plotH = H - PAD * 2;
+                                  const pathD = values.map((e, i) => {
+                                      const t = profPts[i] ? profPts[i].t : (values.length > 1 ? i / (values.length - 1) : 0);
+                                      const x = PAD + t * plotW;
+                                      const y = PAD + plotH - Math.min(e, 1) * plotH;
+                                      return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+                                  }).join(' ');
+                                  const lastX = PAD + plotW;
+                                  const baseY = PAD + plotH;
+                                  const areaD = pathD + ` L${lastX.toFixed(1)},${baseY.toFixed(1)} L${PAD.toFixed(1)},${baseY.toFixed(1)} Z`;
+                                  return (
+                                      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ display: 'block', height: `${height}px` }} preserveAspectRatio="none">
+                                          <path d={areaD} fill={fillColor} />
+                                          <path d={pathD} fill="none" stroke={color} strokeWidth="1.25" strokeLinejoin="round" />
+                                      </svg>
+                                  );
+                              };
+
+                              // Stable region order: walk the catalog so
+                              // the UI ordering is deterministic regardless
+                              // of which muscles happen to be active.
+                              const regionOrder = Array.from(new Set(MUSCLE_CATALOG.map(m => m.region)));
+                              const orderedRegions = regionOrder.filter(r => regionMap.has(r));
+
+                              return orderedRegions.map(regionName => {
+                                  const peaks = regionMap.get(regionName)!;
+                                  const sorted = [...peaks].sort((a, b) => b.peakActivation - a.peakActivation);
+                                  const nFrames = timelineAnalysis.profile.length;
+
+                                  // Region aggregate sparkline: max muscle
+                                  // activation in this region per frame.
+                                  const regionAgg = new Array(nFrames).fill(0);
+                                  for (const mp of sorted) {
+                                      const series = muscleSeriesLookup.get(`${mp.side}|${mp.muscleId}`);
+                                      if (!series) continue;
+                                      for (let i = 0; i < Math.min(nFrames, series.activations.length); i++) {
+                                          if (series.activations[i] > regionAgg[i]) regionAgg[i] = series.activations[i];
+                                      }
+                                  }
+
+                                  return (
+                                      <div key={`muscle-region-${regionName}`} className="bg-white border border-gray-100 rounded-2xl p-4">
+                                          <h4 className="font-bold text-gray-900 text-sm mb-1">{regionName}</h4>
+                                          <div className="mb-3 rounded overflow-hidden">
+                                              {renderSparkline(regionAgg, '#6b7280', 'rgba(107, 114, 128, 0.1)', 20)}
+                                          </div>
+                                          <div className="space-y-3">
+                                              {sorted.map((mp, i) => {
+                                                  const pct = mp.peakActivation * 100;
+                                                  const lineColor = mp.peakActivation > 0.8 ? '#f87171' : mp.peakActivation > 0.5 ? '#fbbf24' : '#34d399';
+                                                  const fillColor = mp.peakActivation > 0.8 ? 'rgba(248, 113, 113, 0.15)' : mp.peakActivation > 0.5 ? 'rgba(251, 191, 36, 0.15)' : 'rgba(52, 211, 153, 0.15)';
+                                                  const barColor = mp.peakActivation > 0.8 ? 'bg-red-400' : mp.peakActivation > 0.5 ? 'bg-amber-400' : 'bg-emerald-400';
+                                                  const series = muscleSeriesLookup.get(`${mp.side}|${mp.muscleId}`);
+                                                  return (
+                                                      <div key={`${mp.side}-${mp.muscleId}-${i}`}>
+                                                          <div className="flex justify-between items-center mb-1">
+                                                              <div className="flex items-center gap-2 min-w-0">
+                                                                  <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: muscleColor(mp.muscleId) }} />
+                                                                  <span className="font-bold text-gray-700 text-xs truncate">
+                                                                      {mp.side && <span className="text-gray-400 font-mono">{mp.side[0]} </span>}
+                                                                      {mp.muscleName}
+                                                                  </span>
+                                                              </div>
+                                                              <div className="flex items-center gap-2 flex-shrink-0">
+                                                                  <span className="text-[9px] font-mono font-bold text-gray-400">@{mp.peakFramePct.toFixed(0)}%</span>
+                                                                  <span className="font-mono text-xs font-bold text-gray-500">{pct.toFixed(0)}%</span>
+                                                              </div>
+                                                          </div>
+                                                          <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                              <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                                                          </div>
+                                                          {/* Per-muscle activation sparkline across the timeline. */}
+                                                          {series && series.activations.length > 1 && (
+                                                              <div className="mt-1 rounded overflow-hidden">
+                                                                  {renderSparkline(series.activations, lineColor, fillColor, 16)}
                                                               </div>
                                                           )}
                                                       </div>
@@ -5001,6 +5902,275 @@ const BioModelPage: React.FC = () => {
                    </div>
                </div>
           )}
+
+          {activeTab === 'muscles' && (() => {
+              // Per-section X-axis range. Pull from joint limits when an
+              // ${group}.action.${positiveAction} entry exists, else fall back
+              // to 0–180 (matches the Joint Capacities slider range). The
+              // fallback also kicks in when the limit's max is too small to
+              // graph against (e.g. Elbow.action.Extension max=160 is fine,
+              // but a degenerate range would render an unreadable strip).
+              const getActionRange = (group: JointGroup, ax: ActionAxis, isPositive: boolean): { min: number; max: number } => {
+                  const lim = jointLimits[`${group}.action.${ax.positiveAction}`];
+                  if (lim) {
+                      const lo = isPositive ? 0 : 0;
+                      const hi = isPositive ? Math.max(0, lim.max) : Math.max(0, -lim.min);
+                      if (hi >= 30) return { min: lo, max: hi };
+                  }
+                  return { min: 0, max: 180 };
+              };
+
+              return (
+                  <div className="flex-1 flex flex-col animate-in fade-in slide-in-from-right-4 duration-300">
+                      <div className="bg-teal-50 p-4 rounded-xl border border-teal-100 mb-6">
+                          <p className="text-xs text-teal-900 font-medium leading-relaxed">
+                              Assign muscles to each joint action and shape their relative contribution across the ROM. Numbers are dimensionless weights — only their ratio at a given angle matters. The graph normalises each angle's column to 100%.
+                          </p>
+                      </div>
+                      <div className="flex-1 overflow-y-auto pr-2 space-y-3">
+                          {(Object.keys(JOINT_ACTIONS) as JointGroup[]).map(group => {
+                              const acts = JOINT_ACTIONS[group];
+                              if (!acts || acts.length === 0) return null;
+                              // Each ActionAxis is one DOF with two opposing
+                              // muscle groups (e.g. flexors vs extensors).
+                              // Render two sections per axis.
+                              const sections: { directionName: string; ax: ActionAxis; isPositive: boolean }[] = [];
+                              for (const ax of acts) {
+                                  sections.push({ directionName: ax.positiveAction, ax, isPositive: true });
+                                  sections.push({ directionName: ax.negativeAction, ax, isPositive: false });
+                              }
+                              const groupExpanded = expandedMuscleSections.has(group);
+                              // Total muscles assigned across this group, for the header summary.
+                              let groupTotalMuscles = 0;
+                              for (const { directionName } of sections) {
+                                  const k = `${group}.${actionKey(directionName)}`;
+                                  groupTotalMuscles += Object.keys(muscleAssignments[k] || {}).length;
+                              }
+                              return (
+                                  <div key={group} className="border border-gray-100 rounded-xl overflow-hidden">
+                                      <button
+                                          onClick={() => toggleMuscleSection(group)}
+                                          className="w-full flex items-center justify-between bg-gray-50 hover:bg-gray-100 px-3 py-2.5 transition-colors"
+                                      >
+                                          <div className="flex items-center gap-2">
+                                              {groupExpanded ? <ChevronDown className="w-3.5 h-3.5 text-gray-400" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-400" />}
+                                              <span className="font-bold text-gray-900 text-xs uppercase tracking-wide">{group}</span>
+                                          </div>
+                                          <span className="text-[10px] font-mono font-bold text-gray-400">{sections.length} actions · {groupTotalMuscles} muscles</span>
+                                      </button>
+                                      {groupExpanded && (
+                                      <div className="space-y-2 p-2 bg-white">
+                                          {sections.map(({ directionName, ax, isPositive }) => {
+                                              const sectionKey = `${group}.${actionKey(directionName)}`;
+                                              const assigned = muscleAssignments[sectionKey] || {};
+                                              const assignedIds = Object.keys(assigned);
+                                              const baseRange = getActionRange(group, ax, isPositive);
+                                              // Extend the range to include any muscle peak angles
+                                              // outside the default. Some muscles peak when the
+                                              // joint is in the OPPOSITE direction of this section
+                                              // (e.g. adductor magnus peaks in hip extension when
+                                              // hip is deeply flexed → negative section-direction
+                                              // angle; pec-sternal peaks in shoulder extension when
+                                              // arm is elevated → negative section angle). Showing
+                                              // those bells requires extending the X axis into
+                                              // negative territory.
+                                              const peakAngles = assignedIds.map(id => assigned[id].angle);
+                                              const range = {
+                                                  min: Math.min(baseRange.min, ...peakAngles),
+                                                  max: Math.max(baseRange.max, ...peakAngles),
+                                              };
+
+                                              // Sample the bell curves across
+                                              // the X range, normalize each
+                                              // sample column to sum=1.
+                                              const N_SAMPLES = 60;
+                                              const samples: { angle: number; values: { id: string; v: number }[]; total: number }[] = [];
+                                              for (let i = 0; i <= N_SAMPLES; i++) {
+                                                  const angle = range.min + (range.max - range.min) * (i / N_SAMPLES);
+                                                  const values: { id: string; v: number }[] = [];
+                                                  let total = 0;
+                                                  for (const id of assignedIds) {
+                                                      const c = assigned[id];
+                                                      // Reuse the same cosine
+                                                      // bell as joint capacities
+                                                      // so muscle contributions
+                                                      // share the curve shape.
+                                                      const v = evaluateCapacity({ base: c.base, specific: c.peak, angle: c.angle }, angle);
+                                                      values.push({ id, v });
+                                                      total += v;
+                                                  }
+                                                  samples.push({ angle, values, total });
+                                              }
+
+                                              // Build stacked SVG paths. For
+                                              // each muscle, walk the samples
+                                              // building (angle → cumulative
+                                              // bottom, cumulative top), then
+                                              // render as a polygon.
+                                              const SVG_W = 280;
+                                              const SVG_H = 110;
+                                              const xAt = (angle: number) =>
+                                                  ((angle - range.min) / (range.max - range.min || 1)) * SVG_W;
+                                              const polygonsForMuscle = (id: string, idx: number): string => {
+                                                  const top: { x: number; y: number }[] = [];
+                                                  const bot: { x: number; y: number }[] = [];
+                                                  for (const s of samples) {
+                                                      let cumLow = 0;
+                                                      let cumHigh = 0;
+                                                      for (let k = 0; k < s.values.length; k++) {
+                                                          const v = s.total > 0 ? s.values[k].v / s.total : 0;
+                                                          if (k < idx) cumLow += v;
+                                                          if (k <= idx) cumHigh += v;
+                                                      }
+                                                      const x = xAt(s.angle);
+                                                      top.push({ x, y: SVG_H - cumHigh * SVG_H });
+                                                      bot.push({ x, y: SVG_H - cumLow * SVG_H });
+                                                  }
+                                                  const fwd = top.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
+                                                  const back = bot.slice().reverse().map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
+                                                  return `${fwd} ${back}`;
+                                              };
+
+                                              // Available muscles to add.
+                                              const available = MUSCLE_CATALOG.filter(m => !assigned[m.id]);
+                                              const byRegion: Record<string, MuscleDef[]> = {};
+                                              for (const m of available) {
+                                                  if (!byRegion[m.region]) byRegion[m.region] = [];
+                                                  byRegion[m.region].push(m);
+                                              }
+
+                                              const sectionExpanded = expandedMuscleSections.has(sectionKey);
+                                              return (
+                                                  <div key={sectionKey} className="bg-gray-50 rounded-lg border border-gray-100 overflow-hidden">
+                                                      <button
+                                                          onClick={() => toggleMuscleSection(sectionKey)}
+                                                          className="w-full flex items-center justify-between px-3 py-2 hover:bg-gray-100 transition-colors"
+                                                      >
+                                                          <div className="flex items-center gap-2 min-w-0">
+                                                              {sectionExpanded ? <ChevronDown className="w-3 h-3 text-gray-400 flex-shrink-0" /> : <ChevronRight className="w-3 h-3 text-gray-400 flex-shrink-0" />}
+                                                              <span className="text-xs font-bold text-gray-800 truncate">{directionName}</span>
+                                                          </div>
+                                                          <span className="text-[10px] font-mono font-bold text-gray-400 flex-shrink-0 ml-2">{assignedIds.length} muscle{assignedIds.length === 1 ? '' : 's'}</span>
+                                                      </button>
+                                                      {sectionExpanded && (
+                                                      <div className="px-3 pb-3 pt-1 border-t border-gray-100">
+                                                      <div className="flex items-center justify-end mb-3 pt-2">
+                                                          <select
+                                                              value=""
+                                                              onChange={(e) => {
+                                                                  if (e.target.value) addMuscleToAction(sectionKey, e.target.value);
+                                                              }}
+                                                              className="text-[10px] font-medium bg-white border border-gray-200 rounded px-2 py-1 outline-none focus:border-teal-500 max-w-[150px]"
+                                                          >
+                                                              <option value="">+ Add muscle…</option>
+                                                              {Object.entries(byRegion).map(([region, muscles]) => (
+                                                                  <optgroup key={region} label={region}>
+                                                                      {muscles.map(m => (
+                                                                          <option key={m.id} value={m.id}>{m.name}</option>
+                                                                      ))}
+                                                                  </optgroup>
+                                                              ))}
+                                                          </select>
+                                                      </div>
+
+                                                      {/* Stacked-area normalised graph. Empty when no muscles assigned. */}
+                                                      {assignedIds.length > 0 && (
+                                                          <div className="bg-white rounded-lg border border-gray-200 p-2 mb-3">
+                                                              <svg width="100%" viewBox={`0 0 ${SVG_W} ${SVG_H + 16}`} preserveAspectRatio="none" className="block">
+                                                                  {/* Stacked polygons */}
+                                                                  {assignedIds.map((id, idx) => (
+                                                                      <polygon
+                                                                          key={id}
+                                                                          points={polygonsForMuscle(id, idx)}
+                                                                          fill={muscleColor(id)}
+                                                                          fillOpacity="0.85"
+                                                                          stroke="white"
+                                                                          strokeWidth="0.5"
+                                                                      />
+                                                                  ))}
+                                                                  {/* X-axis labels */}
+                                                                  <text x="0" y={SVG_H + 12} fontSize="9" fill="#9ca3af">{range.min.toFixed(0)}°</text>
+                                                                  <text x={SVG_W} y={SVG_H + 12} fontSize="9" fill="#9ca3af" textAnchor="end">{range.max.toFixed(0)}°</text>
+                                                              </svg>
+                                                          </div>
+                                                      )}
+
+                                                      {assignedIds.length === 0 && (
+                                                          <div className="text-[10px] text-gray-400 italic px-1 py-3 text-center">No muscles assigned yet.</div>
+                                                      )}
+
+                                                      {/* Per-muscle controls. */}
+                                                      <div className="space-y-2">
+                                                          {assignedIds.map(id => {
+                                                              const def = MUSCLE_CATALOG.find(m => m.id === id);
+                                                              const c = assigned[id];
+                                                              return (
+                                                                  <div key={id} className="bg-white rounded-lg border border-gray-200 p-2">
+                                                                      <div className="flex items-center justify-between mb-2">
+                                                                          <div className="flex items-center gap-2 min-w-0">
+                                                                              <span className="w-3 h-3 rounded-sm flex-shrink-0" style={{ backgroundColor: muscleColor(id) }} />
+                                                                              <span className="text-[11px] font-bold text-gray-700 truncate">{def?.name || id}</span>
+                                                                          </div>
+                                                                          <button
+                                                                              onClick={() => removeMuscleFromAction(sectionKey, id)}
+                                                                              className="text-gray-400 hover:text-rose-500 transition-colors flex-shrink-0"
+                                                                              title="Remove muscle"
+                                                                          >
+                                                                              <Trash2 className="w-3 h-3" />
+                                                                          </button>
+                                                                      </div>
+                                                                      <div className="grid grid-cols-2 gap-2 mb-2">
+                                                                          <div>
+                                                                              <label className="text-[8px] font-bold text-gray-400 uppercase block mb-1">Base</label>
+                                                                              <input
+                                                                                  type="number"
+                                                                                  value={isNaN(c.base) ? 0 : c.base}
+                                                                                  onChange={(e) => updateMuscleContribution(sectionKey, id, 'base', parseFloat(e.target.value))}
+                                                                                  className="w-full text-xs font-medium bg-gray-50 border border-gray-200 rounded px-2 py-1 outline-none focus:border-teal-500"
+                                                                              />
+                                                                          </div>
+                                                                          <div>
+                                                                              <label className="text-[8px] font-bold text-gray-400 uppercase block mb-1">Peak</label>
+                                                                              <input
+                                                                                  type="number"
+                                                                                  value={isNaN(c.peak) ? 0 : c.peak}
+                                                                                  onChange={(e) => updateMuscleContribution(sectionKey, id, 'peak', parseFloat(e.target.value))}
+                                                                                  className="w-full text-xs font-medium bg-gray-50 border border-gray-200 rounded px-2 py-1 outline-none focus:border-teal-500"
+                                                                              />
+                                                                          </div>
+                                                                      </div>
+                                                                      <div>
+                                                                          <label className="text-[8px] font-bold text-gray-400 uppercase block mb-1">Peak Angle (°)</label>
+                                                                          <div className="flex items-center gap-2">
+                                                                              <input
+                                                                                  type="range"
+                                                                                  min={Math.min(range.min, -90)}
+                                                                                  max={Math.max(range.max, 180)}
+                                                                                  value={isNaN(c.angle) ? 0 : c.angle}
+                                                                                  onChange={(e) => updateMuscleContribution(sectionKey, id, 'angle', parseFloat(e.target.value))}
+                                                                                  className="flex-1 bio-range text-teal-500"
+                                                                              />
+                                                                              <span className="text-[10px] font-mono font-bold text-gray-500 w-10 text-right">{Math.round(c.angle)}°</span>
+                                                                          </div>
+                                                                      </div>
+                                                                  </div>
+                                                              );
+                                                          })}
+                                                      </div>
+                                                      </div>
+                                                      )}
+                                                  </div>
+                                              );
+                                          })}
+                                      </div>
+                                      )}
+                                  </div>
+                              );
+                          })}
+                      </div>
+                  </div>
+              );
+          })()}
 
         </div>
       </div>
