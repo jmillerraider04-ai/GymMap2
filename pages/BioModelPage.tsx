@@ -6492,59 +6492,79 @@ const BioModelPage: React.FC = () => {
                       const yLim = jointLimits[`${group}.dir.y`];
                       const zLim = jointLimits[`${group}.dir.z`];
                       if (xLim && yLim && zLim) {
-                          // Parameterize the pure-direction path for this
-                          // action + section. `isPositive` picks whether
-                          // we sweep in the section's POSITIVE direction
-                          // (flex / abd / horiz-abd) or NEGATIVE
-                          // (extension / adduction / horiz-add).
-                          let pathDir: ((t: number) => { x: number; y: number; z: number }) | null = null;
+                          // Parameterize BOTH anatomical sweep paths for this
+                          // axis — positive direction (this section's action:
+                          // flex / abd / horiz-abd) and negative direction
+                          // (the OPPOSITE section: ext / add / horiz-add).
+                          // We need both because the graph X-axis covers a
+                          // SIGNED range: positive = this section's ROM,
+                          // negative = the opposite section's ROM reached on
+                          // this same axis. Without computing both, the
+                          // negative side would stay at 0 and only extend
+                          // when a muscle peak happened to land there —
+                          // which doesn't reflect the joint's actual ROM
+                          // and makes the graph look truncated toward
+                          // neutral on one side.
+                          let pathPos: ((t: number) => { x: number; y: number; z: number }) | null = null;
+                          let pathNeg: ((t: number) => { x: number; y: number; z: number }) | null = null;
                           if (Math.abs(ax.axis.x) > 0.5) {
                               // Flex / Ext: sagittal plane sweep from (0,1,0).
                               // Forward (z<0) = flex, backward (z>0) = ext.
-                              const zSign = isPositive ? -1 : 1;
-                              pathDir = (t) => ({ x: 0, y: Math.cos(t), z: zSign * Math.sin(t) });
+                              const zSignPos = isPositive ? -1 : 1;
+                              pathPos = (t) => ({ x: 0, y: Math.cos(t), z:  zSignPos * Math.sin(t) });
+                              pathNeg = (t) => ({ x: 0, y: Math.cos(t), z: -zSignPos * Math.sin(t) });
                           } else if (Math.abs(ax.axis.z) > 0.5) {
                               // Abd / Add: frontal plane sweep from (0,1,0).
-                              // Out to side (x>0 for right, in right-side
-                              // convention — limits are bilaterally
-                              // normalized) = abduction.
-                              const xSign = isPositive ? 1 : -1;
-                              pathDir = (t) => ({ x: xSign * Math.sin(t), y: Math.cos(t), z: 0 });
+                              // Out to side (x>0 in right-side convention) = abduction,
+                              // cross body (x<0) = adduction. Limits are bilaterally
+                              // normalized so we sample with sideSign=+1.
+                              const xSignPos = isPositive ? 1 : -1;
+                              pathPos = (t) => ({ x:  xSignPos * Math.sin(t), y: Math.cos(t), z: 0 });
+                              pathNeg = (t) => ({ x: -xSignPos * Math.sin(t), y: Math.cos(t), z: 0 });
                           } else if (ax.useWorldAxis && Math.abs(ax.axis.y) > 0.5) {
                               // Horizontal: transverse plane sweep from T-pose
                               // (1,0,0). Backward (z>0) = horizontal abduction,
                               // forward/across (z<0) = horizontal adduction.
-                              const zSign = isPositive ? 1 : -1;
-                              pathDir = (t) => ({ x: Math.cos(t), y: 0, z: zSign * Math.sin(t) });
+                              const zSignPos = isPositive ? 1 : -1;
+                              pathPos = (t) => ({ x: Math.cos(t), y: 0, z:  zSignPos * Math.sin(t) });
+                              pathNeg = (t) => ({ x: Math.cos(t), y: 0, z: -zSignPos * Math.sin(t) });
                           }
-                          if (pathDir) {
+                          if (pathPos && pathNeg) {
                               const inBox = (d: { x: number; y: number; z: number }) =>
                                   d.x >= xLim.min && d.x <= xLim.max &&
                                   d.y >= yLim.min && d.y <= yLim.max &&
                                   d.z >= zLim.min && d.z <= zLim.max;
-                              // Binary-search for the furthest in-box angle
-                              // along the pure path (start at θ=0, search
-                              // outward to θ=π).
-                              if (inBox(pathDir(0))) {
+                              // Binary-search the max in-box sweep angle on
+                              // each path. `findMaxAngle` starts at θ=0 (the
+                              // shared neutral anchor) and doubles outward.
+                              const findMaxAngle = (path: (t: number) => { x: number; y: number; z: number }): number => {
+                                  if (!inBox(path(0))) return 0;
                                   let lo = 0, hi = Math.PI;
                                   for (let k = 0; k < 24; k++) {
                                       const mid = (lo + hi) / 2;
-                                      if (inBox(pathDir(mid))) lo = mid;
+                                      if (inBox(path(mid))) lo = mid;
                                       else hi = mid;
                                   }
-                                  const maxDeg = lo * 180 / Math.PI;
-                                  // Graph range in section-direction space:
-                                  // [0, maxDeg]. Positive = more of this
-                                  // section's action.
-                                  return { min: 0, max: maxDeg };
+                                  return lo * 180 / Math.PI;
+                              };
+                              const maxPos = findMaxAngle(pathPos);
+                              const maxNeg = findMaxAngle(pathNeg);
+                              if (maxPos > 0 || maxNeg > 0) {
+                                  // Graph X-axis: [-maxNeg, +maxPos]. The
+                                  // positive extent is how far the limb can
+                                  // move in THIS section's direction; the
+                                  // negative extent is how far it can move
+                                  // in the OPPOSITE direction on the same
+                                  // axis. Both come from the same dir-box
+                                  // limits.
+                                  return { min: -maxNeg, max: maxPos };
                               }
-                              // Pure-path anchor out-of-box (e.g. Hip horizontal:
-                              // the "T-pose" (1,0,0) anchor is infeasible because
-                              // the leg can't reach horizontal). Compute the range
-                              // of rawAngles over the in-box subset of the unit
-                              // sphere, then flip to directionAngle. Bilateral
-                              // normalization means we can sample with sideSign=+1
-                              // (right-side convention).
+                              // Pure-path anchor (0,1,0) or (1,0,0) is out-of-box
+                              // for this action (e.g. Hip horizontal: the leg can't
+                              // reach the T-pose transverse-plane anchor). Fall back
+                              // to sampling the in-box subset of the unit sphere
+                              // and taking the directionAngle extremes. Bilateral
+                              // normalization means we sample with sideSign=+1.
                               let rawMin = Infinity, rawMax = -Infinity;
                               const N = 30;
                               for (let i = 0; i <= N; i++) {
@@ -6575,13 +6595,7 @@ const BioModelPage: React.FC = () => {
                               if (rawMin !== Infinity) {
                                   const a = rawMin * flip * 180 / Math.PI;
                                   const b = rawMax * flip * 180 / Math.PI;
-                                  // Clamp negative side of this section to 0 — the
-                                  // section-direction range should start at 0 (the
-                                  // "neutral" reading) and extend positively. Off-
-                                  // direction peaks still reach negative territory
-                                  // via the peakAngles extension.
-                                  const sectionMax = Math.max(a, b);
-                                  return { min: 0, max: Math.max(sectionMax, 0) };
+                                  return { min: Math.min(a, b), max: Math.max(a, b) };
                               }
                           }
                       }
