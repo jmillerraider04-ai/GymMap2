@@ -1248,6 +1248,16 @@ const BioModelPage: React.FC = () => {
       // reflect them.
       const jointForces: Record<string, Vector3> = {};
 
+      // Total applied force and its moment about the world origin. Used by
+      // Phase B to impose whole-body equilibrium: Σ F_applied + Σ λ_i n_i = 0
+      // and Σ r × F_applied + Σ r_pin × (λ_i n_i) = 0. Without those, the
+      // solver silently lets an "invisible root mount" absorb any unbalanced
+      // load, so e.g. an arm-side force never translates into leg-pin
+      // reactions and the hip/torso muscles that would really hold the
+      // pelvis read zero.
+      let totalAppliedForce: Vector3 = { x: 0, y: 0, z: 0 };
+      let totalAppliedMoment: Vector3 = { x: 0, y: 0, z: 0 };
+
       for (const f of currentForces) {
           const seg = kin.boneStartPoints[f.boneId];
           const end = kin.boneEndPoints[f.boneId];
@@ -1267,6 +1277,9 @@ const BioModelPage: React.FC = () => {
           const profileMult = evaluateProfile(f.profile, currentT);
           const effectiveMag = baseMag * profileMult;
           const scaledForce = mul(forceDir, effectiveMag);
+
+          totalAppliedForce = add(totalAppliedForce, scaledForce);
+          totalAppliedMoment = add(totalAppliedMoment, crossProduct(attachPt, scaledForce));
 
           for (const bone of chain) {
               const prevJ = jointForces[bone] || { x: 0, y: 0, z: 0 };
@@ -1671,7 +1684,40 @@ const BioModelPage: React.FC = () => {
 
               if (cols.length > 0) {
                   const N = consRefs.length;
-                  // Solve: argmin_λ Σ((tau0 + λ·sens)/cap)²
+
+                  // Minimize Σ ((tau0 + λ·sens)/cap)² — muscle neural drive —
+                  // subject to two classes of hard equality constraints:
+                  //
+                  //   (a) Whole-body equilibrium: Σ F + Σ λ n = 0 and
+                  //       Σ r × F + Σ r_pin × λ n = 0. These plug the
+                  //       "invisible root mount" hole. Without them, min-
+                  //       effort picks λ = 0 whenever the force's subtree
+                  //       is disjoint from the constraint subtree, silently
+                  //       assigning the unbalanced load to an imaginary
+                  //       pelvis fixity and leaving hip/spine muscles at
+                  //       zero even though physically they must hold the
+                  //       pelvis against the pinned legs. Making real pins
+                  //       carry the load surfaces those reactions through
+                  //       sens as correct hip/spine demand.
+                  //
+                  //   (b) Structural-absorption of locked hinge joints:
+                  //       τ = 0 at any hinge col (elbow / knee / ankle)
+                  //       whose single muscle-actuated axis is kinematically
+                  //       killed by the constraint set — detected as the
+                  //       sens column not lying in the span of the other
+                  //       cols' sens. These joints have no torso-side
+                  //       interpretation (both of their attached bones live
+                  //       inside one limb subtree), so when the limb is
+                  //       rigidized at both ends the bending moment is
+                  //       absorbed structurally by the bone/ligament, not
+                  //       by the muscle. Multi-axis pelvis-adjacent joints
+                  //       (hip, shoulder, spine, scapula) are not subject
+                  //       to this rule — their muscles are what hold the
+                  //       root against the pinned limbs.
+                  //
+                  //   [AtWA     A_H      A_bal^T] [λ]   [AtWb  ]
+                  //   [A_H^T    0        0      ] [μ] = [-b_H  ]
+                  //   [A_bal    0        0      ] [ν]   [b_bal ]
                   const AtWA: number[][] = Array.from({length: N}, () => new Array(N).fill(0));
                   const AtWb: number[] = new Array(N).fill(0);
                   for (let i = 0; i < N; i++) {
@@ -1684,9 +1730,93 @@ const BioModelPage: React.FC = () => {
                       for (const c of cols) r += c.sens[i] * c.tau0 / (c.cap * c.cap);
                       AtWb[i] = -r;
                   }
-                  // Tikhonov — biases min-norm in null-space directions.
                   for (let i = 0; i < N; i++) AtWA[i][i] += 1e-8;
-                  const lam = solveSmall(AtWA, AtWb);
+
+                  const balanceRows: number[][] = [];
+                  const balanceRhs: number[] = [];
+                  for (const axis of ['x', 'y', 'z'] as const) {
+                      balanceRows.push(consRefs.map(c => c.n[axis]));
+                      balanceRhs.push(-totalAppliedForce[axis]);
+                  }
+                  for (const axis of ['x', 'y', 'z'] as const) {
+                      balanceRows.push(consRefs.map(c => crossProduct(c.tip, c.n)[axis]));
+                      balanceRhs.push(-totalAppliedMoment[axis]);
+                  }
+                  const B = balanceRows.length;
+
+                  // Hinge joints whose sens column is linearly independent
+                  // of the others' are structurally-locked. Gram-Schmidt
+                  // test: if the residual after projecting sens_k onto the
+                  // span of {sens_j : j ≠ k} is ~0, DOF is live (some
+                  // virtual δq ∈ null(J_c) has a nonzero k-th component).
+                  // If the residual survives, k is frozen — and if the col
+                  // is a hinge, muscle at k is zero by structural absorption.
+                  const hingeGroups = new Set<JointGroup>(['Elbow', 'Knee', 'Ankle']);
+                  const hingeFrozenIdx: number[] = [];
+                  for (let k = 0; k < cols.length; k++) {
+                      if (!hingeGroups.has(cols[k].jointGroup)) continue;
+                      const v = cols[k].sens;
+                      const m = v.length;
+                      let vNormSq = 0;
+                      for (let i = 0; i < m; i++) vNormSq += v[i] * v[i];
+                      const vNorm = Math.sqrt(vNormSq);
+                      if (vNorm < 1e-9) continue;
+                      const ortho: number[][] = [];
+                      for (let j = 0; j < cols.length; j++) {
+                          if (j === k) continue;
+                          const b = cols[j].sens;
+                          const r = b.slice();
+                          for (const q of ortho) {
+                              let p = 0;
+                              for (let i = 0; i < m; i++) p += r[i] * q[i];
+                              for (let i = 0; i < m; i++) r[i] -= p * q[i];
+                          }
+                          let rn2 = 0;
+                          for (let i = 0; i < m; i++) rn2 += r[i] * r[i];
+                          const rn = Math.sqrt(rn2);
+                          let bNormSq = 0;
+                          for (let i = 0; i < m; i++) bNormSq += b[i] * b[i];
+                          if (rn > 1e-9 * Math.max(1, Math.sqrt(bNormSq))) {
+                              for (let i = 0; i < m; i++) r[i] /= rn;
+                              ortho.push(r);
+                          }
+                      }
+                      const residual = v.slice();
+                      for (const q of ortho) {
+                          let p = 0;
+                          for (let i = 0; i < m; i++) p += residual[i] * q[i];
+                          for (let i = 0; i < m; i++) residual[i] -= p * q[i];
+                      }
+                      let resSq = 0;
+                      for (let i = 0; i < m; i++) resSq += residual[i] * residual[i];
+                      if (Math.sqrt(resSq) > 1e-6 * vNorm) hingeFrozenIdx.push(k);
+                  }
+                  const H = hingeFrozenIdx.length;
+
+                  const dim = N + H + B;
+                  const M: number[][] = Array.from({length: dim}, () => new Array(dim).fill(0));
+                  const RHS: number[] = new Array(dim).fill(0);
+                  for (let i = 0; i < N; i++) {
+                      for (let j = 0; j < N; j++) M[i][j] = AtWA[i][j];
+                      RHS[i] = AtWb[i];
+                  }
+                  for (let k = 0; k < H; k++) {
+                      const c = cols[hingeFrozenIdx[k]];
+                      for (let i = 0; i < N; i++) {
+                          M[i][N + k] = c.sens[i];
+                          M[N + k][i] = c.sens[i];
+                      }
+                      RHS[N + k] = -c.tau0;
+                  }
+                  for (let b = 0; b < B; b++) {
+                      for (let i = 0; i < N; i++) {
+                          M[i][N + H + b] = balanceRows[b][i];
+                          M[N + H + b][i] = balanceRows[b][i];
+                      }
+                      RHS[N + H + b] = balanceRhs[b];
+                  }
+                  const sol = solveSmall(M, RHS);
+                  const lam = sol.slice(0, N);
 
                   // Propagate each reaction into jointForces for arrow viz.
                   for (let i = 0; i < N; i++) {
@@ -1700,7 +1830,10 @@ const BioModelPage: React.FC = () => {
                       }
                   }
 
-                  // Write the final demand for every column back to filtered.
+                  // Writeback for every col. Frozen cols naturally get
+                  // newTau ≈ 0 from the KKT constraint; any Phase A entry
+                  // there is overwritten with zero magnitude and dropped by
+                  // the downstream `> phaseAMax * 0.01` filter.
                   for (const c of cols) {
                       let newTau = c.tau0;
                       for (let i = 0; i < N; i++) newTau += lam[i] * c.sens[i];
@@ -1737,15 +1870,18 @@ const BioModelPage: React.FC = () => {
 
       // --- Path-validity filter ---
       //
-      // A joint should only show demand if it lies on the path between an
-      // applied force point and a constraint reaction point in the kinematic
-      // tree. If a joint is "above" both (toward the root, past their lowest
-      // common ancestor), it has nothing to push against — the constraint
-      // already absorbed the force before it reached that joint.
+      // A joint only "sees" load when something in its distal sub-tree is
+      // either pushing on it (applied force) or pulling on it (constraint
+      // reaction). Equivalently: valid bones = ancestors of any force bone
+      // ∪ ancestors of any constraint bone. Any joint outside this set
+      // cannot possibly have nonzero demand regardless of λ.
       //
-      // For each (force bone, constraint bone) pair, we find the LCA and
-      // mark every bone on the path from force→LCA→constraint as valid.
-      // Bones above the LCA are filtered out.
+      // We deliberately do NOT try to filter bones "above an absorbing
+      // constraint" via LCA logic — with disjoint kinematic sub-trees
+      // (legs siblings of spine), that logic spuriously drops everything.
+      // The KKT-constrained Phase B already zeros out demand at joints
+      // whose virtual motion is absorbed, and the magnitude threshold
+      // below removes the noise.
       const forceBones = new Set(currentForces.map(f => f.boneId));
       const constraintBones = new Set<string>();
       if (activeConstraints) {
@@ -1765,34 +1901,8 @@ const BioModelPage: React.FC = () => {
       };
 
       const validBones = new Set<string>();
-      for (const fb of forceBones) {
-          const fAnc = getAncestors(fb);
-          for (const cb of constraintBones) {
-              const cAnc = getAncestors(cb);
-              // Common ancestors of both bones.
-              const common: string[] = [];
-              for (const b of fAnc) { if (cAnc.has(b)) common.push(b); }
-              // LCA = the common ancestor with the MOST ancestors itself
-              // (deepest in the tree = furthest from root).
-              let lca = '';
-              let lcaDepth = -1;
-              for (const b of common) {
-                  const d = getAncestors(b).size;
-                  if (d > lcaDepth) { lcaDepth = d; lca = b; }
-              }
-              if (!lca) continue;
-              const lcaAnc = getAncestors(lca);
-              // Mark bones on the path: force→LCA and constraint→LCA.
-              // A bone is "on the path" if it's in fAnc or cAnc but NOT
-              // a strict ancestor of the LCA.
-              for (const b of fAnc) {
-                  if (b === lca || !lcaAnc.has(b)) validBones.add(b);
-              }
-              for (const b of cAnc) {
-                  if (b === lca || !lcaAnc.has(b)) validBones.add(b);
-              }
-          }
-      }
+      for (const fb of forceBones) for (const b of getAncestors(fb)) validBones.add(b);
+      for (const cb of constraintBones) for (const b of getAncestors(cb)) validBones.add(b);
 
       // Final filter: path validity + near-zero noise removal.
       const phaseAMax = maxMag;
@@ -1848,6 +1958,17 @@ const BioModelPage: React.FC = () => {
 
   const BONE_ORDER = ['lClavicle', 'rClavicle', 'lHumerus', 'rHumerus', 'lFemur', 'rFemur', 'lForearm', 'rForearm', 'lTibia', 'rTibia', 'lFoot', 'rFoot'];
 
+  // Kinematic parent tree. Used throughout the pipeline — Phase A force-chain
+  // walks, constraint ancestor sets for the sens calc, path-validity LCA,
+  // solver influence chains. This MUST match the actual kinematics so that
+  // a virtual rotation of bone B moves exactly the world points that B's
+  // rotation really moves. Specifically: legs parent off the fixed pelvis
+  // (rootFrame) in calculateKinematics, NOT off the spine — spine rotation
+  // moves ribcage/arms, never the femur. Encoding legs as spine's children
+  // here gave the sens calc fictitious coupling between spine rotations and
+  // leg-pin reactions, which in turn let spine cols span the knee's sens
+  // direction and kept kinematically-locked knees classified live. Legs are
+  // siblings of spine, both rooted at the pelvis.
   const BONE_PARENTS: Record<string, string | undefined> = {
     spine: undefined,
     lClavicle: 'spine',
@@ -1856,8 +1977,8 @@ const BioModelPage: React.FC = () => {
     rHumerus: 'rClavicle',
     lForearm: 'lHumerus',
     rForearm: 'rHumerus',
-    lFemur: 'spine',
-    rFemur: 'spine',
+    lFemur: undefined,
+    rFemur: undefined,
     lTibia: 'lFemur',
     rTibia: 'rFemur',
     lFoot: 'lTibia',
