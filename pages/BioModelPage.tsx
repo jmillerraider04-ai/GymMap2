@@ -398,274 +398,407 @@ const MUSCLE_CATALOG: MuscleDef[] = [
 
 // Default muscle assignments per joint action. Numbers are dimensionless
 // contribution weights — only their RATIO at a given angle matters. The
-// defaults below encode rough EMG/anatomy consensus for which muscles drive
-// which actions and where in the ROM each peaks. Easy to tweak in the UI.
+// defaults below encode EMG / kinesiology consensus (Neumann, Kendall,
+// McGill) for which muscles drive which actions and where in the ROM each
+// peaks. Easy to tweak in the UI.
 //
 // Section key format: `${JointGroup}.${actionKey(directionName)}` —
 // directionName is positiveAction OR negativeAction from JOINT_ACTIONS.
 //
-// IMPORTANT - peak-angle convention:
-//   The bell evaluates against `directionAngle`, which equals +rawAngle for
-//   the positive-direction section and -rawAngle for the negative-direction
-//   section (in distributeMuscleLoadForFrame). So a muscle that's most
-//   active during one action when the joint is in the OPPOSITE direction
-//   needs a NEGATIVE peak angle in that section.
+// PEAK-ANGLE CONVENTION
+// ---------------------
+// `angle` is a DIRECTION-ANGLE in this section's frame of reference:
 //
-//   Examples:
-//   • Adductor magnus is most effective at hip extension when the hip is
-//     deeply flexed → in 'Hip.extension', peak = -90 (means "peak when
-//     section angle is -90, i.e. when raw flexion is +90").
-//   • Pec sternal is most effective at shoulder extension when the arm is
-//     elevated forward (mid-range pulldown) → 'Shoulder.extension' peak
-//     at -45 means "peak when arm is 45° flexed forward".
-//   • Glutes are most effective at hip extension near full extension →
-//     peak at +20 (hip is slightly hyperextended).
-//   • Biceps long head is most effective at elbow flexion when elbow is
-//     more open (early in the curl) → 'Elbow.flexion' peak at ~30.
-//   • Brachioradialis takes over later in the curl → peak at ~110.
+//   + angle = peak at N° IN this section's action direction
+//             (e.g. peak at +60 in Knee.flexion = peak at 60° of flexion;
+//              peak at +90 in Shoulder.abduction = peak at 90° abducted).
+//
+//   − angle = peak at N° in the OPPOSITE direction. This is how muscles
+//             that act as a given joint action but peak in the stretched
+//             position are represented: e.g. glute max in Hip.extension
+//             with angle = −60 means "peak at 60° of hip flexion," which
+//             is the stretched glute position where it fires hardest.
+//
+//   0 = peak at neutral. Horizontal ab/ad and all Scapula sections have
+//       structurally-zero rawAngle, so `angle = 0` just means "full
+//       weight" and ratios between muscles are what matters.
+//
+// The sign convention is stable across joints: sliders, peak values, and
+// the graph x-axis all use the same "+ = more of this section's action"
+// direction. distributeMuscleLoadForFrame handles the sign correction
+// between rawAngle (which has axis-dependent sign) and directionAngle.
+//
+// PEAK vs BASE:
+//   `peak` is the contribution at `angle`; `base` is 180° away. Cosine
+//   bell between them. Normally peak > base (muscle strong at the peak
+//   angle, weaker at the opposite extreme). Peak < base is legal and
+//   represents "generally active at `base`, but DIPS at `angle`" — useful
+//   for muscles that lose leverage or go slack at one end of the ROM.
+//
+// LENGTH-TENSION vs FUNCTIONAL ACTIVATION:
+//   Peak force capacity is usually at the stretched position (length-
+//   tension). Functional activation (EMG) often peaks where the muscle
+//   actually does most of the work. These can disagree. The defaults
+//   pick whichever better represents the muscle's share of the load in
+//   typical strength-training contexts — e.g. iliopsoas peaks deep in
+//   hip flexion (angle = +90) because other flexors have faded out there,
+//   even though its raw force capacity is higher at the stretched (hip-
+//   extended) position.
 //
 // SCAPULOHUMERAL RHYTHM:
-//   We don't have scapular rotations as joint actions, so any muscle whose
-//   primary scapular role contributes to a shoulder action via S/H rhythm
-//   (mainly lower traps + serratus anterior assisting overhead motion) is
-//   added to the relevant shoulder section with a small contribution
-//   peaking near full elevation.
+//   We don't have scapular rotations as shoulder-action DOFs, so muscles
+//   whose scapular role assists a humeral action via S/H rhythm (lower +
+//   upper traps and serratus anterior for overhead motion) show up in the
+//   relevant shoulder sections as small contributions peaking near full
+//   elevation (angle = +150).
 const m = (base: number, peak: number, angle: number): MuscleContribution => ({ base, peak, angle });
 const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // --- SHOULDER ---
     'Shoulder.flexion': {
-        'delt-front':       m(40, 100, 90),
-        'pec-clavicular':   m(35, 80, 30),
-        'biceps-long':      m(15, 30, 60),
-        'biceps-short':     m(15, 25, 60),
-        // S/H rhythm assist: lower traps upwardly rotate the scapula,
-        // enabling overhead motion. Small contribution peaking near
-        // full elevation.
-        'traps-lower':      m(5, 18, 150),
-        'serratus-anterior':m(5, 15, 150),
+        // Primary: anterior delt peaks mid-flexion where its moment arm
+        // is maximal (~90°). Pec clavicular strong early, loses leverage
+        // as the arm goes above the head.
+        'delt-front':        m(25, 100, 90),
+        'pec-clavicular':    m(30, 90, 60),
+        // Biceps long + short head cross the GH joint anteriorly; modest
+        // flexion assist, strongest mid-range.
+        'biceps-long':       m(12, 30, 60),
+        'biceps-short':      m(12, 28, 60),
+        // Scapulohumeral rhythm: scapular upward rotators become essential
+        // past ~90° elevation. Bell peaks near full overhead.
+        'traps-lower':       m(5, 22, 150),
+        'serratus-anterior': m(5, 20, 150),
+        'traps-upper':       m(4, 15, 150),
     },
     'Shoulder.extension': {
-        // Lats: best in mid range, fall off at full elevation.
-        'lats':         m(50, 110, 30),
-        'delt-rear':    m(35, 75, 30),
-        'teres-major':  m(40, 85, 30),
-        // Pecs (both heads) extend the shoulder when the arm is elevated
-        // forward (the "stretched" position). They peak in extension when
-        // the arm is still flexed → negative section angle.
-        'pec-sternal':  m(30, 70, -45),
-        // Triceps long head crosses the shoulder posteriorly → assists
-        // shoulder extension (mostly with the arm overhead).
-        'triceps-long': m(20, 50, 60),
+        // Lats + teres major peak in mid-ROM pulldown (arm flexed forward
+        // ~90°, muscle stretched with good moment arm). Negative angle =
+        // peak in the FLEXION direction (opposite to extension).
+        'lats':         m(30, 110, -90),
+        'teres-major':  m(25, 85, -60),
+        'pec-sternal':  m(20, 70, -60),
+        // Posterior delt active through most of extension, peaks near
+        // neutral / slightly flexed (closer to the middle of the action
+        // direction).
+        'delt-rear':    m(30, 80, -30),
+        // Triceps long head crosses the shoulder posteriorly; strongest
+        // extension moment with the arm overhead (stretched).
+        'triceps-long': m(15, 50, -120),
     },
     'Shoulder.abduction': {
-        'delt-side':     m(40, 100, 90),
-        'supraspinatus': m(50, 90, 15),
-        // Front delt assists abduction (shares anterior fibers).
-        'delt-front':    m(15, 35, 60),
-        // S/H rhythm: lower traps + serratus.
-        'traps-lower':      m(5, 18, 150),
-        'serratus-anterior':m(5, 15, 150),
+        // Primary abductor: lateral deltoid (mid-range peak), supraspinatus
+        // initiates. Anterior delt shares anterior fibers and assists.
+        'delt-side':         m(30, 100, 90),
+        'supraspinatus':     m(40, 90, 15),
+        'delt-front':        m(12, 35, 60),
+        // S/H rhythm overhead assists.
+        'traps-lower':       m(5, 22, 150),
+        'serratus-anterior': m(5, 20, 150),
+        'traps-upper':       m(4, 15, 150),
+        // Biceps long head becomes an abductor past ~90° with the arm
+        // externally rotated (tendon rides anterior to the humeral head).
+        'biceps-long':       m(3, 12, 120),
+        // Infraspinatus stabilizes through mid/late abduction, keeping
+        // the humeral head centered.
+        'infraspinatus':     m(8, 20, 90),
     },
     'Shoulder.adduction': {
-        'lats':        m(45, 100, 60),
-        // Pec sternal is the strongest adductor when the arm is elevated.
-        'pec-sternal': m(45, 100, 90),
-        'teres-major': m(35, 75, 60),
-        // Biceps assist adduction with the arm above the horizontal.
-        'biceps-long':  m(8, 18, 120),
-        'biceps-short': m(8, 18, 120),
-        // Triceps long head adduction assist.
-        'triceps-long': m(8, 20, 120),
+        // Lats + pec sternal are the strongest adductors from an elevated
+        // (abducted) position — stretched at arm abducted 90°, which is
+        // the OPPOSITE direction from adduction → negative angle.
+        'lats':          m(25, 110, -90),
+        'pec-sternal':   m(25, 110, -90),
+        'teres-major':   m(20, 80, -60),
+        'subscapularis': m(10, 28, -60),
+        // Arm-overhead assists: biceps + triceps long head + posterior
+        // delt all pull the arm downward when it's near full elevation
+        // (further in the opposite direction than abducted 90°).
+        'biceps-long':   m(4, 18, -120),
+        'biceps-short':  m(4, 18, -120),
+        'triceps-long':  m(5, 20, -120),
+        'delt-rear':     m(5, 20, -120),
     },
     'Shoulder.horizontalAdduction': {
-        'pec-sternal':     m(50, 110, 0),
-        'pec-clavicular':  m(40, 90, 30),
-        'delt-front':      m(35, 75, 30),
+        // Horizontal actions: getActionAngle is structurally zero for
+        // world-vertical axes, so we place all peaks at 0 and let the
+        // ratios do the work.
+        'pec-sternal':    m(30, 110, 0),
+        'pec-clavicular': m(25, 90, 0),
+        'delt-front':     m(25, 75, 0),
+        // Biceps brachii: both heads originate anterior to the GH joint
+        // on the scapula, giving a real horizontal-adduction line of pull.
+        'biceps-long':    m(8, 20, 0),
+        'biceps-short':   m(10, 25, 0),
+        // Subscapularis' anterior line of pull couples IR + horizontal add.
+        'subscapularis':  m(10, 28, 0),
     },
     'Shoulder.horizontalAbduction': {
-        'delt-rear':     m(50, 110, 0),
-        'infraspinatus': m(35, 70, 0),
-        'teres-minor':   m(30, 60, 0),
-        // Note: traps + rhomboids are scapular retractors, NOT humeral
-        // horizontal abductors. They were removed from this section per
-        // the corrected anatomy.
+        'delt-rear':     m(30, 110, 0),
+        'infraspinatus': m(25, 70, 0),
+        'teres-minor':   m(20, 60, 0),
+        // Small posterior-line-of-pull assists from the back:
+        'teres-major':   m(6, 15, 0),
+        'lats':          m(5, 12, 0),
+        'triceps-long':  m(4, 10, 0),
     },
     'Shoulder.internalRotation': {
-        'subscapularis': m(50, 100, 0),
-        'lats':          m(35, 75, -30),
-        'pec-sternal':   m(30, 65, 0),
-        'teres-major':   m(30, 60, 0),
-        'delt-front':    m(20, 40, 30),
+        'subscapularis':  m(40, 100, 0),
+        'lats':           m(25, 75, 0),
+        'pec-sternal':    m(20, 65, 0),
+        'teres-major':    m(20, 60, 0),
+        'delt-front':     m(15, 40, 0),
+        'pec-clavicular': m(10, 28, 0),
+        // Biceps short head has a small IR moment via its coracoid origin.
+        'biceps-short':   m(6, 14, 0),
     },
     'Shoulder.externalRotation': {
-        'infraspinatus': m(50, 100, 0),
-        'teres-minor':   m(40, 85, 0),
-        'delt-rear':     m(25, 55, 0),
+        'infraspinatus': m(40, 100, 0),
+        'teres-minor':   m(30, 90, 0),
+        'delt-rear':     m(20, 55, 0),
+        // Supraspinatus contributes a small ER moment as part of the
+        // rotator-cuff force couple decelerating IR.
+        'supraspinatus': m(6, 18, 0),
     },
 
     // --- ELBOW ---
-    // Convention quirk: Elbow positiveAction = Extension. The "Flexion"
-    // section here is the negativeAction direction (biceps territory).
-    // Peak angles are in degrees of flexion (the section's natural axis).
     'Elbow.flexion': {
-        // Biceps work best with elbow more open (length-tension peak
-        // earlier in the curl).
-        'biceps-long':     m(40, 95, 30),
-        'biceps-short':    m(40, 95, 30),
-        'brachialis':      m(60, 110, 90),
-        // Brachioradialis takes over later in the curl.
-        'brachioradialis': m(30, 80, 110),
+        // Biceps length-tension peaks around 90° flexion; brachialis has
+        // a constant moment arm and also peaks mid-range; brachioradialis
+        // takes over later in the curl as the pronation/supination axis
+        // gives it a longer lever.
+        'biceps-long':     m(25, 100, 90),
+        'biceps-short':    m(25, 100, 90),
+        'brachialis':      m(40, 115, 90),
+        'brachioradialis': m(20, 80, 110),
     },
     'Elbow.extension': {
-        'triceps-long':    m(35, 80, 30),
-        'triceps-lateral': m(45, 95, 60),
-        'triceps-medial':  m(40, 85, 90),
+        // Triceps long head peaks at flexed shoulder/elbow (stretched)
+        // — OPPOSITE direction from extension, so negative angle.
+        // Lateral + medial heads peak in mid-flexion (also opposite of
+        // extension direction) where their moment arm is strongest.
+        'triceps-long':    m(25, 80, -90),
+        'triceps-lateral': m(35, 105, -60),
+        'triceps-medial':  m(30, 90, -60),
     },
 
     // --- HIP ---
     'Hip.flexion': {
-        'iliopsoas':      m(60, 110, 30),
-        'rectus-femoris': m(40, 85, 60),
-        'tfl':            m(30, 60, 30),
-        'sartorius':      m(20, 45, 60),
+        // Iliopsoas peaks past 60° flexion where the one-joint quad
+        // flexors (rectus femoris, TFL) have fallen off and it becomes
+        // the dominant contributor (think hanging leg-raise top).
+        'iliopsoas':       m(35, 110, 90),
+        // Rectus femoris is strongest in early flexion before it runs out
+        // of sarcomere length; TFL likewise.
+        'rectus-femoris':  m(30, 85, 30),
+        'tfl':              m(25, 60, 15),
+        'sartorius':       m(15, 45, 60),
+        // Pectineus is an anatomically-named short hip flexor.
+        'pectineus':       m(20, 55, 30),
+        // Long/brevis adductors become hip flexors only when the hip is
+        // extended (line of pull crosses anterior to the hip axis) —
+        // peak in the OPPOSITE direction of flexion.
+        'adductor-longus': m(10, 35, -30),
+        'adductor-brevis': m(8, 25, -30),
+        'gracilis':        m(5, 15, 0),
     },
     'Hip.extension': {
-        // Glutes peak at full extension (and mild hyperextension).
-        // Section angle = -rawFlexion, so "near full extension" = +20.
-        'glute-max':       m(60, 130, 20),
-        // Hamstrings peak in mid-range hip extension (hip ~30° flexed
-        // = section angle -30).
-        'semitendinosus':  m(35, 80, -30),
-        'semimembranosus': m(35, 80, -30),
-        // Adductor magnus is most active at hip extension when the hip
-        // is deeply flexed (its line of pull becomes posterior to the
-        // hip axis with the femur forward). Peak at deep flexion =
-        // section angle -90.
-        'adductor-magnus': m(40, 100, -90),
-        // biceps-femoris: short head removed from hip extension entirely
-        // — short head is purely a knee flexor. Long head would do hip
-        // extension but the catalog doesn't distinguish heads, so we
-        // treat the entry as "short head" per the user's preference.
+        // Glute max: peaks at hip flexed ~60° — the classic "bottom of
+        // the squat" stretched position where it fires hardest. That's
+        // OPPOSITE the extension direction, hence negative angle.
+        'glute-max':       m(35, 130, -60),
+        // Hamstrings peak in mid-range hip extension (hip flexed ~30°).
+        'semitendinosus':  m(25, 85, -30),
+        'semimembranosus': m(25, 85, -30),
+        // Adductor magnus posterior fibers become hip extensors at deep
+        // flexion (stretched across the posterior hip axis).
+        'adductor-magnus': m(30, 100, -90),
+        // Glute med posterior fibers assist extension near neutral.
+        'glute-med':       m(10, 22, 0),
+        // biceps-femoris: the catalog entry represents the short head
+        // (knee flexor only — no hip extension role). Long-head hip
+        // extension is covered by semitendinosus + semimembranosus.
     },
     'Hip.abduction': {
-        'glute-med': m(50, 110, 30),
-        'glute-min': m(35, 75, 30),
-        'tfl':       m(30, 65, 20),
-        'glute-max': m(20, 45, 30),  // upper fibers
+        'glute-med': m(35, 110, 30),
+        'glute-min': m(25, 75, 30),
+        'tfl':       m(25, 65, 15),
+        // Upper fibers of glute max contribute to abduction.
+        'glute-max': m(15, 45, 30),
+        // Sartorius' ASIS origin lends a small abduction component.
+        'sartorius': m(8, 18, 0),
     },
     'Hip.adduction': {
-        'adductor-magnus': m(50, 110, 60),
-        'adductor-longus': m(40, 85, 45),
-        'adductor-brevis': m(30, 65, 30),
-        'gracilis':        m(20, 45, 30),
-        'pectineus':       m(20, 45, 0),
+        // Adductor group + gracilis + pectineus peak when the hip is
+        // abducted (stretched) — OPPOSITE to the adduction direction,
+        // hence negative angle.
+        'adductor-magnus': m(40, 110, -30),
+        'adductor-longus': m(30, 85, -15),
+        'adductor-brevis': m(25, 65, -15),
+        'gracilis':        m(15, 45, -15),
+        'pectineus':       m(15, 45, 0),
+        // Glute max lower fibers contribute a small adduction moment.
+        'glute-max':       m(5, 12, 0),
     },
     'Hip.horizontalAdduction': {
-        // Per user feedback: all adductors contribute to horizontal
-        // adduction.
-        'adductor-magnus': m(40, 90, 0),
-        'adductor-longus': m(40, 85, 0),
-        'adductor-brevis': m(30, 65, 0),
-        'gracilis':        m(20, 45, 0),
-        'pectineus':       m(30, 65, 0),
-        'iliopsoas':       m(20, 45, 0),
+        // Horizontal hip actions use world-vertical axis → getActionAngle
+        // returns 0 always; peak = 0 gives full weight.
+        'adductor-magnus': m(30, 90, 0),
+        'adductor-longus': m(30, 85, 0),
+        'adductor-brevis': m(25, 65, 0),
+        'gracilis':        m(15, 45, 0),
+        'pectineus':       m(25, 65, 0),
+        'iliopsoas':       m(15, 45, 0),
     },
     'Hip.horizontalAbduction': {
-        'glute-max': m(45, 95, 0),
-        'glute-med': m(35, 75, 0),
-        'tfl':       m(25, 55, 0),
+        'glute-max': m(30, 95, 0),
+        'glute-med': m(25, 75, 0),
+        'tfl':       m(20, 55, 0),
+        'glute-min': m(15, 45, 0),
+        'sartorius': m(5, 12, 0),
     },
     'Hip.internalRotation': {
-        'glute-med':       m(30, 65, 0),  // anterior fibers
-        'glute-min':       m(25, 55, 0),
-        'tfl':             m(25, 55, 0),
-        'adductor-longus': m(20, 45, 30),
+        // Anterior fibers of the glute med/min + TFL drive hip IR. The
+        // short adductors share the anterior line of pull.
+        'glute-med':       m(25, 65, 0),
+        'glute-min':       m(20, 55, 0),
+        'tfl':             m(20, 55, 0),
+        'adductor-longus': m(15, 40, 0),
+        'adductor-brevis': m(10, 28, 0),
+        'pectineus':       m(10, 28, 0),
+        // Medial hamstrings produce weak IR when the knee is flexed.
+        'semitendinosus':  m(8, 18, 0),
+        'semimembranosus': m(8, 18, 0),
     },
     'Hip.externalRotation': {
-        'glute-max': m(45, 100, 0),
-        'sartorius': m(20, 45, 30),
+        'glute-max':      m(30, 100, 0),
+        'sartorius':      m(15, 45, 0),
+        // Glute med/min posterior fibers are important external rotators.
+        // The deep 6 rotators (piriformis, obturators, QF, gemelli) aren't
+        // in the catalog, so these pick up their share of the load.
+        'glute-med':      m(18, 40, 0),
+        'glute-min':      m(12, 28, 0),
+        // Biceps femoris long head externally rotates the tibia + hip
+        // (fibular insertion gives lateral line of pull).
+        'biceps-femoris': m(10, 22, 0),
+        // Iliopsoas weak ER (tendon wraps the lesser trochanter; debated).
+        'iliopsoas':      m(8, 18, 0),
     },
 
     // --- KNEE ---
-    // Same Elbow convention quirk: positiveAction = Extension; "Flexion" is
-    // negativeAction. Peak angles in 'Knee.flexion' are degrees of flexion.
     'Knee.flexion': {
-        'biceps-femoris':  m(45, 100, 60),
-        'semitendinosus':  m(40, 90, 60),
-        'semimembranosus': m(40, 90, 60),
-        'gastrocnemius':   m(20, 45, 30),
-        'sartorius':       m(15, 35, 60),
-        'gracilis':        m(15, 35, 60),
+        // Hamstrings peak in mid-range knee flexion (~60°).
+        'biceps-femoris':  m(30, 100, 60),
+        'semitendinosus':  m(25, 90, 60),
+        'semimembranosus': m(25, 90, 60),
+        // Gastrocnemius crosses the knee posteriorly; contributes more
+        // when the ankle is also dorsiflexed (not modeled here).
+        'gastrocnemius':   m(15, 45, 30),
+        'sartorius':       m(10, 30, 60),
+        'gracilis':        m(10, 30, 60),
+        // TFL weakly flexes the knee through the IT band below ~30°.
+        'tfl':             m(4, 10, 30),
     },
     'Knee.extension': {
-        'rectus-femoris':     m(40, 85, 60),
-        'vastus-lateralis':   m(50, 110, 90),
-        'vastus-medialis':    m(50, 110, 90),
-        'vastus-intermedius': m(45, 100, 90),
+        // Vasti peak at deeper flexion (stretched, high length-tension)
+        // — OPPOSITE direction from extension, hence negative angle.
+        // Rectus femoris peaks earlier because it's also losing hip-flex
+        // length as the knee straightens.
+        'rectus-femoris':     m(25, 85, -45),
+        'vastus-lateralis':   m(35, 110, -60),
+        'vastus-medialis':    m(35, 110, -60),
+        'vastus-intermedius': m(30, 100, -60),
+        // TFL weakly extends via the IT band near full extension.
+        'tfl':                m(4, 10, 0),
     },
 
     // --- ANKLE ---
-    // positiveAction = Dorsi Flexion. "Plantar Flexion" is negativeAction.
     'Ankle.dorsiFlexion': {
-        'tibialis-anterior': m(50, 100, 0),
+        // Catalog only has tibialis anterior; the other dorsiflexors
+        // (EHL, EDL, peroneus tertius) aren't modeled.
+        'tibialis-anterior': m(40, 100, 0),
     },
     'Ankle.plantarFlexion': {
-        'gastrocnemius': m(50, 110, 15),
-        'soleus':        m(60, 120, 15),
+        // Gastroc + soleus peak at ankle dorsiflexed (stretched) — that
+        // is OPPOSITE to the plantarflexion direction, hence negative.
+        'gastrocnemius': m(30, 110, -15),
+        'soleus':        m(40, 120, -15),
     },
 
     // --- SPINE ---
+    // Spine section angles all come out near zero in this model (the spine
+    // bone is kinematically fixed), so peak angle = 0 gives full weight
+    // and ratios between muscles are what matters.
     'Spine.flexion': {
-        'rectus-abdominis':  m(50, 110, 30),
-        'obliques-external': m(35, 75, 30),
-        'obliques-internal': m(35, 75, 30),
+        'rectus-abdominis':  m(40, 110, 0),
+        'obliques-external': m(25, 75, 0),
+        'obliques-internal': m(25, 75, 0),
+        // Psoas pulls T12-L5 forward with the femurs fixed.
+        'iliopsoas':         m(10, 22, 0),
     },
     'Spine.extension': {
-        'erector-spinae':     m(60, 130, 0),
-        'quadratus-lumborum': m(25, 50, 0),
+        'erector-spinae':     m(50, 130, 0),
+        'quadratus-lumborum': m(20, 50, 0),
+        // Lats assist trunk extension via the thoracolumbar fascia.
+        'lats':               m(8, 18, 0),
     },
     'Spine.lateralFlexionL': {
-        'obliques-external':  m(40, 85, 0),
-        'obliques-internal':  m(40, 85, 0),
-        'quadratus-lumborum': m(40, 85, 0),
-        'erector-spinae':     m(30, 65, 0),
+        'obliques-external':  m(30, 85, 0),
+        'obliques-internal':  m(30, 85, 0),
+        'quadratus-lumborum': m(30, 85, 0),
+        'erector-spinae':     m(25, 65, 0),
+        'lats':               m(10, 22, 0),
+        'iliopsoas':          m(8, 18, 0),
     },
     'Spine.lateralFlexionR': {
-        'obliques-external':  m(40, 85, 0),
-        'obliques-internal':  m(40, 85, 0),
-        'quadratus-lumborum': m(40, 85, 0),
-        'erector-spinae':     m(30, 65, 0),
+        'obliques-external':  m(30, 85, 0),
+        'obliques-internal':  m(30, 85, 0),
+        'quadratus-lumborum': m(30, 85, 0),
+        'erector-spinae':     m(25, 65, 0),
+        'lats':               m(10, 22, 0),
+        'iliopsoas':          m(8, 18, 0),
     },
     'Spine.rotationL': {
-        'obliques-external': m(45, 100, 0),  // contralateral
-        'obliques-internal': m(40, 85, 0),   // ipsilateral
-        'erector-spinae':    m(20, 45, 0),
+        'obliques-external': m(35, 100, 0),  // contralateral
+        'obliques-internal': m(30, 85, 0),   // ipsilateral
+        'erector-spinae':    m(15, 45, 0),
+        'lats':              m(6, 15, 0),
     },
     'Spine.rotationR': {
-        'obliques-external': m(45, 100, 0),
-        'obliques-internal': m(40, 85, 0),
-        'erector-spinae':    m(20, 45, 0),
+        'obliques-external': m(35, 100, 0),
+        'obliques-internal': m(30, 85, 0),
+        'erector-spinae':    m(15, 45, 0),
+        'lats':              m(6, 15, 0),
     },
 
     // --- SCAPULA ---
+    // Scapula rawAngle is also always ~0 in this model; ratios set the
+    // relative contributions.
     'Scapula.elevation': {
-        'traps-upper':      m(60, 120, 0),
-        'levator-scapulae': m(45, 90, 0),
-        'rhomboids':        m(25, 55, 0),
+        'traps-upper':      m(50, 120, 0),
+        'levator-scapulae': m(35, 90, 0),
+        'rhomboids':        m(20, 55, 0),
     },
     'Scapula.depression': {
-        'traps-lower': m(50, 110, 0),
-        'pec-minor':   m(30, 65, 0),
-        'lats':        m(25, 55, 0),
+        'traps-lower':       m(40, 110, 0),
+        'pec-minor':         m(25, 65, 0),
+        'lats':              m(20, 55, 0),
+        // Serratus lower fibers depress the scapula along the ribcage.
+        'serratus-anterior': m(10, 25, 0),
     },
     'Scapula.protraction': {
-        'serratus-anterior': m(60, 130, 0),
-        'pec-minor':         m(30, 65, 0),
+        'serratus-anterior': m(50, 130, 0),
+        'pec-minor':         m(25, 65, 0),
+        // Pec major drags the scapula forward via its humeral attachment
+        // when pulling the arm across the body.
+        'pec-clavicular':    m(8, 18, 0),
+        'pec-sternal':       m(8, 18, 0),
     },
     'Scapula.retraction': {
-        'traps-mid':   m(55, 115, 0),
-        'rhomboids':   m(50, 110, 0),
-        'traps-lower': m(30, 65, 0),
+        'traps-mid':   m(45, 115, 0),
+        'rhomboids':   m(40, 110, 0),
+        'traps-lower': m(25, 65, 0),
+        // Lats retract the scapula via the humerus when pulling back.
+        'lats':        m(6, 15, 0),
     },
 };
 
@@ -2459,25 +2592,43 @@ const BioModelPage: React.FC = () => {
       'Ankle':    { left: 'lFoot',     right: 'rFoot'     },
   };
 
-  // Current live angle of a joint action, in degrees. Positive means the
-  // joint is rotating in the positiveAction direction of the ActionAxis.
+  // Current live angle of a joint action, in degrees. Returns an
+  // anatomically-meaningful signed angle: positive = in the direction of
+  // the positive-axis-rotation convention for the joint.
   //
-  // Hinges (elbow/knee/ankle) use dirToHingeAngle directly — they have
-  // exactly one DOF, so the action "angle" is unambiguous.
+  // HINGES (elbow/knee/ankle): dirToHingeAngle directly — the joint has a
+  // single DOF and the signed angle is already unambiguous.
   //
-  // isBoneAxis actions (IR/ER) come from the twist value.
+  // TWISTS (IR/ER, isBoneAxis): from the stored twist value, sign-flipped
+  // on the right so "positive = external rotation" for both sides.
   //
-  // Ball-socket actions project the bone direction onto the plane
-  // perpendicular to the action's axis, compute the signed angle from a
-  // neutral direction in that plane, and return it. This is a simplified
-  // metric — it doesn't follow clinical convention for coupled actions
-  // like horizontal ab/ad at non-neutral abduction — but it's consistent
-  // and reversible, which is what matters for limit comparisons.
+  // BALL-SOCKET DIRECTION ACTIONS (shoulder/hip flex-ext, abd-add, horiz):
+  // projected onto the relevant anatomical plane.  The cross-product
+  // approach we used to use has a gimbal-lock singularity when the action
+  // axis is parallel to neutral (which is why horizontal ab/ad reported
+  // structurally zero before).  These plane-projection formulas are
+  // defined everywhere and match intuition:
   //
-  // For left-side bones, the sign is flipped on the Z and Y axes so both
-  // sides report the same positive direction (e.g. abduction always reads
-  // positive regardless of side). X-axis rotations (flexion) are
-  // bilaterally symmetric and don't need flipping.
+  //     flex  = atan2(−dir.z, dir.y)              (sagittal plane, YZ)
+  //     abd   = atan2(dir.x · sideSign, dir.y)    (frontal plane, XY)
+  //     horiz = atan2(−dir.z, dir.x · sideSign)   (transverse plane, XZ)
+  //
+  // where sideSign = +1 for right, −1 for left (mirrors the frontal-plane
+  // component for bilateral symmetry).
+  //
+  // Sample outputs (right arm):
+  //     neutral (0, 1, 0)            → flex  0  | abd  0 | horiz  0
+  //     T-pose (1, 0, 0)             → flex  0  | abd 90 | horiz  0
+  //     forward (0, 0, −1)           → flex 90  | abd  0 | horiz 90
+  //     overhead (0, −1, 0)          → flex 180 | abd 180| horiz  0
+  //     across body (−1, 0, 0)       → flex  0  | abd −90| horiz 180
+  //     behind (0, 0, 1)             → flex −90 | abd  0 | horiz −90
+  //     45° abd + 45° fwd            → flex 90  | abd 90 | horiz 45
+  //
+  // Mixed poses show nonzero values in multiple sections simultaneously;
+  // that's expected — the arm is genuinely partially in each anatomical
+  // plane. Muscle distribution inside each section is independent of the
+  // others, driven by its own torque demand, so this doesn't double-count.
   const getActionAngle = (
       boneId: string,
       action: ActionAxis,
@@ -2498,9 +2649,26 @@ const BioModelPage: React.FC = () => {
       }
       const dir = curPosture[boneId];
       if (!dir) return 0;
-      const axisN = normalize(action.axis);
+      const ax = action.axis;
+      const sideSign = boneId.startsWith('l') ? -1 : 1;
+      const rad = 180 / Math.PI;
+      // Flexion/Extension axis: X axis dominant → signed angle in sagittal plane.
+      if (Math.abs(ax.x) > 0.5) {
+          return Math.atan2(-dir.z, dir.y) * rad;
+      }
+      // Abduction/Adduction axis: Z axis dominant → signed angle in frontal plane.
+      if (Math.abs(ax.z) > 0.5) {
+          return Math.atan2(dir.x * sideSign, dir.y) * rad;
+      }
+      // Horizontal ab/ad: world-Y axis (useWorldAxis) → angle in transverse plane.
+      if (action.useWorldAxis && Math.abs(ax.y) > 0.5) {
+          return Math.atan2(-dir.z, dir.x * sideSign) * rad;
+      }
+      // Fallback: generic cross-product projection for any axis that doesn't
+      // match one of the standard anatomical planes. Kept as a safety net;
+      // the current JOINT_ACTIONS set doesn't exercise it.
+      const axisN = normalize(ax);
       const neutral = { x: 0, y: 1, z: 0 };
-      // Project both into the plane perpendicular to the action axis.
       const dirPerp = sub(dir, mul(axisN, dotProduct(dir, axisN)));
       const neutralPerp = sub(neutral, mul(axisN, dotProduct(neutral, axisN)));
       if (magnitude(dirPerp) < 1e-6 || magnitude(neutralPerp) < 1e-6) return 0;
@@ -2509,10 +2677,7 @@ const BioModelPage: React.FC = () => {
       const cosA = clamp(dotProduct(a, b), -1, 1);
       const cross = crossProduct(b, a);
       const sign = Math.sign(dotProduct(cross, axisN)) || 1;
-      let angleDeg = Math.acos(cosA) * sign * 180 / Math.PI;
-      // Bilateral flip: for left-side bones, negate actions whose axis is
-      // perpendicular to the sagittal plane (Z or Y components). X-axis
-      // actions are symmetric across the body's midline.
+      let angleDeg = Math.acos(cosA) * sign * rad;
       if (boneId.startsWith('l') && Math.abs(axisN.x) < 0.5) {
           angleDeg = -angleDeg;
       }
@@ -3406,7 +3571,37 @@ const BioModelPage: React.FC = () => {
           if (!ax) continue;
           const isPositive = ax.positiveAction === directionName;
           const rawAngle = getActionAngle(d.boneId, ax, framePosture, frameTwists);
-          const directionAngle = isPositive ? rawAngle : -rawAngle;
+
+          // directionAngle: "degrees in the direction of THIS section's
+          // action." Positive = more action direction; negative = opposite.
+          //
+          // getActionAngle's rawAngle sign depends on axis type. After the
+          // shift to plane-projection angles for ball-socket direction
+          // actions, the relationships are:
+          //
+          //   • Ball-socket flex/abd (new formula): rawAngle positive aligns
+          //     with the positive action (flex positive = flexed, abd
+          //     positive = abducted). actionSign = +1.
+          //   • Ball-socket horizontal (new formula, useWorldAxis):
+          //     rawAngle positive = arm rotating in transverse plane toward
+          //     across-body, which is horizontal ADDUCTION = NEGATIVE
+          //     action. actionSign = −1.
+          //   • Twist (isBoneAxis): positive = ER = positive action.
+          //     actionSign = +1.
+          //   • Hinge (knee/elbow/ankle, unchanged atan2-based formula):
+          //     positive rawAngle = flexion for knee/elbow (negative action
+          //     since their positiveAction is Extension) or plantar for
+          //     ankle (also negative action). actionSign = −1.
+          //
+          // Then: positive section: directionAngle = rawAngle * actionSign
+          //       negative section: directionAngle = −rawAngle * actionSign
+          // Net: positive directionAngle = more of this section's action.
+          const isHinge = /Forearm|Tibia|Foot/.test(d.boneId);
+          const actionSign = ax.isBoneAxis ? 1 :
+                             ax.useWorldAxis ? -1 :
+                             isHinge ? -1 :
+                             1;
+          const directionAngle = rawAngle * actionSign * (isPositive ? 1 : -1);
 
           const sectionKey = `${d.jointGroup}.${actionKey(directionName)}`;
           // 1) PRIMARY: muscles assigned to this direction get positive
@@ -6027,16 +6222,28 @@ const BioModelPage: React.FC = () => {
           {activeTab === 'muscles' && (() => {
               // Per-section X-axis range. Pull from joint limits when an
               // ${group}.action.${positiveAction} entry exists, else fall back
-              // to 0–180 (matches the Joint Capacities slider range). The
-              // fallback also kicks in when the limit's max is too small to
-              // graph against (e.g. Elbow.action.Extension max=160 is fine,
-              // but a degenerate range would render an unreadable strip).
+              // to 0–180 (matches the Joint Capacities slider range).
+              //
+              // The directionAngle convention (see distributeMuscleLoadForFrame):
+              //   For non-bone-axis + non-world-axis rotations/hinges, the
+              //   cross-product sign flip puts positive rawAngle in the
+              //   NEGATIVE action direction. The section's directionAngle
+              //   negates that so positive = action direction. For bone-axis
+              //   (twist) and world-axis (horizontal) actions, rawAngle
+              //   already matches the positive action direction.
+              //
+              // Action-based limits (knee/elbow/ankle hinges + IR/ER twists)
+              // are stored in rawAngle units. To get the graph's x-axis
+              // range in directionAngle units we apply the same sign flip
+              // that maps rawAngle → directionAngle.
               const getActionRange = (group: JointGroup, ax: ActionAxis, isPositive: boolean): { min: number; max: number } => {
                   const lim = jointLimits[`${group}.action.${ax.positiveAction}`];
-                  if (lim) {
-                      const lo = isPositive ? 0 : 0;
-                      const hi = isPositive ? Math.max(0, lim.max) : Math.max(0, -lim.min);
-                      if (hi >= 30) return { min: lo, max: hi };
+                  if (lim && Math.abs(lim.max - lim.min) >= 30) {
+                      const actionSign = (ax.isBoneAxis || ax.useWorldAxis) ? 1 : -1;
+                      const flip = actionSign * (isPositive ? 1 : -1);
+                      const a = lim.min * flip;
+                      const b = lim.max * flip;
+                      return { min: Math.min(a, b), max: Math.max(a, b) };
                   }
                   return { min: 0, max: 180 };
               };
@@ -6265,8 +6472,8 @@ const BioModelPage: React.FC = () => {
                                                                           <div className="flex items-center gap-2">
                                                                               <input
                                                                                   type="range"
-                                                                                  min={Math.min(range.min, -90)}
-                                                                                  max={Math.max(range.max, 180)}
+                                                                                  min={-180}
+                                                                                  max={180}
                                                                                   value={isNaN(c.angle) ? 0 : c.angle}
                                                                                   onChange={(e) => updateMuscleContribution(sectionKey, id, 'angle', parseFloat(e.target.value))}
                                                                                   className="flex-1 bio-range text-teal-500"
