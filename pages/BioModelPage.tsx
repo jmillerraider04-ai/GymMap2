@@ -6323,14 +6323,47 @@ const BioModelPage: React.FC = () => {
                        </p>
                    </div>
                    <div className="flex-1 overflow-y-auto pr-2 space-y-6">
-                       {Object.entries(jointCapacities).map(([group, actions]) => (
+                       {Object.entries(jointCapacities).map(([group, actions]) => {
+                           const groupBones = GROUP_BONES[group as JointGroup];
+                           return (
                            <div key={group}>
                                <h4 className="font-bold text-gray-900 text-xs uppercase tracking-wide mb-3 sticky top-0 bg-white py-2 border-b border-gray-100">{group}</h4>
                                <div className="space-y-4">
-                                   {Object.entries(actions).map(([action, config]) => (
+                                   {Object.entries(actions).map(([action, config]) => {
+                                       // Find the ActionAxis that matches this capacity entry's
+                                       // action-key so we can sample getActionAngle on each side
+                                       // and render a live position marker against the peak-angle
+                                       // slider. Capacities are evaluated at rawAngle (not the
+                                       // sign-flipped directionAngle muscles use), so the markers
+                                       // here show rawAngle directly.
+                                       const ax = JOINT_ACTIONS[group as JointGroup]?.find(a =>
+                                           actionKey(a.positiveAction) === action ||
+                                           actionKey(a.negativeAction) === action
+                                       );
+                                       const lCap = (ax && groupBones)
+                                           ? getActionAngle(groupBones.left, ax, posture, twists)
+                                           : null;
+                                       const rCap = (ax && groupBones)
+                                           ? getActionAngle(groupBones.right, ax, posture, twists)
+                                           : null;
+                                       // Track spans from -180 to 180 and matches the slider range.
+                                       const capTrackMin = -180;
+                                       const capTrackMax = 180;
+                                       const capPct = (v: number) => ((v - capTrackMin) / (capTrackMax - capTrackMin)) * 100;
+                                       return (
                                        <div key={action} className="bg-gray-50 rounded-xl p-3 border border-gray-100">
                                            <div className="flex justify-between items-center mb-2">
                                                <span className="text-xs font-bold text-gray-700 capitalize">{action.replace(/([A-Z])/g, ' $1').trim()}</span>
+                                               {groupBones && (
+                                                   <div className="flex items-center gap-2 text-[9px] font-mono">
+                                                       <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">
+                                                           L {lCap !== null ? `${Math.round(lCap)}°` : '—'}
+                                                       </span>
+                                                       <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700">
+                                                           R {rCap !== null ? `${Math.round(rCap)}°` : '—'}
+                                                       </span>
+                                                   </div>
+                                               )}
                                            </div>
                                            <div className="grid grid-cols-2 gap-4 mb-2">
                                                <div>
@@ -6345,52 +6378,133 @@ const BioModelPage: React.FC = () => {
                                             <div>
                                                <label className="text-[9px] font-bold text-gray-400 uppercase block mb-1">Peak Angle (°)</label>
                                                <div className="flex items-center gap-2">
-                                                   <input type="range" min="0" max="180" value={isNaN(config.angle) ? 0 : config.angle} onChange={(e) => updateCapacity(group as JointGroup, action, 'angle', parseFloat(e.target.value))} className="flex-1 bio-range text-purple-500" />
-                                                   <span className="text-[10px] font-mono font-bold text-gray-500 w-8 text-right">{isNaN(config.angle) ? 0 : config.angle}°</span>
+                                                   <input type="range" min={-180} max={180} value={isNaN(config.angle) ? 0 : config.angle} onChange={(e) => updateCapacity(group as JointGroup, action, 'angle', parseFloat(e.target.value))} className="flex-1 bio-range text-purple-500" />
+                                                   <span className="text-[10px] font-mono font-bold text-gray-500 w-10 text-right">{isNaN(config.angle) ? 0 : config.angle}°</span>
                                                </div>
+                                               {/* Live-position track. Shows the peak angle, the
+                                                   zero reference, and each side's current rawAngle
+                                                   together on a single visual bar so the user can
+                                                   see where the capacity bell will be evaluated for
+                                                   the current pose. */}
+                                               {groupBones && (
+                                                   <div className="relative h-4 mt-2 mb-1">
+                                                       <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-1 bg-gray-200 rounded-full" />
+                                                       {/* Zero tick */}
+                                                       <div className="absolute top-1/2 -translate-y-1/2 w-px h-3 bg-gray-300" style={{ left: `${capPct(0)}%` }} />
+                                                       {/* Peak-angle marker (purple, matches slider colour) */}
+                                                       <div
+                                                           className="absolute top-1/2 -translate-y-1/2 w-2.5 h-2.5 -ml-1.5 rounded-sm bg-purple-500 border border-white shadow"
+                                                           style={{ left: `${clamp(capPct(config.angle || 0), 0, 100)}%` }}
+                                                           title={`Peak: ${Math.round(config.angle || 0)}°`}
+                                                       />
+                                                       {lCap !== null && (
+                                                           <div
+                                                               className="absolute top-1/2 -mt-1 -ml-1 w-2 h-2 rounded-full bg-blue-500 border border-white shadow"
+                                                               style={{ left: `${clamp(capPct(lCap), 0, 100)}%` }}
+                                                               title={`Left: ${Math.round(lCap)}°`}
+                                                           />
+                                                       )}
+                                                       {rCap !== null && (
+                                                           <div
+                                                               className="absolute top-1/2 -mt-1 -ml-1 w-2 h-2 rounded-full bg-indigo-600 border border-white shadow"
+                                                               style={{ left: `${clamp(capPct(rCap), 0, 100)}%` }}
+                                                               title={`Right: ${Math.round(rCap)}°`}
+                                                           />
+                                                       )}
+                                                   </div>
+                                               )}
                                            </div>
                                        </div>
-                                   ))}
+                                       );
+                                   })}
                                </div>
                            </div>
-                       ))}
+                           );
+                       })}
                    </div>
                </div>
           )}
 
           {activeTab === 'muscles' && (() => {
               // Per-section X-axis range. Pull from joint limits when an
-              // ${group}.action.${positiveAction} entry exists, else fall back
-              // to 0–180 (matches the Joint Capacities slider range).
+              // Derive the graph's X-axis range from the joint's actual
+              // angular limits so the muscle bell curves are plotted
+              // against the real reachable ROM — no wasted territory and
+              // no clipped peaks.
               //
-              // The directionAngle convention (see distributeMuscleLoadForFrame):
-              //   For non-bone-axis + non-world-axis rotations/hinges, the
-              //   cross-product sign flip puts positive rawAngle in the
-              //   NEGATIVE action direction. The section's directionAngle
-              //   negates that so positive = action direction. For bone-axis
-              //   (twist) and world-axis (horizontal) actions, rawAngle
-              //   already matches the positive action direction.
+              // Three cases:
               //
-              // Action-based limits (knee/elbow/ankle hinges + IR/ER twists)
-              // are stored in rawAngle units. To get the graph's x-axis
-              // range in directionAngle units we apply the same sign flip
-              // that maps rawAngle → directionAngle.
+              //   1. Hinges (Knee / Elbow / Ankle) and twists (IR/ER):
+              //      the limits are stored as action angles in rawAngle
+              //      space. Map them to directionAngle space by applying
+              //      the same actionSign * isPositive flip that
+              //      distributeMuscleLoadForFrame uses at runtime.
+              //
+              //   2. Ball-socket direction actions (Shoulder / Hip
+              //      flex-ext, abd-add, horiz): the limits are per-
+              //      component bounds on the unit direction vector
+              //      (dir.x/y/z). Reconstruct the achievable rawAngle
+              //      range by sampling the formula at the corners of the
+              //      limit box, then flip to directionAngle. The corner
+              //      sampling is a loose upper bound — the real ROM is
+              //      narrower because of the unit-magnitude constraint —
+              //      but it keeps the math cheap and is perfectly safe
+              //      for a display range (no values are clipped off).
+              //
+              //   3. Anything else: fall back to 0–180.
               const getActionRange = (group: JointGroup, ax: ActionAxis, isPositive: boolean): { min: number; max: number } => {
-                  const lim = jointLimits[`${group}.action.${ax.positiveAction}`];
-                  if (lim && Math.abs(lim.max - lim.min) >= 30) {
-                      // Map rawAngle-space limits → directionAngle-space
-                      // graph range. End result is the same for all hinges
-                      // (the inversion between elbow's limit-value vs
-                      // rawAngle cancels with the inverse runtime actionSign):
-                      // negative-direction (flexion) section maps to
-                      // positive directionAngle, positive-direction
-                      // (extension) section maps to negative.
-                      const actionSign = (ax.isBoneAxis || ax.useWorldAxis) ? 1 : -1;
-                      const flip = actionSign * (isPositive ? 1 : -1);
-                      const a = lim.min * flip;
-                      const b = lim.max * flip;
+                  const isHinge = group === 'Knee' || group === 'Elbow' || group === 'Ankle';
+                  const actionSign = ax.isBoneAxis ? 1 :
+                                     ax.useWorldAxis ? -1 :
+                                     isHinge ? -1 : 1;
+                  const flip = actionSign * (isPositive ? 1 : -1);
+
+                  // Case 1: hinge / twist action limits.
+                  const actionLim = jointLimits[`${group}.action.${ax.positiveAction}`];
+                  if (actionLim && Math.abs(actionLim.max - actionLim.min) >= 30) {
+                      const a = actionLim.min * flip;
+                      const b = actionLim.max * flip;
                       return { min: Math.min(a, b), max: Math.max(a, b) };
                   }
+
+                  // Case 2: ball-socket direction actions. Sample the
+                  // corners of the dir.x × dir.y × dir.z limit box.
+                  if ((group === 'Shoulder' || group === 'Hip') && !ax.isBoneAxis) {
+                      const xLim = jointLimits[`${group}.dir.x`];
+                      const yLim = jointLimits[`${group}.dir.y`];
+                      const zLim = jointLimits[`${group}.dir.z`];
+                      if (xLim && yLim && zLim) {
+                          const rad = 180 / Math.PI;
+                          const raws: number[] = [];
+                          for (const x of [xLim.min, 0, xLim.max]) {
+                              for (const y of [yLim.min, 0, yLim.max]) {
+                                  for (const z of [zLim.min, 0, zLim.max]) {
+                                      // Limits are bilaterally normalized
+                                      // (right-side convention), so we
+                                      // sample with sideSign = +1 — the
+                                      // left side has a symmetric range.
+                                      let raw: number;
+                                      if (Math.abs(ax.axis.x) > 0.5) {
+                                          raw = Math.atan2(-z, y) * rad;          // flex/ext
+                                      } else if (Math.abs(ax.axis.z) > 0.5) {
+                                          raw = Math.atan2(x, y) * rad;           // abd/add
+                                      } else if (ax.useWorldAxis && Math.abs(ax.axis.y) > 0.5) {
+                                          raw = Math.atan2(-z, x) * rad;          // horizontal
+                                      } else {
+                                          continue;
+                                      }
+                                      raws.push(raw);
+                                  }
+                              }
+                          }
+                          if (raws.length > 0) {
+                              const flipped = raws.map(v => v * flip);
+                              return { min: Math.min(...flipped), max: Math.max(...flipped) };
+                          }
+                      }
+                  }
+
+                  // Case 3: fallback.
                   return { min: 0, max: 180 };
               };
 
@@ -6453,6 +6567,34 @@ const BioModelPage: React.FC = () => {
                                                   min: Math.min(baseRange.min, ...peakAngles),
                                                   max: Math.max(baseRange.max, ...peakAngles),
                                               };
+
+                                              // Current live directionAngle for each side's bone in this
+                                              // section, computed the same way distributeMuscleLoadForFrame
+                                              // does it so the marker lands exactly where the bell is
+                                              // evaluated at runtime. Widen the graph range to include the
+                                              // live positions so the marker never clips off the edge.
+                                              const sectionGroupBones = GROUP_BONES[group];
+                                              const sectionIsHinge = sectionGroupBones
+                                                  ? /Forearm|Tibia|Foot/.test(sectionGroupBones.left)
+                                                  : false;
+                                              const sectionActionSign = ax.isBoneAxis ? 1 :
+                                                  ax.useWorldAxis ? -1 :
+                                                  sectionIsHinge ? -1 :
+                                                  1;
+                                              const liveDirAngle = (boneId: string): number => {
+                                                  const ra = getActionAngle(boneId, ax, posture, twists);
+                                                  return ra * sectionActionSign * (isPositive ? 1 : -1);
+                                              };
+                                              const lLive = sectionGroupBones ? liveDirAngle(sectionGroupBones.left) : null;
+                                              const rLive = sectionGroupBones ? liveDirAngle(sectionGroupBones.right) : null;
+                                              if (lLive !== null) {
+                                                  range.min = Math.min(range.min, lLive);
+                                                  range.max = Math.max(range.max, lLive);
+                                              }
+                                              if (rLive !== null) {
+                                                  range.min = Math.min(range.min, rLive);
+                                                  range.max = Math.max(range.max, rLive);
+                                              }
 
                                               // Sample the bell curves across
                                               // the X range, normalize each
@@ -6562,6 +6704,35 @@ const BioModelPage: React.FC = () => {
                                                                           strokeWidth="0.5"
                                                                       />
                                                                   ))}
+                                                                  {/* Current-position indicators: vertical dashed lines
+                                                                      at each side's live directionAngle, matching
+                                                                      the colors used by the Joint Limits tab
+                                                                      (blue L / indigo R). The range was widened
+                                                                      above to always include these positions. */}
+                                                                  {lLive !== null && (
+                                                                      <g>
+                                                                          <line
+                                                                              x1={xAt(lLive)} x2={xAt(lLive)}
+                                                                              y1={0} y2={SVG_H}
+                                                                              stroke="#3b82f6" strokeWidth="1.2"
+                                                                              strokeDasharray="3 2" opacity="0.9"
+                                                                          />
+                                                                          <circle cx={xAt(lLive)} cy={3} r="2.5" fill="#3b82f6" />
+                                                                          <title>{`Left: ${Math.round(lLive)}°`}</title>
+                                                                      </g>
+                                                                  )}
+                                                                  {rLive !== null && (
+                                                                      <g>
+                                                                          <line
+                                                                              x1={xAt(rLive)} x2={xAt(rLive)}
+                                                                              y1={0} y2={SVG_H}
+                                                                              stroke="#4f46e5" strokeWidth="1.2"
+                                                                              strokeDasharray="3 2" opacity="0.9"
+                                                                          />
+                                                                          <circle cx={xAt(rLive)} cy={3} r="2.5" fill="#4f46e5" />
+                                                                          <title>{`Right: ${Math.round(rLive)}°`}</title>
+                                                                      </g>
+                                                                  )}
                                                                   {/* X-axis labels */}
                                                                   <text x="0" y={SVG_H + 12} fontSize="9" fill="#9ca3af">{range.min.toFixed(0)}°</text>
                                                                   <text x={SVG_W} y={SVG_H + 12} fontSize="9" fill="#9ca3af" textAnchor="end">{range.max.toFixed(0)}°</text>
