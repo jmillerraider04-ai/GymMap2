@@ -453,293 +453,398 @@ const MUSCLE_CATALOG: MuscleDef[] = [
 //   elevation (angle = +150).
 const m = (base: number, peak: number, angle: number): MuscleContribution => ({ base, peak, angle });
 const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
-    // --- SHOULDER ---
+    // =========================================================================
+    // SHOULDER
+    // =========================================================================
+    // Angle conventions (directionAngle, post-actionSign):
+    //   Flexion section: 0=arm-at-side, +90=forward horizontal, +180=overhead
+    //     via flex, negative=extended behind body.
+    //   Extension section: 0=arm-at-side, +30=behind body (limit), negative=
+    //     arm flexed forward (so peak at -90 means muscle is most active when
+    //     arm is 90° flexed forward and extension demand pulls it back down).
+    //   Abduction: 0=side, +90=T-pose, +180=overhead via abd.
+    //   Adduction: 0=side, -90=T-pose, -180=overhead via abd, +90=cross-body.
+    //   HorizontalAdduction: 0=T-pose, +90=arm forward, +135+=cross-body.
+    //   HorizontalAbduction: 0=T-pose, +90=arm pulled behind body, negative=
+    //     arm in front.
+
     'Shoulder.flexion': {
-        // Primary: anterior delt peaks mid-flexion where its moment arm
-        // is maximal (~90°). Pec clavicular strong early, loses leverage
-        // as the arm goes above the head.
-        'delt-front':        m(25, 100, 90),
-        'pec-clavicular':    m(30, 90, 60),
-        // Biceps long + short head cross the GH joint anteriorly; modest
-        // flexion assist, strongest mid-range.
+        // Anterior delt's line of pull becomes most advantageous as the arm
+        // elevates — peaks relatively LATE in flexion (past horizontal).
+        'delt-front':        m(30, 100, 110),
+        // Clavicular pec pulls the arm forward/up with best leverage from
+        // neutral to ~60°; falls off quickly above the horizontal.
+        'pec-clavicular':    m(35, 95, 50),
+        // Biceps brachii: both heads cross GH anteriorly, modest assist.
         'biceps-long':       m(12, 30, 60),
         'biceps-short':      m(12, 28, 60),
-        // Scapulohumeral rhythm: scapular upward rotators become essential
-        // past ~90° elevation. Bell peaks near full overhead.
-        'traps-lower':       m(5, 22, 150),
-        'serratus-anterior': m(5, 20, 150),
+        // Scapulohumeral rhythm: scapular upward rotators are essential past
+        // ~60° elevation. Assigned here with small contribution so that arm
+        // elevation automatically recruits them — peaks near full overhead.
+        'traps-lower':       m(5, 25, 150),
+        'serratus-anterior': m(5, 22, 150),
         'traps-upper':       m(4, 15, 150),
+        // Supraspinatus contributes initial elevation (GH-level, not just abd).
+        'supraspinatus':     m(4, 12, 20),
+        // Coracobrachialis (not in catalog) would be here.
     },
     'Shoulder.extension': {
-        // Lats + teres major peak in mid-ROM pulldown (arm flexed forward
-        // ~90°, muscle stretched with good moment arm). Negative angle =
-        // peak in the FLEXION direction (opposite to extension).
-        'lats':         m(30, 110, -90),
-        'teres-major':  m(25, 85, -60),
-        'pec-sternal':  m(20, 70, -60),
-        // Posterior delt active through most of extension, peaks near
-        // neutral / slightly flexed (closer to the middle of the action
-        // direction).
-        'delt-rear':    m(30, 80, -30),
-        // Triceps long head crosses the shoulder posteriorly; strongest
-        // extension moment with the arm overhead (stretched).
-        'triceps-long': m(15, 50, -120),
+        // Lats dominate mid-range pulldown (arm ~60° flexed forward, stretched
+        // with strong moment arm). Falls OFF when the arm goes near overhead
+        // — this is where pec sternal takes over per neuromechanical matching.
+        'lats':           m(30, 110, -60),
+        'teres-major':    m(25, 90, -60),
+        // Sternal pec becomes the dominant extensor/adductor at high
+        // elevation — best mechanical advantage for the stretched line of
+        // pull when the arm is overhead being pulled down.
+        'pec-sternal':    m(25, 95, -120),
+        // Posterior delt works through most of extension, peaks near neutral
+        // (the dedicated rear-delt range).
+        'delt-rear':      m(30, 85, -20),
+        // Triceps long head: strongest extension moment with arm overhead
+        // (stretched, same territory as sternal pec).
+        'triceps-long':   m(12, 45, -120),
+        // Rhomboids / mid traps don't directly extend GH, but their
+        // contribution shows up via scapular retraction coupling; keeping
+        // them OUT of this section avoids double-counting (they'll appear
+        // through the Scapula.retraction path).
     },
     'Shoulder.abduction': {
-        // Primary abductor: lateral deltoid (mid-range peak), supraspinatus
-        // initiates. Anterior delt shares anterior fibers and assists.
-        'delt-side':         m(30, 100, 90),
+        // Lateral delt is the workhorse; peaks mid-range (~T-pose).
+        'delt-side':         m(35, 100, 90),
+        // Supraspinatus initiates the first 0-30°, then tapers off quickly.
         'supraspinatus':     m(40, 90, 15),
-        'delt-front':        m(12, 35, 60),
-        // S/H rhythm overhead assists.
-        'traps-lower':       m(5, 22, 150),
-        'serratus-anterior': m(5, 20, 150),
+        // Anterior delt's anterior fibers share the abduction role, peak
+        // slightly later than peak pure-abd because it tilts the arm
+        // forward as well.
+        'delt-front':        m(12, 38, 75),
+        // Posterior delt fibers assist past 90° (overhead work).
+        'delt-rear':         m(6, 20, 120),
+        // S/H rhythm: upward rotators essential past 60° elevation.
+        'traps-lower':       m(5, 25, 150),
+        'serratus-anterior': m(5, 22, 150),
         'traps-upper':       m(4, 15, 150),
-        // Biceps long head becomes an abductor past ~90° with the arm
-        // externally rotated (tendon rides anterior to the humeral head).
+        // Infraspinatus keeps the humeral head centered (stabilization),
+        // firing more in mid-range abduction.
+        'infraspinatus':     m(8, 22, 90),
+        'teres-minor':       m(5, 12, 90),
+        // Biceps long head becomes a weak abductor past 90° if the shoulder
+        // is externally rotated (tendon rides anterior to head).
         'biceps-long':       m(3, 12, 120),
-        // Infraspinatus stabilizes through mid/late abduction, keeping
-        // the humeral head centered.
-        'infraspinatus':     m(8, 20, 90),
     },
     'Shoulder.adduction': {
-        // Lats + pec sternal are the strongest adductors from an elevated
-        // (abducted) position — stretched at arm abducted 90°, which is
-        // the OPPOSITE direction from adduction → negative angle.
-        'lats':          m(25, 110, -90),
-        'pec-sternal':   m(25, 110, -90),
-        'teres-major':   m(20, 80, -60),
-        'subscapularis': m(10, 28, -60),
-        // Arm-overhead assists: biceps + triceps long head + posterior
-        // delt all pull the arm downward when it's near full elevation
-        // (further in the opposite direction than abducted 90°).
-        'biceps-long':   m(4, 18, -120),
-        'biceps-short':  m(4, 18, -120),
-        'triceps-long':  m(5, 20, -120),
-        'delt-rear':     m(5, 20, -120),
+        // Same as extension: lats dominate mid-range, pecs dominate overhead.
+        'lats':           m(25, 105, -60),
+        'pec-sternal':    m(30, 115, -120),
+        'teres-major':    m(22, 85, -60),
+        // Subscapularis contributes to pulling the arm back down from
+        // overhead; modest role.
+        'subscapularis':  m(10, 30, -90),
+        // Triceps long head: extension+adduction at full elevation.
+        'triceps-long':   m(10, 35, -120),
+        // Biceps long + short heads: small adduction contribution when arm
+        // is overhead; the line of pull from the coracoid/supraglenoid
+        // tubercle toward the radius pulls the arm down-and-medial.
+        'biceps-long':    m(5, 20, -120),
+        'biceps-short':   m(5, 20, -120),
+        // Posterior delt: small assist near overhead.
+        'delt-rear':      m(5, 18, -120),
+        // Clavicular pec: assists pure pull-down from overhead.
+        'pec-clavicular': m(6, 22, -120),
+        // Cross-body pure adduction (arm crossing midline at side): some
+        // of the same primary muscles work, bell peak around +60.
+        // Already covered — lats/pecs at the bell tails can still contribute
+        // there. For dedicated cross-body-low adduction, subscapularis + pec
+        // clavicular have small bells with positive peaks (added separately
+        // would double the entries; keeping it simple with their -120 peaks
+        // and letting the bell tails cover the cross-body region).
     },
     'Shoulder.horizontalAdduction': {
-        // Horizontal actions: getActionAngle is structurally zero for
-        // world-vertical axes, so we place all peaks at 0 and let the
-        // ratios do the work.
-        'pec-sternal':    m(30, 110, 0),
-        'pec-clavicular': m(25, 90, 0),
-        'delt-front':     m(25, 75, 0),
-        // Biceps brachii: both heads originate anterior to the GH joint
-        // on the scapula, giving a real horizontal-adduction line of pull.
-        'biceps-long':    m(8, 20, 0),
-        'biceps-short':   m(10, 25, 0),
-        // Subscapularis' anterior line of pull couples IR + horizontal add.
-        'subscapularis':  m(10, 28, 0),
+        // Pec sternal dominates cross-body motion; peaks in mid-to-late
+        // horizontal adduction (arm coming across midline).
+        'pec-sternal':       m(35, 115, 70),
+        // Pec clavicular is strongest earlier in the ROM (arm forward, before
+        // it crosses midline).
+        'pec-clavicular':    m(30, 95, 40),
+        // Anterior delt is a big contributor, peaks forward.
+        'delt-front':        m(25, 80, 40),
+        // Biceps both heads assist via their anterior line of pull on the
+        // scapula (coracoid + supraglenoid tubercle).
+        'biceps-long':       m(8, 25, 60),
+        'biceps-short':      m(10, 30, 60),
+        // Subscapularis' anterior line of pull couples IR + horiz add.
+        'subscapularis':     m(10, 30, 30),
+        // Serratus anterior protracts the scapula, assisting the motion.
+        'serratus-anterior': m(8, 25, 60),
+        // Coracobrachialis (not in catalog) would belong here.
     },
     'Shoulder.horizontalAbduction': {
-        'delt-rear':     m(30, 110, 0),
-        'infraspinatus': m(25, 70, 0),
-        'teres-minor':   m(20, 60, 0),
-        // Small posterior-line-of-pull assists from the back:
-        'teres-major':   m(6, 15, 0),
-        'lats':          m(5, 12, 0),
-        'triceps-long':  m(4, 10, 0),
+        // Posterior delt is primary mover; peaks near T-pose (start of
+        // motion) and slightly past (into behind-body territory).
+        'delt-rear':     m(35, 115, 15),
+        // Rotator cuff posterior: infraspinatus + teres minor both peak
+        // around T-pose.
+        'infraspinatus': m(25, 75, 0),
+        'teres-minor':   m(20, 65, 0),
+        // Small posterior-line-of-pull assists:
+        'teres-major':   m(6, 18, 15),
+        'lats':          m(5, 15, 30),
+        // Triceps long head is behind the GH axis, small contribution
+        // especially at extreme horizontal abduction.
+        'triceps-long':  m(4, 12, 30),
+        // Note: rhomboids and mid traps were removed from this section —
+        // they're scapular retractors, not humeral horizontal abductors.
+        // Their activation in row-like motions comes through the
+        // Scapula.retraction path.
     },
     'Shoulder.internalRotation': {
-        'subscapularis':  m(40, 100, 0),
+        // Convention: positive = more IR (per twist actionSign = +1).
+        'subscapularis':  m(40, 100, 15),
         'lats':           m(25, 75, 0),
         'pec-sternal':    m(20, 65, 0),
         'teres-major':    m(20, 60, 0),
-        'delt-front':     m(15, 40, 0),
+        'delt-front':     m(15, 40, 15),
         'pec-clavicular': m(10, 28, 0),
-        // Biceps short head has a small IR moment via its coracoid origin.
-        'biceps-short':   m(6, 14, 0),
+        // Biceps short head: small IR moment via coracoid origin.
+        'biceps-short':   m(6, 15, 0),
     },
     'Shoulder.externalRotation': {
-        'infraspinatus': m(40, 100, 0),
-        'teres-minor':   m(30, 90, 0),
+        'infraspinatus': m(40, 100, 10),
+        'teres-minor':   m(30, 90, 10),
         'delt-rear':     m(20, 55, 0),
-        // Supraspinatus contributes a small ER moment as part of the
-        // rotator-cuff force couple decelerating IR.
+        // Supraspinatus contributes a small ER moment (part of the rotator
+        // cuff force couple decelerating IR and centering the head).
         'supraspinatus': m(6, 18, 0),
     },
 
-    // --- ELBOW ---
+    // =========================================================================
+    // ELBOW
+    // =========================================================================
+    // Convention: Elbow.flexion section directionAngle goes 0 (straight) to
+    // +~160 (full flex). Peak at LOW section angle = muscle strong when elbow
+    // open; peak at HIGH section angle = muscle strong when elbow bent.
+    // Elbow.extension section goes 0 (straight) to -~160 (full flex). Peak
+    // at negative = muscle strong when elbow bent (stretched).
+
     'Elbow.flexion': {
-        // Biceps length-tension peaks around 90° flexion; brachialis has
-        // a constant moment arm and also peaks mid-range; brachioradialis
-        // takes over later in the curl as the pronation/supination axis
-        // gives it a longer lever.
-        'biceps-long':     m(25, 100, 90),
-        'biceps-short':    m(25, 100, 90),
-        'brachialis':      m(40, 115, 90),
-        'brachioradialis': m(20, 80, 110),
+        // User guidance: biceps more active at extended elbow angles,
+        // brachioradialis more active at flexed.
+        // Biceps (both heads): peak relatively early in the curl — length-
+        // tension advantage, plus the supination moment arm is best here.
+        'biceps-long':     m(30, 100, 40),
+        'biceps-short':    m(30, 100, 50),
+        // Brachialis: the workhorse of pure elbow flexion — constant moment
+        // arm, insertion on ulna (unaffected by forearm rotation), strongest
+        // in mid-range.
+        'brachialis':      m(45, 115, 90),
+        // Brachioradialis: peaks LATE in the curl. Its line of pull
+        // becomes increasingly flexion-biased as the elbow bends past 90°.
+        'brachioradialis': m(20, 85, 120),
+        // Pronator teres (not in catalog) would assist slightly.
     },
     'Elbow.extension': {
-        // Triceps long head peaks at flexed shoulder/elbow (stretched)
-        // — OPPOSITE direction from extension, so negative angle.
-        // Lateral + medial heads peak in mid-flexion (also opposite of
-        // extension direction) where their moment arm is strongest.
-        'triceps-long':    m(25, 80, -90),
+        // Triceps long head: stretched at overhead/elbow-flexed position,
+        // best when elbow is deeply flexed AND shoulder is flexed (think
+        // overhead triceps extension).
+        'triceps-long':    m(25, 85, -100),
+        // Lateral head: mid-flexion peak (stretched with strong lever).
         'triceps-lateral': m(35, 105, -60),
-        'triceps-medial':  m(30, 90, -60),
+        // Medial head: workhorse, peaks earlier than the other heads since
+        // it's the "always-on" head that fires throughout elbow extension.
+        'triceps-medial':  m(30, 95, -45),
+        // Anconeus (not in catalog) would make a small contribution.
     },
 
-    // --- HIP ---
+    // =========================================================================
+    // HIP
+    // =========================================================================
+    // Flexion: 0=standing, +90=thigh forward horizontal, +180=full flex.
+    // Extension: 0=standing, +30=extended behind, negative=hip flexed.
+    // Abduction: 0=standing, +45-+90=leg out.
+    // Adduction: 0=standing, -30-ish=leg abducted.
+
     'Hip.flexion': {
-        // Iliopsoas peaks past 60° flexion where the one-joint quad
-        // flexors (rectus femoris, TFL) have fallen off and it becomes
-        // the dominant contributor (think hanging leg-raise top).
-        'iliopsoas':       m(35, 110, 90),
-        // Rectus femoris is strongest in early flexion before it runs out
-        // of sarcomere length; TFL likewise.
-        'rectus-femoris':  m(30, 85, 30),
-        'tfl':              m(25, 60, 15),
+        // Iliopsoas becomes the dominant hip flexor past 60° flexion
+        // (hanging leg-raise top). Rectus femoris is strongest early before
+        // running out of length.
+        'iliopsoas':       m(35, 115, 100),
+        'rectus-femoris':  m(35, 90, 30),
+        'tfl':             m(25, 65, 15),
         'sartorius':       m(15, 45, 60),
-        // Pectineus is an anatomically-named short hip flexor.
         'pectineus':       m(20, 55, 30),
-        // Long/brevis adductors become hip flexors only when the hip is
-        // extended (line of pull crosses anterior to the hip axis) —
-        // peak in the OPPOSITE direction of flexion.
-        'adductor-longus': m(10, 35, -30),
-        'adductor-brevis': m(8, 25, -30),
+        // Long/brevis adductors become hip flexors when the hip is EXTENDED
+        // (their line of pull is anterior to hip axis only in that
+        // territory). Peak in OPPOSITE of flexion direction.
+        'adductor-longus': m(10, 35, -15),
+        'adductor-brevis': m(8, 25, -15),
         'gracilis':        m(5, 15, 0),
+        // Anterior fibers of glute med + glute min contribute to hip flexion
+        // in neutral to early range.
+        'glute-med':       m(5, 14, 15),
+        'glute-min':       m(4, 10, 15),
     },
     'Hip.extension': {
-        // Glute max: peaks at hip flexed ~60° — the classic "bottom of
-        // the squat" stretched position where it fires hardest. That's
-        // OPPOSITE the extension direction, hence negative angle.
-        'glute-max':       m(35, 130, -60),
-        // Hamstrings peak in mid-range hip extension (hip flexed ~30°).
-        'semitendinosus':  m(25, 85, -30),
-        'semimembranosus': m(25, 85, -30),
-        // Adductor magnus posterior fibers become hip extensors at deep
-        // flexion (stretched across the posterior hip axis).
-        'adductor-magnus': m(30, 100, -90),
-        // Glute med posterior fibers assist extension near neutral.
-        'glute-med':       m(10, 22, 0),
-        // biceps-femoris: the catalog entry represents the short head
-        // (knee flexor only — no hip extension role). Long-head hip
-        // extension is covered by semitendinosus + semimembranosus.
+        // Glute max: peaks deep in flexion (stretched, bottom of squat).
+        'glute-max':       m(35, 135, -60),
+        // Hamstrings (medial): peak in mid-range hip extension.
+        'semitendinosus':  m(25, 90, -30),
+        'semimembranosus': m(25, 90, -30),
+        // Adductor magnus (posterior fibers) becomes a major hip extensor
+        // at deep flexion (coming out of the hole of a squat).
+        'adductor-magnus': m(30, 105, -90),
+        // Glute med/min posterior fibers assist extension near neutral.
+        'glute-med':       m(10, 25, 0),
+        'glute-min':       m(6, 15, 0),
+        // biceps-femoris: the catalog entry represents the short head only
+        // (knee flexor, no hip extension role). Long-head hip extension
+        // is covered by the other hamstrings.
     },
     'Hip.abduction': {
-        'glute-med': m(35, 110, 30),
-        'glute-min': m(25, 75, 30),
-        'tfl':       m(25, 65, 15),
-        // Upper fibers of glute max contribute to abduction.
-        'glute-max': m(15, 45, 30),
-        // Sartorius' ASIS origin lends a small abduction component.
-        'sartorius': m(8, 18, 0),
+        'glute-med': m(40, 115, 30),
+        'glute-min': m(28, 80, 30),
+        'tfl':       m(28, 70, 15),
+        // Upper fibers of glute max assist abduction.
+        'glute-max': m(18, 50, 30),
+        // Sartorius's ASIS origin lends a small abduction component.
+        'sartorius': m(10, 22, 0),
+        // Piriformis (not in catalog) assists abduction in hip-flexed
+        // positions.
     },
     'Hip.adduction': {
         // Adductor group + gracilis + pectineus peak when the hip is
-        // abducted (stretched) — OPPOSITE to the adduction direction,
-        // hence negative angle.
+        // abducted (stretched, opposite of adduction direction).
         'adductor-magnus': m(40, 110, -30),
         'adductor-longus': m(30, 85, -15),
         'adductor-brevis': m(25, 65, -15),
         'gracilis':        m(15, 45, -15),
         'pectineus':       m(15, 45, 0),
-        // Glute max lower fibers contribute a small adduction moment.
-        'glute-max':       m(5, 12, 0),
+        // Glute max lower fibers contribute a small adduction moment
+        // (especially when the hip is flexed).
+        'glute-max':       m(6, 15, 0),
+        // Posterior adductor magnus fibers overlap with hamstrings.
+        'semimembranosus': m(5, 12, 0),
+        'semitendinosus':  m(4, 10, 0),
+        // Quadratus femoris (not in catalog) also adducts.
     },
     'Hip.horizontalAdduction': {
-        // Horizontal hip actions use world-vertical axis → getActionAngle
-        // returns 0 always; peak = 0 gives full weight.
-        'adductor-magnus': m(30, 90, 0),
-        'adductor-longus': m(30, 85, 0),
-        'adductor-brevis': m(25, 65, 0),
-        'gracilis':        m(15, 45, 0),
-        'pectineus':       m(25, 65, 0),
-        'iliopsoas':       m(15, 45, 0),
+        // Horizontal adduction = bringing a flexed leg across the body.
+        // All adductors active in mid-range.
+        'adductor-magnus': m(30, 95, 45),
+        'adductor-longus': m(30, 90, 45),
+        'adductor-brevis': m(25, 70, 45),
+        'gracilis':        m(15, 45, 45),
+        'pectineus':       m(25, 70, 30),
+        // Iliopsoas helps pull a flexed leg medially.
+        'iliopsoas':       m(15, 45, 60),
+        // Sartorius: slight assist via its medial line of pull in flexion.
+        'sartorius':       m(6, 15, 45),
     },
     'Hip.horizontalAbduction': {
+        // Used to swing a flexed leg outward.
         'glute-max': m(30, 95, 0),
-        'glute-med': m(25, 75, 0),
+        'glute-med': m(28, 80, 0),
         'tfl':       m(20, 55, 0),
-        'glute-min': m(15, 45, 0),
+        'glute-min': m(18, 50, 0),
         'sartorius': m(5, 12, 0),
+        // Piriformis (not in catalog) is a major contributor here.
     },
     'Hip.internalRotation': {
-        // Anterior fibers of the glute med/min + TFL drive hip IR. The
-        // short adductors share the anterior line of pull.
-        'glute-med':       m(25, 65, 0),
-        'glute-min':       m(20, 55, 0),
+        // Anterior fibers of glute med/min + TFL drive hip IR.
+        'glute-med':       m(25, 70, 0),
+        'glute-min':       m(20, 60, 0),
         'tfl':             m(20, 55, 0),
-        'adductor-longus': m(15, 40, 0),
+        'adductor-longus': m(15, 42, 0),
         'adductor-brevis': m(10, 28, 0),
         'pectineus':       m(10, 28, 0),
-        // Medial hamstrings produce weak IR when the knee is flexed.
-        'semitendinosus':  m(8, 18, 0),
-        'semimembranosus': m(8, 18, 0),
+        // Medial hamstrings produce weak IR with knee flexed.
+        'semitendinosus':  m(8, 20, 0),
+        'semimembranosus': m(8, 20, 0),
     },
     'Hip.externalRotation': {
         'glute-max':      m(30, 100, 0),
         'sartorius':      m(15, 45, 0),
         // Glute med/min posterior fibers are important external rotators.
         // The deep 6 rotators (piriformis, obturators, QF, gemelli) aren't
-        // in the catalog, so these pick up their share of the load.
-        'glute-med':      m(18, 40, 0),
-        'glute-min':      m(12, 28, 0),
-        // Biceps femoris long head externally rotates the tibia + hip
-        // (fibular insertion gives lateral line of pull).
+        // in the catalog, so these pick up their share.
+        'glute-med':      m(20, 50, 0),
+        'glute-min':      m(14, 32, 0),
+        // Biceps femoris long head externally rotates hip (fibular insertion,
+        // lateral line of pull).
         'biceps-femoris': m(10, 22, 0),
-        // Iliopsoas weak ER (tendon wraps the lesser trochanter; debated).
-        'iliopsoas':      m(8, 18, 0),
+        // Iliopsoas: weak ER (tendon wraps lesser trochanter; debated).
+        'iliopsoas':      m(8, 20, 0),
     },
 
-    // --- KNEE ---
+    // =========================================================================
+    // KNEE
+    // =========================================================================
+    // Knee.flexion: 0=straight, +160=full flex. (Knee uses actionSign=-1
+    // which inverts rawAngle's positive=flexion convention into the correct
+    // section-positive=more-action direction.)
+    // Knee.extension: 0=straight, -160=full flex (stretched quads).
+
     'Knee.flexion': {
-        // Hamstrings peak in mid-range knee flexion (~60°).
+        // Hamstrings peak mid-range (~60°).
         'biceps-femoris':  m(30, 100, 60),
         'semitendinosus':  m(25, 90, 60),
         'semimembranosus': m(25, 90, 60),
-        // Gastrocnemius crosses the knee posteriorly; contributes more
-        // when the ankle is also dorsiflexed (not modeled here).
-        'gastrocnemius':   m(15, 45, 30),
-        'sartorius':       m(10, 30, 60),
-        'gracilis':        m(10, 30, 60),
+        // Gastroc crosses the knee posteriorly; contributes more when the
+        // ankle is also dorsiflexed (not modeled here).
+        'gastrocnemius':   m(18, 50, 30),
+        'sartorius':       m(12, 32, 60),
+        'gracilis':        m(12, 32, 60),
         // TFL weakly flexes the knee through the IT band below ~30°.
         'tfl':             m(4, 10, 30),
+        // Popliteus (not in catalog) unlocks and initiates knee flexion.
     },
     'Knee.extension': {
-        // Vasti peak at deeper flexion (stretched, high length-tension)
-        // — OPPOSITE direction from extension, hence negative angle.
-        // Rectus femoris peaks earlier because it's also losing hip-flex
+        // Vasti peak at deeper flexion (stretched — high length-tension).
+        'vastus-lateralis':   m(35, 115, -60),
+        'vastus-medialis':    m(35, 115, -60),
+        'vastus-intermedius': m(30, 105, -60),
+        // Rectus femoris peaks earlier since it's also losing hip-flexor
         // length as the knee straightens.
-        'rectus-femoris':     m(25, 85, -45),
-        'vastus-lateralis':   m(35, 110, -60),
-        'vastus-medialis':    m(35, 110, -60),
-        'vastus-intermedius': m(30, 100, -60),
-        // TFL weakly extends via the IT band near full extension.
+        'rectus-femoris':     m(25, 85, -40),
+        // TFL weakly extends via IT band near full extension.
         'tfl':                m(4, 10, 0),
     },
 
-    // --- ANKLE ---
+    // =========================================================================
+    // ANKLE
+    // =========================================================================
+
     'Ankle.dorsiFlexion': {
-        // Catalog only has tibialis anterior; the other dorsiflexors
-        // (EHL, EDL, peroneus tertius) aren't modeled.
-        'tibialis-anterior': m(40, 100, 0),
+        'tibialis-anterior': m(40, 105, 10),
+        // EHL, EDL, peroneus tertius (not in catalog) assist.
     },
     'Ankle.plantarFlexion': {
-        // Gastroc + soleus peak at ankle dorsiflexed (stretched) — that
-        // is OPPOSITE to the plantarflexion direction, hence negative.
-        'gastrocnemius': m(30, 110, -15),
-        'soleus':        m(40, 120, -15),
+        // Gastroc + soleus peak when ankle is dorsiflexed (stretched,
+        // OPPOSITE of plantar direction → negative).
+        'gastrocnemius': m(30, 115, -15),
+        'soleus':        m(40, 125, -10),
+        // Tibialis posterior + peroneals (not in catalog) contribute.
     },
 
-    // --- SPINE ---
-    // Spine section angles all come out near zero in this model (the spine
-    // bone is kinematically fixed), so peak angle = 0 gives full weight
-    // and ratios between muscles are what matters.
+    // =========================================================================
+    // SPINE
+    // =========================================================================
+    // Spine section angles come out near zero structurally (spine bone is
+    // passive), so peak angle = 0 gives full weight and ratios matter.
+
     'Spine.flexion': {
-        'rectus-abdominis':  m(40, 110, 0),
+        'rectus-abdominis':  m(40, 115, 0),
         'obliques-external': m(25, 75, 0),
         'obliques-internal': m(25, 75, 0),
-        // Psoas pulls T12-L5 forward with the femurs fixed.
-        'iliopsoas':         m(10, 22, 0),
+        // Psoas pulls the lumbar spine forward when the femurs are fixed.
+        'iliopsoas':         m(10, 25, 0),
     },
     'Spine.extension': {
-        'erector-spinae':     m(50, 130, 0),
+        'erector-spinae':     m(50, 135, 0),
         'quadratus-lumborum': m(20, 50, 0),
-        // Lats assist trunk extension via the thoracolumbar fascia.
-        'lats':               m(8, 18, 0),
+        // Lats assist trunk extension via thoracolumbar fascia.
+        'lats':               m(8, 20, 0),
+        // Glute max indirectly via anterior pelvic tilt counter-action; small.
+        'glute-max':          m(4, 10, 0),
     },
     'Spine.lateralFlexionL': {
         'obliques-external':  m(30, 85, 0),
@@ -748,6 +853,9 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'erector-spinae':     m(25, 65, 0),
         'lats':               m(10, 22, 0),
         'iliopsoas':          m(8, 18, 0),
+        // Rectus abdominis contributes to lateral flexion too (flexes +
+        // laterally flexes).
+        'rectus-abdominis':   m(8, 20, 0),
     },
     'Spine.lateralFlexionR': {
         'obliques-external':  m(30, 85, 0),
@@ -756,49 +864,69 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'erector-spinae':     m(25, 65, 0),
         'lats':               m(10, 22, 0),
         'iliopsoas':          m(8, 18, 0),
+        'rectus-abdominis':   m(8, 20, 0),
     },
     'Spine.rotationL': {
-        'obliques-external': m(35, 100, 0),  // contralateral
-        'obliques-internal': m(30, 85, 0),   // ipsilateral
+        'obliques-external': m(35, 105, 0),  // contralateral rotates trunk
+        'obliques-internal': m(30, 85, 0),   // ipsilateral rotates trunk
         'erector-spinae':    m(15, 45, 0),
-        'lats':              m(6, 15, 0),
+        'lats':              m(6, 18, 0),
+        // Rectus abdominis assists rotation mildly.
+        'rectus-abdominis':  m(5, 12, 0),
     },
     'Spine.rotationR': {
-        'obliques-external': m(35, 100, 0),
+        'obliques-external': m(35, 105, 0),
         'obliques-internal': m(30, 85, 0),
         'erector-spinae':    m(15, 45, 0),
-        'lats':              m(6, 15, 0),
+        'lats':              m(6, 18, 0),
+        'rectus-abdominis':  m(5, 12, 0),
     },
 
-    // --- SCAPULA ---
-    // Scapula rawAngle is also always ~0 in this model; ratios set the
-    // relative contributions.
+    // =========================================================================
+    // SCAPULA
+    // =========================================================================
+    // Scapula rawAngle also always ~0 in this model; ratios set relative
+    // contributions.
+
     'Scapula.elevation': {
-        'traps-upper':      m(50, 120, 0),
-        'levator-scapulae': m(35, 90, 0),
-        'rhomboids':        m(20, 55, 0),
+        'traps-upper':      m(55, 125, 0),
+        'levator-scapulae': m(40, 95, 0),
+        'rhomboids':        m(25, 60, 0),
+        // Middle traps contribute a little to elevation (transverse fibers
+        // with small vertical component) per inclusivity principle.
+        'traps-mid':        m(8, 20, 0),
+        // Serratus anterior upper fibers can assist elevation slightly.
+        'serratus-anterior': m(5, 12, 0),
     },
     'Scapula.depression': {
-        'traps-lower':       m(40, 110, 0),
+        'traps-lower':       m(45, 115, 0),
         'pec-minor':         m(25, 65, 0),
         'lats':              m(20, 55, 0),
-        // Serratus lower fibers depress the scapula along the ribcage.
-        'serratus-anterior': m(10, 25, 0),
+        // Serratus anterior lower fibers depress the scapula along the
+        // ribcage.
+        'serratus-anterior': m(12, 28, 0),
+        // Pec major (both heads) pulls the shoulder girdle down via the
+        // humerus when pulling from overhead.
+        'pec-sternal':       m(6, 15, 0),
     },
     'Scapula.protraction': {
-        'serratus-anterior': m(50, 130, 0),
+        'serratus-anterior': m(55, 135, 0),
         'pec-minor':         m(25, 65, 0),
-        // Pec major drags the scapula forward via its humeral attachment
-        // when pulling the arm across the body.
-        'pec-clavicular':    m(8, 18, 0),
-        'pec-sternal':       m(8, 18, 0),
+        // Pec major protracts the scapula via the humerus when pulling arm
+        // across body.
+        'pec-clavicular':    m(8, 20, 0),
+        'pec-sternal':       m(8, 20, 0),
     },
     'Scapula.retraction': {
         'traps-mid':   m(45, 115, 0),
         'rhomboids':   m(40, 110, 0),
         'traps-lower': m(25, 65, 0),
-        // Lats retract the scapula via the humerus when pulling back.
-        'lats':        m(6, 15, 0),
+        // Upper traps retract slightly (their fibers have a small horizontal
+        // component).
+        'traps-upper': m(8, 20, 0),
+        // Lats retract the shoulder girdle via the humerus when pulling back
+        // (row-like motions).
+        'lats':        m(6, 18, 0),
     },
 };
 
@@ -3588,18 +3716,29 @@ const BioModelPage: React.FC = () => {
           //     action. actionSign = −1.
           //   • Twist (isBoneAxis): positive = ER = positive action.
           //     actionSign = +1.
-          //   • Hinge (knee/elbow/ankle, unchanged atan2-based formula):
-          //     positive rawAngle = flexion for knee/elbow (negative action
-          //     since their positiveAction is Extension) or plantar for
-          //     ankle (also negative action). actionSign = −1.
+          //   • Hinge KNEE/ANKLE (atan2(z,y) on tibia | atan2(y,-z) on
+          //     foot): positive rawAngle = flexion for knee, plantar for
+          //     ankle. Both are NEGATIVE actions (positiveAction = Extension
+          //     / Dorsi Flexion). actionSign = −1.
+          //   • Hinge ELBOW: forearm rotates in OPPOSITE local-Z sense from
+          //     tibia (forearm flexes forward → −Z; tibia flexes backward →
+          //     +Z), so atan2(z,y) on the forearm gives NEGATIVE rawAngle
+          //     for flexion and POSITIVE for hyperextension. With
+          //     actionSign = +1, directionAngle = rawAngle for the (positive)
+          //     extension section and = −rawAngle for the (negative) flexion
+          //     section. At full flex (rawAngle ≈ −160), Elbow.flexion
+          //     directionAngle = +160 → bell evaluates correctly.
           //
           // Then: positive section: directionAngle = rawAngle * actionSign
           //       negative section: directionAngle = −rawAngle * actionSign
-          // Net: positive directionAngle = more of this section's action.
-          const isHinge = /Forearm|Tibia|Foot/.test(d.boneId);
+          // Net: positive directionAngle = more of this section's action,
+          // for every section type.
+          const isElbow = /Forearm/.test(d.boneId);
+          const isKneeOrAnkle = /Tibia|Foot/.test(d.boneId);
           const actionSign = ax.isBoneAxis ? 1 :
                              ax.useWorldAxis ? -1 :
-                             isHinge ? -1 :
+                             isElbow ? 1 :
+                             isKneeOrAnkle ? -1 :
                              1;
           const directionAngle = rawAngle * actionSign * (isPositive ? 1 : -1);
 
@@ -6239,6 +6378,13 @@ const BioModelPage: React.FC = () => {
               const getActionRange = (group: JointGroup, ax: ActionAxis, isPositive: boolean): { min: number; max: number } => {
                   const lim = jointLimits[`${group}.action.${ax.positiveAction}`];
                   if (lim && Math.abs(lim.max - lim.min) >= 30) {
+                      // Map rawAngle-space limits → directionAngle-space
+                      // graph range. End result is the same for all hinges
+                      // (the inversion between elbow's limit-value vs
+                      // rawAngle cancels with the inverse runtime actionSign):
+                      // negative-direction (flexion) section maps to
+                      // positive directionAngle, positive-direction
+                      // (extension) section maps to negative.
                       const actionSign = (ax.isBoneAxis || ax.useWorldAxis) ? 1 : -1;
                       const flip = actionSign * (isPositive ? 1 : -1);
                       const a = lim.min * flip;
