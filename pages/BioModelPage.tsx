@@ -2789,7 +2789,13 @@ const BioModelPage: React.FC = () => {
           return Math.atan2(dir.x * sideSign, dir.y) * rad;
       }
       // Horizontal ab/ad: world-Y axis (useWorldAxis) → angle in transverse plane.
+      // Singularity at arm-vertical (dir ≈ ±y): the transverse-plane projection
+      // has zero magnitude and atan2 would return an arbitrary value (in practice
+      // ±π when both inputs are negative zero). Return 0 in that case — horizontal
+      // ab/ad is ill-defined when the arm is parallel to the world Y axis, and 0
+      // is the sensible "neutral between abd and add" reading.
       if (action.useWorldAxis && Math.abs(ax.y) > 0.5) {
+          if (dir.x * dir.x + dir.z * dir.z < 1e-8) return 0;
           return Math.atan2(-dir.z, dir.x * sideSign) * rad;
       }
       // Fallback: generic cross-product projection for any axis that doesn't
@@ -6467,39 +6473,116 @@ const BioModelPage: React.FC = () => {
                       return { min: Math.min(a, b), max: Math.max(a, b) };
                   }
 
-                  // Case 2: ball-socket direction actions. Sample the
-                  // corners of the dir.x × dir.y × dir.z limit box.
+                  // Case 2: ball-socket direction actions. Walk the pure
+                  // anatomical path for this action (forward sweep for
+                  // flexion, sideways sweep for abduction, transverse
+                  // sweep for horizontal, etc.) and find the furthest
+                  // point still inside the dir.x × dir.y × dir.z limit
+                  // box. That gives a tight, anatomically-motivated
+                  // max action angle in the section's primary direction
+                  // — no gimbal-lock wrap-around, no range inflation
+                  // from box corners that exceed the unit sphere.
+                  //
+                  // Off-direction peaks (e.g. lats peaking at arm-flexed
+                  // position in Shoulder.extension) land as negative
+                  // peak angles; the peakAngles range-extension step
+                  // below widens the graph to include them.
                   if ((group === 'Shoulder' || group === 'Hip') && !ax.isBoneAxis) {
                       const xLim = jointLimits[`${group}.dir.x`];
                       const yLim = jointLimits[`${group}.dir.y`];
                       const zLim = jointLimits[`${group}.dir.z`];
                       if (xLim && yLim && zLim) {
-                          const rad = 180 / Math.PI;
-                          const raws: number[] = [];
-                          for (const x of [xLim.min, 0, xLim.max]) {
-                              for (const y of [yLim.min, 0, yLim.max]) {
-                                  for (const z of [zLim.min, 0, zLim.max]) {
-                                      // Limits are bilaterally normalized
-                                      // (right-side convention), so we
-                                      // sample with sideSign = +1 — the
-                                      // left side has a symmetric range.
-                                      let raw: number;
-                                      if (Math.abs(ax.axis.x) > 0.5) {
-                                          raw = Math.atan2(-z, y) * rad;          // flex/ext
-                                      } else if (Math.abs(ax.axis.z) > 0.5) {
-                                          raw = Math.atan2(x, y) * rad;           // abd/add
-                                      } else if (ax.useWorldAxis && Math.abs(ax.axis.y) > 0.5) {
-                                          raw = Math.atan2(-z, x) * rad;          // horizontal
-                                      } else {
-                                          continue;
+                          // Parameterize the pure-direction path for this
+                          // action + section. `isPositive` picks whether
+                          // we sweep in the section's POSITIVE direction
+                          // (flex / abd / horiz-abd) or NEGATIVE
+                          // (extension / adduction / horiz-add).
+                          let pathDir: ((t: number) => { x: number; y: number; z: number }) | null = null;
+                          if (Math.abs(ax.axis.x) > 0.5) {
+                              // Flex / Ext: sagittal plane sweep from (0,1,0).
+                              // Forward (z<0) = flex, backward (z>0) = ext.
+                              const zSign = isPositive ? -1 : 1;
+                              pathDir = (t) => ({ x: 0, y: Math.cos(t), z: zSign * Math.sin(t) });
+                          } else if (Math.abs(ax.axis.z) > 0.5) {
+                              // Abd / Add: frontal plane sweep from (0,1,0).
+                              // Out to side (x>0 for right, in right-side
+                              // convention — limits are bilaterally
+                              // normalized) = abduction.
+                              const xSign = isPositive ? 1 : -1;
+                              pathDir = (t) => ({ x: xSign * Math.sin(t), y: Math.cos(t), z: 0 });
+                          } else if (ax.useWorldAxis && Math.abs(ax.axis.y) > 0.5) {
+                              // Horizontal: transverse plane sweep from T-pose
+                              // (1,0,0). Backward (z>0) = horizontal abduction,
+                              // forward/across (z<0) = horizontal adduction.
+                              const zSign = isPositive ? 1 : -1;
+                              pathDir = (t) => ({ x: Math.cos(t), y: 0, z: zSign * Math.sin(t) });
+                          }
+                          if (pathDir) {
+                              const inBox = (d: { x: number; y: number; z: number }) =>
+                                  d.x >= xLim.min && d.x <= xLim.max &&
+                                  d.y >= yLim.min && d.y <= yLim.max &&
+                                  d.z >= zLim.min && d.z <= zLim.max;
+                              // Binary-search for the furthest in-box angle
+                              // along the pure path (start at θ=0, search
+                              // outward to θ=π).
+                              if (inBox(pathDir(0))) {
+                                  let lo = 0, hi = Math.PI;
+                                  for (let k = 0; k < 24; k++) {
+                                      const mid = (lo + hi) / 2;
+                                      if (inBox(pathDir(mid))) lo = mid;
+                                      else hi = mid;
+                                  }
+                                  const maxDeg = lo * 180 / Math.PI;
+                                  // Graph range in section-direction space:
+                                  // [0, maxDeg]. Positive = more of this
+                                  // section's action.
+                                  return { min: 0, max: maxDeg };
+                              }
+                              // Pure-path anchor out-of-box (e.g. Hip horizontal:
+                              // the "T-pose" (1,0,0) anchor is infeasible because
+                              // the leg can't reach horizontal). Compute the range
+                              // of rawAngles over the in-box subset of the unit
+                              // sphere, then flip to directionAngle. Bilateral
+                              // normalization means we can sample with sideSign=+1
+                              // (right-side convention).
+                              let rawMin = Infinity, rawMax = -Infinity;
+                              const N = 30;
+                              for (let i = 0; i <= N; i++) {
+                                  for (let j = 0; j <= N; j++) {
+                                      const x = xLim.min + (xLim.max - xLim.min) * (i / N);
+                                      const y = yLim.min + (yLim.max - yLim.min) * (j / N);
+                                      const zsq = 1 - x * x - y * y;
+                                      if (zsq < 0) continue;
+                                      for (const zsign of [-1, 1]) {
+                                          const z = zsign * Math.sqrt(zsq);
+                                          if (!inBox({ x, y, z })) continue;
+                                          let raw: number;
+                                          if (Math.abs(ax.axis.x) > 0.5) {
+                                              raw = Math.atan2(-z, y);
+                                          } else if (Math.abs(ax.axis.z) > 0.5) {
+                                              raw = Math.atan2(x, y);
+                                          } else {
+                                              // horizontal: skip near-singular (limb
+                                              // nearly vertical — angle is ill-defined)
+                                              if (x * x + z * z < 1e-4) continue;
+                                              raw = Math.atan2(-z, x);
+                                          }
+                                          if (raw < rawMin) rawMin = raw;
+                                          if (raw > rawMax) rawMax = raw;
                                       }
-                                      raws.push(raw);
                                   }
                               }
-                          }
-                          if (raws.length > 0) {
-                              const flipped = raws.map(v => v * flip);
-                              return { min: Math.min(...flipped), max: Math.max(...flipped) };
+                              if (rawMin !== Infinity) {
+                                  const a = rawMin * flip * 180 / Math.PI;
+                                  const b = rawMax * flip * 180 / Math.PI;
+                                  // Clamp negative side of this section to 0 — the
+                                  // section-direction range should start at 0 (the
+                                  // "neutral" reading) and extend positively. Off-
+                                  // direction peaks still reach negative territory
+                                  // via the peakAngles extension.
+                                  const sectionMax = Math.max(a, b);
+                                  return { min: 0, max: Math.max(sectionMax, 0) };
+                              }
                           }
                       }
                   }
