@@ -144,6 +144,16 @@ interface BoneConstraint {
     // Symmetry mirroring: if set, the constraint on the opposite-side bone
     // sharing this same mirrorId stays in sync with this one.
     mirrorId?: string;
+    // Physics / kinematic mode toggle. Default true (legacy behavior).
+    //   true  = full constraint: path enforcement (solver) + Phase B
+    //           Lagrange coupling + reaction-force arrow. Models a
+    //           PHYSICAL object holding the limb (barbell, machine pad).
+    //   false = kinematic guide only: solver still holds the limb on the
+    //           path during drag/playback, but Phase B treats the
+    //           endpoint as free (no load redistribution) and no reaction
+    //           is drawn. Models a MOTION PATH without a physical object
+    //           (e.g. "forearm sweeps in sagittal plane during a curl").
+    physicsEnabled?: boolean;
 }
 
 interface Frame {
@@ -1117,6 +1127,7 @@ const mirrorConstraintData = (c: BoneConstraint): Omit<BoneConstraint, 'id' | 'm
         pivot: c.pivot ? { x: -c.pivot.x, y: c.pivot.y, z: c.pivot.z } : undefined,
         axis: c.axis ? { x: -c.axis.x, y: c.axis.y, z: c.axis.z } : undefined,
         radius: c.radius,
+        physicsEnabled: c.physicsEnabled,
     };
 };
 
@@ -1876,10 +1887,13 @@ const BioModelPage: React.FC = () => {
       // This is the physically correct behavior: you can't have shoulder
       // demand from a hand force unless something below (or on) the shoulder
       // provides a reaction. Constraints are that "something."
-      const hasAnyConstraint = activeConstraints && Object.values(activeConstraints).some(
-          (list: BoneConstraint[]) => list.some(c => c.active)
+      // Freefall gate: need at least one PHYSICS-enabled constraint. Pure
+      // kinematic guides don't resist force — they only shape the path —
+      // so a scene with only guides is still in physical freefall.
+      const hasAnyPhysicsConstraint = activeConstraints && Object.values(activeConstraints).some(
+          (list: BoneConstraint[]) => list.some(c => c.active && c.physicsEnabled !== false)
       );
-      if (!hasAnyConstraint) {
+      if (!hasAnyPhysicsConstraint) {
           return { demands: [], totalEffort: 0, limitingAction: null, rawTorques: {}, jointForces: {} };
       }
 
@@ -2207,11 +2221,15 @@ const BioModelPage: React.FC = () => {
           };
           const consRefs: ConstraintRef[] = [];
 
-          // Build consRefs from EVERY active constraint. Each one's
-          // ancestors set = the bone + all ancestors up to root. That
-          // defines which joints feel its reaction.
+          // Build consRefs from EVERY active constraint WITH PHYSICS ENABLED.
+          // A constraint with physicsEnabled === false is a kinematic guide
+          // only — it shapes the motion path (solver still enforces it) but
+          // does NOT inject a reaction force into Phase B, so no joint load
+          // redistribution and no reaction arrow. physicsEnabled defaults to
+          // true for backward compatibility; only constraints the user has
+          // explicitly toggled off are skipped here.
           for (const [bid, list] of Object.entries(activeConstraints) as [string, BoneConstraint[]][]) {
-              const activeList = list.filter(c => c.active);
+              const activeList = list.filter(c => c.active && c.physicsEnabled !== false);
               if (activeList.length === 0) continue;
               const ancestors = new Set<string>();
               {
@@ -2551,8 +2569,10 @@ const BioModelPage: React.FC = () => {
       const forceBones = new Set(currentForces.map(f => f.boneId));
       const constraintBones = new Set<string>();
       if (activeConstraints) {
+          // Only physics-enabled constraints contribute to the path-validity
+          // set; kinematic guides don't generate demand flow.
           for (const [bid, list] of Object.entries(activeConstraints) as [string, BoneConstraint[]][]) {
-              if (list.some(c => c.active)) constraintBones.add(bid);
+              if (list.some(c => c.active && c.physicsEnabled !== false)) constraintBones.add(bid);
           }
       }
 
@@ -5317,6 +5337,31 @@ const BioModelPage: React.FC = () => {
                                           </button>
                                       </div>
                                   </div>
+
+                                  {c.active && (() => {
+                                      const isPhysics = c.physicsEnabled !== false;
+                                      return (
+                                          <div className={`mb-3 flex items-center justify-between px-3 py-2 rounded-lg ${isPhysics ? 'bg-gray-50' : 'bg-amber-50 border border-amber-200'}`}>
+                                              <div className="flex items-center gap-2 min-w-0">
+                                                  <span className="text-[10px] font-bold uppercase tracking-wide text-gray-500 flex-shrink-0">
+                                                      {isPhysics ? 'Physical' : 'Guide Only'}
+                                                  </span>
+                                                  <span className="text-[10px] text-gray-400 truncate">
+                                                      {isPhysics
+                                                          ? 'path + force reaction'
+                                                          : 'path only, no physics'}
+                                                  </span>
+                                              </div>
+                                              <button
+                                                  onClick={() => updateConstraint(selectedBone, c.id, { physicsEnabled: !isPhysics })}
+                                                  className={`relative w-10 h-6 rounded-full transition-colors duration-200 flex-shrink-0 ${isPhysics ? 'bg-emerald-500' : 'bg-gray-300'}`}
+                                                  title={isPhysics ? 'Disable physics — constraint becomes a kinematic guide' : 'Enable physics — constraint participates in force analysis'}
+                                              >
+                                                  <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${isPhysics ? 'translate-x-4' : 'translate-x-0'}`} />
+                                              </button>
+                                          </div>
+                                      );
+                                  })()}
 
                                   {c.active && (
                                       <div className="mb-3">
