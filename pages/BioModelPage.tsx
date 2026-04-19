@@ -935,15 +935,22 @@ const muscleColor = (id: string): string => {
 // can edit these in the Joint Limits tab if they need something different.
 const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
     // --- Scapula (clavicle offset, model-unit cm, y-down) ---
-    'Scapula.dir.y': { min: -15, max: 10 },
+    // Scapula.dir.y: negative = elevation, positive = depression.
+    //   Elevation  limit (min) reduced  −15 → −12 (less shrug overhead).
+    //   Depression limit (max) reduced  +10 →  +4 (depression ROM is
+    //     anatomically small; +10 was way too much).
+    'Scapula.dir.y': { min: -12, max: 4 },
+    // Scapula.dir.z: negative = retraction, positive = protraction.
+    //   Retraction (min)  widened  −15 → −18 (a bit more pinch back).
+    //   Protraction (max) reduced  +10 →  +7 (tighter reach forward).
     'Scapula.dir.z': {
-        min: -15, max: 10,
+        min: -18, max: 7,
         // "Retraction limit increases slightly as the scapula elevates."
-        // elevation = dir.y decreasing (more negative).  dir.z.min is the
+        // Elevation = dir.y decreasing (more negative). dir.z.min is the
         // retraction stop; we want it to decrease (more retraction) as y
         // decreases. effective.min = min + slopeMin * source.currentValue
-        //   y =   0  →  eff.min = -15            (neutral)
-        //   y = -10  →  eff.min = -15 + 0.5*-10 = -20  (5 more retraction)
+        //   y =   0  →  eff.min = -18
+        //   y = -12  →  eff.min = -18 + 0.5 * -12 = -24 (6 more retraction)
         coupling: { dependsOn: 'Scapula.dir.y', slopeMin: 0.5, slopeMax: 0 },
     },
 
