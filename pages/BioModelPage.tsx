@@ -356,8 +356,14 @@ const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
         'extension':            createCap(75, 165, -60)    // peak at 60° flex (vasti stretched)
     },
     'Ankle': {
-        'plantarflexion':       createCap(65, 105, 15),    // peak at 15° dorsi (stretched)
-        'dorsiflexion':         createCap(35, 35,  0)
+        // Keys use camelCase to match actionKey("Plantar Flexion") output.
+        // Previously all-lowercase ("plantarflexion") silently failed the
+        // lookup in Phase B and the Capacities tab — capacity defaulted to
+        // 1, which made ankle efforts read as if the joint had limitless
+        // strength. The mismatch was pre-existing; renaming to camelCase
+        // fixes it.
+        'plantarFlexion':       createCap(65, 105, 15),    // peak at 15° dorsi (stretched)
+        'dorsiFlexion':         createCap(35, 35,  0)
     },
     'Scapula': {
         'elevation':            createCap(40, 65,  0),
@@ -1888,6 +1894,16 @@ const BioModelPage: React.FC = () => {
           return i === 0 ? lower : lower.charAt(0).toUpperCase() + lower.slice(1);
       }).join('');
 
+  // Canonical capacity-map key for a given action name. Like actionKey() but
+  // strips trailing " L" / " R" side suffixes so "Rotation L" and
+  // "Rotation R" both map to "rotation" — matching how spine/scapula-style
+  // capacities are stored as side-agnostic entries. Fixes a long-standing
+  // silent bug where capacity lookup for ankle (camelCase mismatch) and
+  // spine rotation / lateral-flexion (side-suffix mismatch) fell through
+  // to a cap of 1.
+  const capacityKey = (actionName: string): string =>
+      actionKey(actionName.replace(/\s+[LR]$/, ''));
+
   const solveSmall = (M: number[][], b: number[]): number[] => {
       const n = b.length;
       if (n === 0) return [];
@@ -2329,7 +2345,7 @@ const BioModelPage: React.FC = () => {
                       for (const act of acts) {
                           const tau0 = dotProduct(forceVec, act.axis);
                           const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
-                          const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
+                          const capLk = capacities[jg]?.[capacityKey(actName)] || capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
                           const isPos = actName === act.positiveAction;
                           const availability = sectionAvailabilityModifier(
                               jg, act, isPos, bone, rawTorques, kin2, currentPosture, currentTwists,
@@ -2388,7 +2404,7 @@ const BioModelPage: React.FC = () => {
                       if (isLeft && (act.isBoneAxis || Math.abs(act.axis.y) > 0.5 || Math.abs(act.axis.z) > 0.5)) tau0 = -tau0;
 
                       const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
-                      const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
+                      const capLk = capacities[jg]?.[capacityKey(actName)] || capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
                       const isPos = actName === act.positiveAction;
                       const availability = sectionAvailabilityModifier(
                           jg, act, isPos, bone, rawTorques, kin2, currentPosture, currentTwists,
@@ -6804,15 +6820,17 @@ const BioModelPage: React.FC = () => {
                                <div className="space-y-4">
                                    {Object.entries(actions).map(([action, config]) => {
                                        // Find the ActionAxis that matches this capacity entry's
-                                       // action-key. Capacity peak angles are stored in the
-                                       // DIRECTIONANGLE convention (positive = more of this
-                                       // section's action direction) matching the Muscles tab,
-                                       // so the L/R markers below also show directionAngle.
+                                       // action-key. Uses capacityKey() (strips " L"/" R" side
+                                       // suffixes) so side-agnostic entries like 'rotation' and
+                                       // 'lateralFlexion' still match the side-specific action
+                                       // names 'Rotation L' / 'Lateral Flexion L'. Capacity
+                                       // peak angles are stored in the DIRECTIONANGLE convention
+                                       // matching the Muscles tab.
                                        const ax = JOINT_ACTIONS[group as JointGroup]?.find(a =>
-                                           actionKey(a.positiveAction) === action ||
-                                           actionKey(a.negativeAction) === action
+                                           capacityKey(a.positiveAction) === action ||
+                                           capacityKey(a.negativeAction) === action
                                        );
-                                       const isPos = ax ? actionKey(ax.positiveAction) === action : true;
+                                       const isPos = ax ? capacityKey(ax.positiveAction) === action : true;
                                        const lCap = (ax && groupBones)
                                            ? sectionDirectionAngle(groupBones.left, ax, isPos, posture, twists)
                                            : null;
