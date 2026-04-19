@@ -415,13 +415,31 @@ const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
         'dorsiFlexion':         createCap(20, 45,  -10)
     },
     'Scapula': {
-        // Scapular torques here are stand-ins for translation forces (scapula
-        // moves in offset space, not rotationally). Ratios reflect typical
-        // scapular muscle PCSA.
-        'elevation':            createCap(35, 70,  0),     // traps upper + levator
-        'depression':           createCap(25, 50,  0),     // traps lower + pec minor
-        'protraction':          createCap(25, 50,  0),     // serratus + pec minor
-        'retraction':           createCap(30, 60,  0)      // traps mid + rhomboids
+        // Scapular capacities are stand-ins for translation forces (scapula
+        // moves in offset space, not rotationally). Peak angle = 0 because
+        // rawAngle for the clavicle is structurally ~0 in this model — bell
+        // shape doesn't matter, only ratios. Research on scapulothoracic
+        // peak force is sparse (most literature reports EMG %, not force),
+        // so these are derived from resistance-training 1RM anecdotes +
+        // muscle PCSA estimates:
+        //   • Shrug 1RM: trained lifters 300-500 lb → traps upper + levator
+        //     are among the strongest postural muscles → elevation dominates.
+        //   • Depression: traps lower + pec minor + lat-via-humerus. Much
+        //     weaker in isolation; ~2-3× lower than elevation.
+        //   • Protraction: serratus anterior is huge + pec assist. Every
+        //     push-up / bench-press is a loaded protraction movement.
+        //   • Retraction: traps mid + rhomboids + traps lower assist. Row
+        //     loads imply comparable strength to protraction.
+        //
+        // Ratios preserved:
+        //   elevation / depression ≈ 2.3 (realistic asymmetry)
+        //   protraction ≈ retraction (both in the row/push axis)
+        //   scapular peaks comparable to upper-body shoulder actions
+        //     (below lower-body dominants like knee ext 230 / hip ext 240)
+        'elevation':            createCap(55, 140, 0),
+        'depression':           createCap(25, 60,  0),
+        'protraction':          createCap(40, 100, 0),
+        'retraction':           createCap(40, 95,  0)
     },
     'Spine': {
         // Spine flex peak 200 Nm @ 0° (abdominals + obliques).
