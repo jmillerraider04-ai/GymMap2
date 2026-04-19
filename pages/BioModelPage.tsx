@@ -534,123 +534,146 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // in the app and re-capture.
 
     'Shoulder.flexion': {
-        // Anterior delt: still inverted (base > peak) but less aggressively —
-        // the previous 85→45 inversion drove too much spurious flexion-share
-        // away from delt-front. Now 64→50 keeps it the dominant mover early
-        // while still tapering as the arm passes the horizon.
+        // Anterior delt: mild inversion (base > peak). Dominates early / late,
+        // dips mid-range where clavicular pec takes over.
         'delt-front':        m(64, 50, 38),
-        // Pec clavicular: tightened (peak 85→73, base 30→38, steepness 1→1.45)
-        // to reduce its share-stealing in horizAdd-heavy motions where small
-        // flex demand was making pec-clav read higher than pec-sternal.
+        // Clavicular pec: primary mover in the mid-range band with slight
+        // steepness to narrow the peak dominance.
         'pec-clavicular':    m(38, 73, 70, 1.45),
-        'biceps-long':       m(12, 30, 60),
-        'biceps-short':      m(12, 28, 60),
-        'traps-lower':       m(5, 25, 150),
-        'serratus-anterior': m(5, 22, 150),
-        'supraspinatus':     m(4, 12, 20),
+        // Biceps: small assist, slight steepness to keep it in the curl-like
+        // zone (shoulder flexed ~60°, elbow bent).
+        'biceps-long':       m(8, 32, 60, 1.6),
+        'biceps-short':      m(8, 30, 60, 1.6),
+        // Scapulohumeral rhythm: upward rotators kick in past 60° and dominate
+        // overhead. Negative base + moderate steepness concentrates their
+        // contribution in the 100°+ zone.
+        'traps-lower':       m(-5, 32, 140, 2.2),
+        'serratus-anterior': m(-5, 28, 140, 2.2),
+        // Supraspinatus: initiator of the first ~30° of elevation. Narrow
+        // bell at low angles so it fades once delt-front takes over.
+        'supraspinatus':     m(-2, 18, 15, 2.5),
+        // Pec sternal: tiny tight bell in the extension zone — it's NOT a
+        // flexor, but when the arm is pulled behind the body the stretched
+        // sternal fibers pull the arm forward toward neutral. Narrow and
+        // focused so it doesn't leak into actual flexion work.
         'pec-sternal':       m(0, 19, -65, 5),
     },
     'Shoulder.extension': {
         // Lats: aggressive negative-base bell (-87) so contribution falls
-        // sharply outside the mid-pulldown zone (peak 105 at -67°). Previous
-        // (0, 127, -73, 2.6) was too broad and inflated antagonist
-        // subtraction during shoulder flexion demand.
+        // sharply outside the mid-pulldown zone (peak 105 at -67°).
         'lats':           m(-87, 105, -67, 1.05),
-        'teres-major':    m(20, 63, -60),
-        // Pec sternal: peak pushed deeper (-143°→-169°, near full overhead)
-        // with negative base (-12) and steeper rolloff (1.85→3.35). Still
-        // contributes to overhead extension (lat pulldown territory) but
-        // doesn't bleed into mid-range extension where it shouldn't fire.
+        // Teres-major: companion to lats. Narrower bell with negative base
+        // so it tracks the same mid-range peak but doesn't linger elsewhere.
+        'teres-major':    m(-15, 68, -60, 1.7),
+        // Pec sternal: dominates deep-overhead extension. Steep bell.
         'pec-sternal':    m(-12, 87, -169, 3.35),
-        // Rear delt: scaled down (was 30→85, now 22→55) to avoid
-        // overpowering teres-major / triceps-long at shallow extension.
-        'delt-rear':      m(22, 55, -20),
+        // Rear delt: workhorse of near-neutral extension (rear-delt-row
+        // territory). Narrow bell so it owns the shallow-ext zone and doesn't
+        // compete with lats further into flexion-side peak.
+        'delt-rear':      m(0, 62, -20, 2.0),
+        // Triceps long: sharp peak at deep flex (overhead-pulldown leverage).
         'triceps-long':   m(1, 72, -86, 2.6),
-        'rhomboids':      m(25, 26, -60),
+        // Rhomboids: small, broadly-active scapular-coupling assist. Not a
+        // direct GH extensor; contribution comes through Scapula.retraction
+        // during rows. Keeping it flat and small.
+        'rhomboids':      m(8, 18, -60),
     },
     'Shoulder.abduction': {
+        // Lateral delt: sharp bell, workhorse of mid-range abduction.
         'delt-side':         m(10, 100, 72, 2.75),
-        'supraspinatus':     m(40, 55, 15, 2.05),
-        // Front delt: peak moved 110°→180° (full overhead). Anterior fibers
-        // contribute most when the arm is highest; below ~90° abd they
-        // shouldn't dominate side delt.
+        // Supraspinatus: tight initiation bell, fades fast after 30°.
+        'supraspinatus':     m(-5, 55, 15, 2.5),
+        // Anterior delt: shares load overhead.
         'delt-front':        m(10, 81, 180, 1.9),
-        'traps-lower':       m(5, 45, 95, 3.8),
-        'serratus-anterior': m(3, 40, 81, 3.7),
-        'biceps-long':       m(3, 12, 120),
+        // S/H rhythm upward rotators — moved peak to 130° so they dominate
+        // the overhead band, tightened further since their contribution is
+        // genuinely small below 60° abduction.
+        'traps-lower':       m(-3, 52, 130, 3.2),
+        'serratus-anterior': m(-3, 45, 130, 3.2),
+        // Biceps long: minor assist in externally-rotated overhead abd.
+        // Narrow bell to keep it out of normal abduction work.
+        'biceps-long':       m(-2, 15, 120, 2.0),
     },
     'Shoulder.adduction': {
+        // Lats: dominant mid-range pulldown.
         'lats':           m(4, 130, -75, 2.5),
-        'teres-major':    m(20, 95, -75),
-        // Note: inverted bell (base > peak) so sternal-pec is WEAKEST at the
-        // mid-range (-100° to -40°) and strongest at the extremes (overhead
-        // and cross-body), where it shares the load with lats/pec-clavicular.
+        // Teres-major: companion to lats, tighten slightly.
+        'teres-major':    m(-5, 95, -75, 1.6),
+        // Inverted bell — sternal pec is WEAKEST mid-range (-100° to -40°)
+        // and strongest at the extremes (overhead pulldown + cross-body).
         'pec-sternal':    m(70, 17, -70, 5),
-        'pec-clavicular': m(3, 18, 45),
-        'subscapularis':  m(10, 30, -90),
-        'triceps-long':   m(10, 35, -130),
-        'delt-rear':      m(15, 40, -120),
-        'rhomboids':      m(3, 10, -75),
+        // Clavicular pec: narrow bump at cross-body end. Negative base so
+        // it's effectively zero elsewhere.
+        'pec-clavicular': m(-8, 28, 45, 2.5),
+        // Subscapularis: tight overhead-pulldown contribution.
+        'subscapularis':  m(-2, 34, -90, 2.2),
+        // Triceps long head: narrow deep-overhead peak.
+        'triceps-long':   m(-5, 42, -130, 2.2),
+        // Posterior delt: overhead-pulldown contribution.
+        'delt-rear':      m(2, 44, -120, 1.8),
+        // Rhomboids: tiny scapular-coupling bump.
+        'rhomboids':      m(-3, 16, -75, 2.0),
     },
     'Shoulder.horizontalAdduction': {
-        // Pec sternal dominates cross-body motion; peaks in mid-to-late
-        // horizontal adduction (arm coming across midline).
-        'pec-sternal':       m(35, 115, 70),
-        // Pec clavicular: scaled down (peak 95→81, base 30→23) so pec-sternal
-        // wins horizAdd cleanly. Previous values made pec-clav nearly
-        // co-dominant in horizAdd, which combined with its primary-flexor
-        // role to push it ahead of pec-sternal in flying motions.
-        'pec-clavicular':    m(23, 81, 40),
-        // Anterior delt: scaled down (peak 80→65, base 25→22) for the same
-        // reason — it shouldn't over-share horizAdd with pec-sternal.
-        'delt-front':        m(22, 65, 40),
-        // Biceps both heads assist via their anterior line of pull on the
-        // scapula (coracoid + supraglenoid tubercle).
-        'biceps-long':       m(8, 25, 60),
-        'biceps-short':      m(10, 30, 60),
-        // Subscapularis' anterior line of pull couples IR + horiz add.
-        'subscapularis':     m(10, 30, 30),
-        // Serratus anterior protracts the scapula, assisting the motion.
-        'serratus-anterior': m(8, 25, 60),
-        // Coracobrachialis (not in catalog) would belong here.
+        // Pec sternal: primary cross-body mover. Peak at 70° (arm crossed
+        // past midline). Slight steepness so it owns the mid-to-late ROM
+        // cleanly.
+        'pec-sternal':       m(20, 118, 70, 1.5),
+        // Pec clavicular: early-phase mover (arm coming forward before
+        // crossing midline). Narrow bell with negative base so it yields
+        // to pec-sternal as the motion progresses past ~60°.
+        'pec-clavicular':    m(-5, 85, 40, 2.0),
+        // Anterior delt: similar early-phase profile as pec-clav.
+        'delt-front':        m(-2, 70, 40, 2.0),
+        // Biceps assist via coracoid/supraglenoid anterior line of pull.
+        // Narrow bells around bent-elbow-forward territory.
+        'biceps-long':       m(-2, 28, 60, 1.8),
+        'biceps-short':      m(0, 33, 60, 1.8),
+        // Subscapularis couples IR + horiz-add.
+        'subscapularis':     m(0, 33, 30, 1.8),
+        // Serratus anterior (scapular protraction assist).
+        'serratus-anterior': m(0, 28, 60, 1.8),
     },
     'Shoulder.horizontalAbduction': {
-        // Posterior delt is primary mover; peaks near T-pose (start of
-        // motion) and slightly past (into behind-body territory).
-        'delt-rear':     m(35, 115, 15),
-        // Rotator cuff posterior: infraspinatus + teres minor both peak
-        // around T-pose.
-        'infraspinatus': m(25, 75, 0),
-        'teres-minor':   m(20, 65, 0),
-        // Small posterior-line-of-pull assists:
-        'teres-major':   m(6, 18, 15),
-        'lats':          m(5, 15, 30),
-        // Triceps long head is behind the GH axis — more prominent per user
-        // feedback (was 4/12, now 15/45).
-        'triceps-long':  m(15, 45, 30),
-        // Note: rhomboids and mid traps were removed from this section —
-        // they're scapular retractors, not humeral horizontal abductors.
-        // Their activation in row-like motions comes through the
-        // Scapula.retraction path.
+        // Posterior delt: primary mover. Narrow bell near T-pose with
+        // slight behind-body bias. Steepness so it doesn't bleed into
+        // extreme horizontal adduction.
+        'delt-rear':     m(5, 120, 15, 1.8),
+        // Posterior rotator cuff: infraspinatus + teres minor peak near
+        // T-pose. Narrow bells with negative base so they fade quickly
+        // outside the horizontal band.
+        'infraspinatus': m(-5, 82, 0, 2.0),
+        'teres-minor':   m(-5, 70, 0, 2.0),
+        // Small posterior-line-of-pull assists.
+        'teres-major':   m(0, 22, 15, 1.8),
+        'lats':          m(-2, 20, 30, 2.0),
+        // Triceps long head: behind the GH axis, steep narrow bell.
+        'triceps-long':  m(-5, 52, 25, 2.2),
     },
     'Shoulder.internalRotation': {
-        // Convention: positive = more IR (per twist actionSign = +1).
-        'subscapularis':  m(40, 100, 15),
-        'lats':           m(25, 75, 0),
-        'pec-sternal':    m(20, 65, 0),
-        'teres-major':    m(20, 60, 0),
-        'delt-front':     m(15, 40, 15),
-        'pec-clavicular': m(10, 28, 0),
-        // Biceps short head: small IR moment via coracoid origin.
-        'biceps-short':   m(6, 15, 0),
+        // Primary IR: subscapularis. Slight steepness + peak bias into
+        // mid-IR where it has best mechanical advantage (length-tension
+        // is best when slightly shortened for IR direction).
+        'subscapularis':  m(30, 105, 15, 1.5),
+        // Lats / teres-major / pec-sternal: share the IR workload.
+        'lats':           m(15, 80, -5, 1.3),
+        'pec-sternal':    m(12, 70, 0, 1.3),
+        'teres-major':    m(12, 65, 0, 1.3),
+        // Anterior delt: modest IR assist.
+        'delt-front':     m(8, 42, 15, 1.4),
+        // Clavicular pec: smaller.
+        'pec-clavicular': m(5, 30, 0, 1.4),
+        // Biceps short head: tiny coracoid-origin IR assist.
+        'biceps-short':   m(2, 16, 0, 1.5),
     },
     'Shoulder.externalRotation': {
-        'infraspinatus': m(40, 100, 10),
-        'teres-minor':   m(30, 90, 10),
-        'delt-rear':     m(20, 55, 0),
-        // Supraspinatus contributes a small ER moment (part of the rotator
-        // cuff force couple decelerating IR and centering the head).
-        'supraspinatus': m(6, 18, 0),
+        // Infraspinatus + teres minor: primary ER. Slight steepness.
+        'infraspinatus': m(25, 105, 10, 1.5),
+        'teres-minor':   m(18, 92, 10, 1.5),
+        // Posterior delt: secondary ER contribution.
+        'delt-rear':     m(10, 58, 0, 1.4),
+        // Supraspinatus: small ER via force-couple role.
+        'supraspinatus': m(2, 20, 0, 1.6),
     },
 
     // =========================================================================
@@ -663,32 +686,26 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // at negative = muscle strong when elbow bent (stretched).
 
     'Elbow.flexion': {
-        // User guidance: biceps more active at extended elbow angles,
-        // brachioradialis more active at flexed.
-        // Biceps (both heads): peak relatively early in the curl — length-
-        // tension advantage, plus the supination moment arm is best here.
-        'biceps-long':     m(30, 100, 40),
-        'biceps-short':    m(30, 100, 50),
-        // Brachialis: the workhorse of pure elbow flexion — constant moment
-        // arm, insertion on ulna (unaffected by forearm rotation), strongest
-        // in mid-range.
-        'brachialis':      m(45, 115, 90),
-        // Brachioradialis: peaks LATE in the curl. Its line of pull
-        // becomes increasingly flexion-biased as the elbow bends past 90°.
-        'brachioradialis': m(20, 85, 120),
-        // Pronator teres (not in catalog) would assist slightly.
+        // Biceps: early-curl dominance — length-tension advantage +
+        // supination moment arm. Slight steepness to concentrate.
+        'biceps-long':     m(20, 105, 40, 1.5),
+        'biceps-short':    m(20, 105, 50, 1.5),
+        // Brachialis: workhorse, peaks mid-range. Wider bell (steepness
+        // 0.85) because it's the "always-on" flexor across the whole ROM.
+        'brachialis':      m(55, 115, 90, 0.85),
+        // Brachioradialis: late-curl dominance. Steep bell so it fades out
+        // before 60° flex (where biceps / brachialis own the work).
+        'brachioradialis': m(5, 95, 120, 2.0),
     },
     'Elbow.extension': {
-        // Triceps long head: stretched at overhead/elbow-flexed position,
-        // best when elbow is deeply flexed AND shoulder is flexed (think
-        // overhead triceps extension).
-        'triceps-long':    m(25, 85, -100),
-        // Lateral head: mid-flexion peak (stretched with strong lever).
-        'triceps-lateral': m(35, 105, -60),
-        // Medial head: workhorse, peaks earlier than the other heads since
-        // it's the "always-on" head that fires throughout elbow extension.
-        'triceps-medial':  m(30, 95, -45),
-        // Anconeus (not in catalog) would make a small contribution.
+        // Triceps long head: stretched at overhead/elbow-flexed. Steep bell.
+        'triceps-long':    m(-5, 95, -100, 2.0),
+        // Lateral head: mid-flex peak with steepness 1.4 for smooth rolloff.
+        'triceps-lateral': m(20, 110, -60, 1.4),
+        // Medial head: workhorse. Wider bell (steepness 0.8) so it's the
+        // "always-on" head that fires steadily across the whole extension
+        // ROM, unlike the long and lateral heads which peak narrowly.
+        'triceps-medial':  m(45, 100, -45, 0.8),
     },
 
     // =========================================================================
@@ -700,24 +717,28 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // Adduction: 0=standing, -30-ish=leg abducted.
 
     'Hip.flexion': {
-        // Iliopsoas becomes the dominant hip flexor past 60° flexion
-        // (hanging leg-raise top). Rectus femoris is strongest early before
-        // running out of length.
-        'iliopsoas':       m(35, 115, 100),
-        'rectus-femoris':  m(35, 90, 30),
-        'tfl':             m(25, 65, 15),
-        'sartorius':       m(15, 45, 60),
-        'pectineus':       m(20, 55, 30),
-        // Long/brevis adductors become hip flexors when the hip is EXTENDED
-        // (their line of pull is anterior to hip axis only in that
-        // territory). Peak in OPPOSITE of flexion direction.
-        'adductor-longus': m(10, 35, -15),
-        'adductor-brevis': m(8, 25, -15),
-        'gracilis':        m(5, 15, 0),
-        // Anterior fibers of glute med + glute min contribute to hip flexion
-        // in neutral to early range.
-        'glute-med':       m(5, 14, 15),
-        'glute-min':       m(4, 10, 15),
+        // Iliopsoas dominates past 60° flexion (deep leg-raise zone).
+        // Steepness so it takes over clearly from rectus-femoris.
+        'iliopsoas':       m(15, 120, 100, 2.2),
+        // Rectus femoris: early-flex dominance, fades as hip flexes past
+        // ~60° (two-joint muscle loses length). Steepness concentrates the
+        // early-range contribution.
+        'rectus-femoris':  m(10, 100, 30, 2.0),
+        // TFL: narrow bell at shallow flexion.
+        'tfl':             m(5, 72, 15, 1.7),
+        // Sartorius: broader mid-range bell.
+        'sartorius':       m(8, 50, 60, 1.4),
+        // Pectineus: mid-early assist.
+        'pectineus':       m(10, 60, 30, 1.5),
+        // Adductor longus/brevis: become flexors only when hip is EXTENDED.
+        // Narrow bells peaked on the extension side so they fade out in
+        // mid-to-deep flexion.
+        'adductor-longus': m(-5, 45, -15, 2.2),
+        'adductor-brevis': m(-3, 32, -15, 2.2),
+        'gracilis':        m(-2, 20, 0, 2.0),
+        // Glute med/min anterior fibers: small early-flex contribution.
+        'glute-med':       m(0, 18, 15, 1.8),
+        'glute-min':       m(0, 13, 15, 1.8),
     },
     'Hip.extension': {
         // Three-muscle tradeoff across ROM (tuned with higher steepness on
@@ -741,90 +762,79 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'glute-min':          m(6, 15, 0),
     },
     'Hip.abduction': {
-        'glute-med': m(40, 115, 30),
-        'glute-min': m(28, 80, 30),
-        'tfl':       m(28, 70, 15),
-        // Upper fibers of glute max assist abduction — reduced slightly per
-        // user feedback.
-        'glute-max': m(12, 35, 30),
-        // Sartorius's ASIS origin lends a small abduction component.
-        'sartorius': m(10, 22, 0),
-        // Piriformis (not in catalog) assists abduction in hip-flexed
-        // positions.
+        // Glute med: primary abductor. Steepness so it dominates mid-range
+        // abduction (peaks at 30°) and tapers at the extremes.
+        'glute-med': m(20, 125, 30, 1.5),
+        // Glute min: companion profile.
+        'glute-min': m(15, 88, 30, 1.5),
+        // TFL: shallow-abd bias (peaks earlier in ROM).
+        'tfl':       m(12, 72, 15, 1.6),
+        // Upper glute max fibers: small assist.
+        'glute-max': m(2, 38, 30, 1.8),
+        // Sartorius: narrow, small.
+        'sartorius': m(2, 24, 0, 1.8),
     },
     'Hip.adduction': {
-        // Adductor group + gracilis + pectineus peak when the hip is
-        // abducted (stretched, opposite of adduction direction).
-        // Adductor magnus: anterior portion is the primary adductor; the
-        // posterior portion still adducts but with a smaller share (its
-        // line of pull is more vertical/extensor-biased than medial).
-        'adductor-magnus-anterior':  m(32, 85, -30),
-        'adductor-magnus-posterior': m(10, 28, -30),
-        'adductor-longus': m(30, 85, -15),
-        'adductor-brevis': m(25, 65, -15),
-        'gracilis':        m(15, 45, -15),
-        'pectineus':       m(15, 45, 0),
-        // Glute max removed — it does not adduct the hip. Its line of pull
-        // from the posterior ilium/sacrum to the gluteal tuberosity is too
-        // lateral + posterior for any meaningful adduction moment.
-        // Posterior hamstring overlap:
-        'semimembranosus': m(5, 12, 0),
-        'semitendinosus':  m(4, 10, 0),
-        // Quadratus femoris (not in catalog) also adducts.
+        // Adductor magnus: anterior is primary, posterior smaller share.
+        // Adductors peak at slightly abducted position (stretched).
+        'adductor-magnus-anterior':  m(15, 95, -30, 1.4),
+        'adductor-magnus-posterior': m(5, 32, -30, 1.5),
+        'adductor-longus': m(12, 95, -15, 1.4),
+        'adductor-brevis': m(10, 72, -15, 1.4),
+        'gracilis':        m(5, 50, -15, 1.5),
+        'pectineus':       m(5, 50, 0, 1.5),
+        // Posterior hamstring small adduction contribution.
+        'semimembranosus': m(0, 15, 0, 1.6),
+        'semitendinosus':  m(0, 12, 0, 1.6),
     },
     'Hip.horizontalAdduction': {
-        // Horizontal adduction = bringing a flexed leg across the body.
-        // All adductors active in mid-range.
-        'adductor-magnus-anterior':  m(24, 75, 45),
-        'adductor-magnus-posterior': m(8, 22, 45),
-        'adductor-longus': m(30, 90, 45),
-        'adductor-brevis': m(25, 70, 45),
-        'gracilis':        m(15, 45, 45),
-        'pectineus':       m(25, 70, 30),
-        // Iliopsoas helps pull a flexed leg medially.
-        'iliopsoas':       m(15, 45, 60),
-        // Sartorius: slight assist via its medial line of pull in flexion.
-        'sartorius':       m(6, 15, 45),
+        // All adductors peak mid-range in a flexed-leg-crossing-body motion.
+        'adductor-magnus-anterior':  m(10, 82, 45, 1.4),
+        'adductor-magnus-posterior': m(3, 26, 45, 1.5),
+        'adductor-longus': m(12, 100, 45, 1.4),
+        'adductor-brevis': m(10, 78, 45, 1.4),
+        'gracilis':        m(5, 50, 45, 1.5),
+        'pectineus':       m(8, 78, 30, 1.4),
+        // Iliopsoas: medial pull on a flexed leg.
+        'iliopsoas':       m(5, 50, 60, 1.5),
+        // Sartorius: small medial-line assist.
+        'sartorius':       m(0, 18, 45, 1.6),
     },
     'Hip.horizontalAbduction': {
-        // Used to swing a flexed leg outward. Glute med/min + TFL are the
-        // primary posterior movers in this position.
-        'glute-med': m(28, 80, 0),
-        'tfl':       m(20, 55, 0),
-        'glute-min': m(18, 50, 0),
-        // Glute max: bumped up slightly (was 10/35, now 15/50) per user —
-        // upper fibers contribute meaningfully in hip-flexed horizontal
-        // abduction.
-        'glute-max': m(15, 50, 0),
-        'sartorius': m(5, 12, 0),
-        // Piriformis (not in catalog) is a major contributor here.
+        // Glute med / min + TFL: primary movers when a flexed leg swings out.
+        'glute-med': m(10, 88, 0, 1.4),
+        'tfl':       m(8, 62, 0, 1.4),
+        'glute-min': m(6, 56, 0, 1.5),
+        // Glute max upper fibers: flex-hip horizontal abduction assist.
+        'glute-max': m(3, 56, 0, 1.6),
+        // Sartorius: small.
+        'sartorius': m(0, 15, 0, 1.7),
     },
     'Hip.internalRotation': {
-        // Anterior fibers of glute med/min + TFL drive hip IR.
-        'glute-med':       m(25, 70, 0),
-        'glute-min':       m(20, 60, 0),
-        'tfl':             m(20, 55, 0),
-        'adductor-longus': m(15, 42, 0),
-        'adductor-brevis': m(10, 28, 0),
-        'pectineus':       m(10, 28, 0),
-        // Medial hamstrings produce weak IR with knee flexed.
-        'semitendinosus':  m(8, 20, 0),
-        'semimembranosus': m(8, 20, 0),
+        // Glute med / min anterior fibers + TFL.
+        'glute-med':       m(10, 78, 0, 1.4),
+        'glute-min':       m(8, 68, 0, 1.4),
+        'tfl':             m(8, 62, 0, 1.4),
+        // Adductor group IR assist.
+        'adductor-longus': m(5, 48, 0, 1.5),
+        'adductor-brevis': m(2, 32, 0, 1.5),
+        'pectineus':       m(2, 32, 0, 1.5),
+        // Medial hamstrings (weak IR with knee flexed).
+        'semitendinosus':  m(0, 24, 0, 1.6),
+        'semimembranosus': m(0, 24, 0, 1.6),
     },
     'Hip.externalRotation': {
-        'glute-max':      m(30, 100, 0),
-        'sartorius':      m(15, 45, 0),
-        // Glute med/min posterior fibers are important external rotators.
-        // The deep 6 rotators (piriformis, obturators, QF, gemelli) aren't
-        // in the catalog, so these pick up their share.
-        'glute-med':      m(20, 50, 0),
-        'glute-min':      m(14, 32, 0),
-        // Biceps femoris long head externally rotates hip (fibular insertion,
-        // lateral line of pull). Short head crosses only the knee — not
-        // relevant here.
-        'biceps-femoris-long': m(10, 22, 0),
-        // Iliopsoas: weak ER (tendon wraps lesser trochanter; debated).
-        'iliopsoas':      m(8, 20, 0),
+        // Glute max: primary ER, broad bell (active across rotation ROM).
+        'glute-max':      m(25, 108, 0, 1.2),
+        // Sartorius: secondary.
+        'sartorius':      m(8, 50, 0, 1.4),
+        // Glute med/min posterior fibers: standing in for deep-6 rotators.
+        'glute-med':      m(10, 56, 0, 1.4),
+        'glute-min':      m(6, 36, 0, 1.4),
+        // Biceps femoris long head: ER via fibular line of pull.
+        'biceps-femoris-long': m(2, 26, 0, 1.5),
+        // Iliopsoas: weak/debated ER.
+        'iliopsoas':      m(0, 22, 0, 1.7),
     },
 
     // =========================================================================
@@ -836,36 +846,35 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // Knee.extension: 0=straight, -160=full flex (stretched quads).
 
     'Knee.flexion': {
-        // Hamstrings peak mid-range (~60°). Biceps femoris split into long
-        // and short heads — both flex the knee, but only the long head is
-        // biarticular (crosses the hip) and subject to the biarticular
-        // coupling modifier. Split ~60/40 between long / short per typical
-        // cross-section area.
-        'biceps-femoris-long':  m(20, 65, 60),
-        'biceps-femoris-short': m(15, 45, 60),
-        'semitendinosus':  m(25, 90, 60),
-        'semimembranosus': m(25, 90, 60),
-        // Gastroc crosses the knee posteriorly — more prominent at shallow
-        // knee flexion (<30°) where it contributes to unlocking the knee and
-        // initial flex. Peak shifted 30°→15° and bumped up.
-        'gastrocnemius':   m(25, 75, 15),
-        // Sartorius / gracilis: reduced slightly per user feedback.
-        'sartorius':       m(8, 22, 60),
-        'gracilis':        m(8, 22, 60),
-        // TFL weakly flexes the knee through the IT band below ~30°.
-        'tfl':             m(4, 10, 30),
-        // Popliteus (not in catalog) unlocks and initiates knee flexion.
+        // Hamstrings peak mid-range (~60°). Slight steepness so the three
+        // hamstring muscles clearly co-dominate the mid-ROM band.
+        'biceps-femoris-long':  m(8, 72, 60, 1.5),
+        'biceps-femoris-short': m(5, 52, 60, 1.5),
+        'semitendinosus':  m(10, 95, 60, 1.5),
+        'semimembranosus': m(10, 95, 60, 1.5),
+        // Gastroc: narrow bell at shallow knee flex (<30°). Negative base
+        // so it effectively drops to zero for deep-flex work (where the
+        // muscle is over-shortened at the knee and the hamstrings own it).
+        'gastrocnemius':   m(-12, 80, 15, 2.2),
+        // Sartorius / gracilis: small mid-range assists.
+        'sartorius':       m(2, 26, 60, 1.6),
+        'gracilis':        m(2, 26, 60, 1.6),
+        // TFL: shallow-flex assist through IT band.
+        'tfl':             m(0, 14, 30, 2.0),
     },
     'Knee.extension': {
         // Vasti peak at deeper flexion (stretched — high length-tension).
-        'vastus-lateralis':   m(35, 115, -60),
-        'vastus-medialis':    m(35, 115, -60),
-        'vastus-intermedius': m(30, 105, -60),
-        // Rectus femoris peaks earlier since it's also losing hip-flexor
-        // length as the knee straightens.
-        'rectus-femoris':     m(25, 85, -40),
-        // TFL weakly extends via IT band near full extension.
-        'tfl':                m(4, 10, 0),
+        // Steepness so they take over the deep-flex zone cleanly from
+        // rectus femoris.
+        'vastus-lateralis':   m(20, 125, -60, 1.8),
+        'vastus-medialis':    m(20, 125, -60, 1.8),
+        'vastus-intermedius': m(18, 112, -60, 1.8),
+        // Rectus femoris: peaks earlier (shallower flex) since it's also
+        // running out of hip-flexor length as the knee extends. Narrower
+        // bell so it doesn't compete with vasti at deep flex.
+        'rectus-femoris':     m(10, 92, -40, 1.8),
+        // TFL: small near-extension assist.
+        'tfl':                m(0, 14, 0, 2.0),
     },
 
     // =========================================================================
