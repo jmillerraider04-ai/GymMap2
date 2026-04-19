@@ -6807,8 +6807,18 @@ const BioModelPage: React.FC = () => {
                                                                           <title>{`Right: ${Math.round(rLive)}°`}</title>
                                                                       </g>
                                                                   )}
-                                                                  {/* X-axis labels */}
+                                                                  {/* X-axis labels: min, three intermediate ticks
+                                                                      at 25 / 50 / 75 % of the range, and max. Min
+                                                                      anchors start, max anchors end, intermediate
+                                                                      labels anchor middle so they center on their
+                                                                      x position. */}
                                                                   <text x="0" y={SVG_H + 12} fontSize="9" fill="#9ca3af">{range.min.toFixed(0)}°</text>
+                                                                  {[0.25, 0.5, 0.75].map(t => {
+                                                                      const ang = range.min + (range.max - range.min) * t;
+                                                                      return (
+                                                                          <text key={t} x={SVG_W * t} y={SVG_H + 12} fontSize="9" fill="#9ca3af" textAnchor="middle">{ang.toFixed(0)}°</text>
+                                                                      );
+                                                                  })}
                                                                   <text x={SVG_W} y={SVG_H + 12} fontSize="9" fill="#9ca3af" textAnchor="end">{range.max.toFixed(0)}°</text>
                                                               </svg>
                                                           </div>
