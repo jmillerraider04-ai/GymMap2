@@ -362,12 +362,15 @@ const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
         'abduction':            createCap(35, 65,  90),
         // Add peak 95 Nm @ -90° (adductors stretched at abducted position).
         'adduction':            createCap(45, 95,  -90),
-        // HorizAbd peak 75 Nm @ -70° (rear delt + post cuff stretched when
-        // arm is crossed forward).
-        'horizontalAbduction':  createCap(40, 75,  -70),
-        // HorizAdd peak 115 Nm @ -15° (pec sternal slightly behind T-pose,
-        // STRETCHED — this is the bench-press axis and very strong).
-        'horizontalAdduction':  createCap(55, 115, -15),
+        // HorizAbd peak 85 Nm @ -70° (rear delt + ALL posterior rotator
+        // cuff + rhomboids + mid traps + teres major + lats stretched
+        // when arm is crossed forward — much more muscle mass than pure
+        // frontal-plane abduction, hence 85 > shoulder.abduction 65).
+        'horizontalAbduction':  createCap(45, 85,  -70),
+        // HorizAdd peak 110 Nm @ -15° (pec sternal slightly behind T-pose,
+        // STRETCHED — the bench-press axis). HorizAdd/HorizAbd ≈ 1.29,
+        // matching the Tibone / Moore isokinetic-ratio range of 1.2-1.4.
+        'horizontalAdduction':  createCap(55, 110, -15),
         // IR peak 55 Nm @ 0° (subscap mid-rotation).
         'internalRotation':     createCap(30, 55,  0),
         // ER peak 30 Nm @ +10° (infraspinatus slightly into ER).
