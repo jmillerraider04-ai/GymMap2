@@ -941,16 +941,15 @@ const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
     //     anatomically small; +10 was way too much).
     'Scapula.dir.y': { min: -12, max: 4 },
     // Scapula.dir.z: negative = retraction, positive = protraction.
-    //   Retraction (min)  widened  −15 → −18 (a bit more pinch back).
-    //   Protraction (max) reduced  +10 →  +7 (tighter reach forward).
+    // Symmetric ±10 ROM.
     'Scapula.dir.z': {
-        min: -18, max: 7,
+        min: -10, max: 10,
         // "Retraction limit increases slightly as the scapula elevates."
         // Elevation = dir.y decreasing (more negative). dir.z.min is the
         // retraction stop; we want it to decrease (more retraction) as y
         // decreases. effective.min = min + slopeMin * source.currentValue
-        //   y =   0  →  eff.min = -18
-        //   y = -12  →  eff.min = -18 + 0.5 * -12 = -24 (6 more retraction)
+        //   y =   0  →  eff.min = -10
+        //   y = -12  →  eff.min = -10 + 0.5 * -12 = -16 (6 more retraction)
         coupling: { dependsOn: 'Scapula.dir.y', slopeMin: 0.5, slopeMax: 0 },
     },
 
