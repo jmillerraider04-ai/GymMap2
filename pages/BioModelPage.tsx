@@ -2332,7 +2332,7 @@ const BioModelPage: React.FC = () => {
                           const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
                           const isPos = actName === act.positiveAction;
                           const availability = sectionAvailabilityModifier(
-                              jg, act, isPos, bone, rawTorques, currentPosture, currentTwists,
+                              jg, act, isPos, bone, rawTorques, kin2, currentPosture, currentTwists,
                           );
                           const capVal = capLk
                               ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists)) * availability
@@ -2391,7 +2391,7 @@ const BioModelPage: React.FC = () => {
                       const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
                       const isPos = actName === act.positiveAction;
                       const availability = sectionAvailabilityModifier(
-                          jg, act, isPos, bone, rawTorques, currentPosture, currentTwists,
+                          jg, act, isPos, bone, rawTorques, kin2, currentPosture, currentTwists,
                       );
                       const capVal = capLk
                           ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists)) * availability
@@ -3060,12 +3060,39 @@ const BioModelPage: React.FC = () => {
   // reductionSum). Capped so no single action can drop more than 15%.
   const MAX_CAPACITY_REDUCTION = 0.15;
   const COUPLING_STRENGTH = 1.0;
+  // Compute the world-space axis for a given action at a given bone. Mirrors
+  // the axis-selection logic in Phase B col-building: bone-axis uses the
+  // bone's current direction; useWorldAxis uses act.axis as-is; local-frame
+  // actions use the action axis transformed through the bone's jointFrame.
+  // Needed so sectionAvailabilityModifier can compute the SIGN of tau0 at
+  // the other joint's actions (to tell agonist from antagonist demand).
+  const actionWorldAxis = (
+      act: ActionAxis,
+      bone: string,
+      kin: ReturnType<typeof calculateKinematics>,
+  ): Vector3 | null => {
+      if (act.useWorldAxis) return normalize(act.axis);
+      if (act.isBoneAxis) {
+          const bs = kin.boneStartPoints[bone];
+          const be = kin.boneEndPoints[bone];
+          if (!bs || !be) return null;
+          return normalize(sub(be, bs));
+      }
+      const jf = kin.jointFrames[bone];
+      if (!jf) return null;
+      return normalize({
+          x: act.axis.x*jf.x.x + act.axis.y*jf.y.x + act.axis.z*jf.z.x,
+          y: act.axis.x*jf.x.y + act.axis.y*jf.y.y + act.axis.z*jf.z.y,
+          z: act.axis.x*jf.x.z + act.axis.y*jf.y.z + act.axis.z*jf.z.z,
+      });
+  };
   const sectionAvailabilityModifier = (
       jg: JointGroup,
       ax: ActionAxis,
       isPositive: boolean,
       bone: string,
       rawTorques: Record<string, Vector3>,
+      kin: ReturnType<typeof calculateKinematics>,
       curPosture: Posture,
       curTwists: Record<string, number>,
   ): number => {
@@ -3113,16 +3140,17 @@ const BioModelPage: React.FC = () => {
               if (!otherActs) continue;
 
               for (const otherAx of otherActs) {
-                  // Skip bone-axis (twist) and world-axis (horizontal) actions
-                  // for now — they need frame transforms to get a correct tau0
-                  // and the coupling contribution is small for those.
-                  if (otherAx.isBoneAxis || otherAx.useWorldAxis) continue;
-
-                  // Coarse tau0 using local-frame axis (fine for sign-of-demand).
-                  const tau0Other =
-                      otherRawTau.x * otherAx.axis.x +
-                      otherRawTau.y * otherAx.axis.y +
-                      otherRawTau.z * otherAx.axis.z;
+                  // tau0 at the other joint's action axis in WORLD space.
+                  // Handles all three axis types: bone-axis (twist, uses bone
+                  // direction), world-axis (horizontal ab/ad), and local-
+                  // frame (normal flex/abd axes transformed via jointFrame).
+                  // Without this transform, horizontal ab/ad — which is the
+                  // primary shoulder demand in bench press — wouldn't fire
+                  // the coupling at all because its local-frame Y axis is not
+                  // the same as the world vertical it semantically represents.
+                  const worldAx = actionWorldAxis(otherAx, sideBone, kin);
+                  if (!worldAx) continue;
+                  const tau0Other = dotProduct(otherRawTau, worldAx);
                   if (Math.abs(tau0Other) < 1e-6) continue;
 
                   // The section OPPOSITE to the demand direction at this joint.
