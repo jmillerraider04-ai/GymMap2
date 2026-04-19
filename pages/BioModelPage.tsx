@@ -436,7 +436,8 @@ const MUSCLE_CATALOG: MuscleDef[] = [
     { id: 'vastus-medialis',    name: 'Vastus Medialis',    region: 'Quads' },
     { id: 'vastus-intermedius', name: 'Vastus Intermedius', region: 'Quads' },
     // Hamstrings
-    { id: 'biceps-femoris',  name: 'Biceps Femoris',  region: 'Hamstrings' },
+    { id: 'biceps-femoris-long',  name: 'Biceps Femoris (Long Head)',  region: 'Hamstrings' },
+    { id: 'biceps-femoris-short', name: 'Biceps Femoris (Short Head)', region: 'Hamstrings' },
     { id: 'semitendinosus',  name: 'Semitendinosus',  region: 'Hamstrings' },
     { id: 'semimembranosus', name: 'Semimembranosus', region: 'Hamstrings' },
     // Calves
@@ -715,14 +716,18 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         //   glute-max   dominates   0° to −40°  (shallow flex)
         //   hamstrings  dominate  −40° to −65°  (mid flex)
         //   add-magnus  dominates       < −65°  (deep flex)
-        'glute-max':       m(30, 120, -15, 3.65),
-        'semitendinosus':  m(25, 115, -55, 2.05),
-        'semimembranosus': m(25, 115, -55, 2.45),
+        'glute-max':          m(30, 120, -15, 3.65),
+        'semitendinosus':     m(25, 115, -55, 2.05),
+        'semimembranosus':    m(25, 115, -55, 2.45),
+        // Biceps femoris LONG head (biarticular — crosses hip + knee) is a
+        // hip extensor just like the other hams. Short head crosses only
+        // the knee and doesn't contribute here.
+        'biceps-femoris-long': m(25, 110, -55, 2.2),
         // Negative base — the bell drops fast to effectively zero away from
         // the peak, concentrating contribution tightly at deep flexion.
-        'adductor-magnus': m(-16, 120, -100),
-        'glute-med':       m(10, 25, 0),
-        'glute-min':       m(6, 15, 0),
+        'adductor-magnus':    m(-16, 120, -100),
+        'glute-med':          m(10, 25, 0),
+        'glute-min':          m(6, 15, 0),
     },
     'Hip.abduction': {
         'glute-med': m(40, 115, 30),
@@ -799,8 +804,9 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'glute-med':      m(20, 50, 0),
         'glute-min':      m(14, 32, 0),
         // Biceps femoris long head externally rotates hip (fibular insertion,
-        // lateral line of pull).
-        'biceps-femoris': m(10, 22, 0),
+        // lateral line of pull). Short head crosses only the knee — not
+        // relevant here.
+        'biceps-femoris-long': m(10, 22, 0),
         // Iliopsoas: weak ER (tendon wraps lesser trochanter; debated).
         'iliopsoas':      m(8, 20, 0),
     },
@@ -814,8 +820,13 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // Knee.extension: 0=straight, -160=full flex (stretched quads).
 
     'Knee.flexion': {
-        // Hamstrings peak mid-range (~60°).
-        'biceps-femoris':  m(30, 100, 60),
+        // Hamstrings peak mid-range (~60°). Biceps femoris split into long
+        // and short heads — both flex the knee, but only the long head is
+        // biarticular (crosses the hip) and subject to the biarticular
+        // coupling modifier. Split ~60/40 between long / short per typical
+        // cross-section area.
+        'biceps-femoris-long':  m(20, 65, 60),
+        'biceps-femoris-short': m(15, 45, 60),
         'semitendinosus':  m(25, 90, 60),
         'semimembranosus': m(25, 90, 60),
         // Gastroc crosses the knee posteriorly — more prominent at shallow
