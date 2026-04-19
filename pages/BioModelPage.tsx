@@ -507,8 +507,15 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // in the app and re-capture.
 
     'Shoulder.flexion': {
-        'delt-front':        m(85, 45, 38),
-        'pec-clavicular':    m(30, 85, 70),
+        // Anterior delt: still inverted (base > peak) but less aggressively —
+        // the previous 85→45 inversion drove too much spurious flexion-share
+        // away from delt-front. Now 64→50 keeps it the dominant mover early
+        // while still tapering as the arm passes the horizon.
+        'delt-front':        m(64, 50, 38),
+        // Pec clavicular: tightened (peak 85→73, base 30→38, steepness 1→1.45)
+        // to reduce its share-stealing in horizAdd-heavy motions where small
+        // flex demand was making pec-clav read higher than pec-sternal.
+        'pec-clavicular':    m(38, 73, 70, 1.45),
         'biceps-long':       m(12, 30, 60),
         'biceps-short':      m(12, 28, 60),
         'traps-lower':       m(5, 25, 150),
@@ -517,17 +524,30 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'pec-sternal':       m(0, 19, -65, 5),
     },
     'Shoulder.extension': {
-        'lats':           m(0, 127, -73, 2.6),
+        // Lats: aggressive negative-base bell (-87) so contribution falls
+        // sharply outside the mid-pulldown zone (peak 105 at -67°). Previous
+        // (0, 127, -73, 2.6) was too broad and inflated antagonist
+        // subtraction during shoulder flexion demand.
+        'lats':           m(-87, 105, -67, 1.05),
         'teres-major':    m(20, 63, -60),
-        'pec-sternal':    m(23, 89, -143, 1.85),
-        'delt-rear':      m(30, 85, -20),
+        // Pec sternal: peak pushed deeper (-143°→-169°, near full overhead)
+        // with negative base (-12) and steeper rolloff (1.85→3.35). Still
+        // contributes to overhead extension (lat pulldown territory) but
+        // doesn't bleed into mid-range extension where it shouldn't fire.
+        'pec-sternal':    m(-12, 87, -169, 3.35),
+        // Rear delt: scaled down (was 30→85, now 22→55) to avoid
+        // overpowering teres-major / triceps-long at shallow extension.
+        'delt-rear':      m(22, 55, -20),
         'triceps-long':   m(1, 72, -86, 2.6),
         'rhomboids':      m(25, 26, -60),
     },
     'Shoulder.abduction': {
         'delt-side':         m(10, 100, 72, 2.75),
         'supraspinatus':     m(40, 55, 15, 2.05),
-        'delt-front':        m(10, 81, 110, 1.9),
+        // Front delt: peak moved 110°→180° (full overhead). Anterior fibers
+        // contribute most when the arm is highest; below ~90° abd they
+        // shouldn't dominate side delt.
+        'delt-front':        m(10, 81, 180, 1.9),
         'traps-lower':       m(5, 45, 95, 3.8),
         'serratus-anterior': m(3, 40, 81, 3.7),
         'biceps-long':       m(3, 12, 120),
@@ -549,11 +569,14 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         // Pec sternal dominates cross-body motion; peaks in mid-to-late
         // horizontal adduction (arm coming across midline).
         'pec-sternal':       m(35, 115, 70),
-        // Pec clavicular is strongest earlier in the ROM (arm forward, before
-        // it crosses midline).
-        'pec-clavicular':    m(30, 95, 40),
-        // Anterior delt is a big contributor, peaks forward.
-        'delt-front':        m(25, 80, 40),
+        // Pec clavicular: scaled down (peak 95→81, base 30→23) so pec-sternal
+        // wins horizAdd cleanly. Previous values made pec-clav nearly
+        // co-dominant in horizAdd, which combined with its primary-flexor
+        // role to push it ahead of pec-sternal in flying motions.
+        'pec-clavicular':    m(23, 81, 40),
+        // Anterior delt: scaled down (peak 80→65, base 25→22) for the same
+        // reason — it shouldn't over-share horizAdd with pec-sternal.
+        'delt-front':        m(22, 65, 40),
         // Biceps both heads assist via their anterior line of pull on the
         // scapula (coracoid + supraglenoid tubercle).
         'biceps-long':       m(8, 25, 60),
@@ -985,7 +1008,10 @@ const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
         min: -1.0, max: 1.02,
         coupling: { dependsOn: 'Shoulder.dir.x', slopeMin: -0.5, slopeMax: 0 },
     },
-    'Shoulder.dir.z': { min: -1.02, max: 0.5 },
+    // max bumped 0.5 → 0.65 (≈30° → ≈40° hyperextension behind body) to
+    // accommodate exercises like skull-crushers / overhead extensions where
+    // the elbow travels well behind the shoulder line.
+    'Shoulder.dir.z': { min: -1.02, max: 0.65 },
     'Shoulder.action.External Rotation': { min: -90, max: 90 },
 
     // --- Elbow hinge. The slider emits 0-160 meaning "degrees of flexion"
