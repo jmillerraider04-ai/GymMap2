@@ -280,7 +280,16 @@ const createCap = (base: number, specific: number = base, angle: number = 90): C
 // perfectly cosine-shaped — but it's the right shape (bell, smooth, peaked
 // at mid-range) and only uses the three numbers already in CapacityConfig.
 const evaluateCapacity = (cap: CapacityConfig, currentAngle: number): number => {
-    const dist = Math.min(Math.abs(currentAngle - cap.angle), 180);
+    // Circular distance — handles both wrapped and unwrapped currentAngle
+    // values consistently. Arm at +220° flex (unwrapped) and at −140° flex
+    // (wrapped) are the SAME physical position, and both must yield the
+    // same distance from a peak angle. Without the mod-360 step, an
+    // unwrapped +220 vs peak +100 gives dist=120 (correct), but a wrapped
+    // -140 vs +100 gives dist=240 capped to 180 (wrong, muscle reads as
+    // fully weak).
+    const diff = currentAngle - cap.angle;
+    const modDiff = ((diff % 360) + 360) % 360;
+    const dist = Math.min(modDiff, 360 - modDiff);
     const blend = 0.5 + 0.5 * Math.cos(dist * Math.PI / 180);
     return Math.max(cap.base + (cap.specific - cap.base) * blend, 0.001);
 };
@@ -992,10 +1001,16 @@ const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
     'Spine.action.Rotation L':       { min: -45, max: 45 },
 
     // --- Hip (femur unit direction, right-normalized) ---
-    // Standing rest: (0, 1, 0). Flexion forward curls y toward -0.5 with
-    // z → -0.85 at ~120°. Extension back reaches z ≈ 0.3 at ~20°.
-    // Abduction out to ≈ 45° gives x ≈ 0.7. Cross-midline adduction ≈ -0.35.
-    'Hip.dir.x': { min: -0.35, max: 0.75 },
+    // Standing rest: (0, 1, 0).
+    //   Abduction: active ROM 30-45° typical; pure-path max = asin(x.max).
+    //     x.max = 0.7  → 44.4° abduction (tight end of population ROM).
+    //   Adduction (cross-midline): 20-30° typical.
+    //     x.min = -0.35 → 20.5° adduction.
+    //   Flexion: 90° with straight knee, 120°+ with bent knee.
+    //     Reaches y = -0.5, z = -0.866 at 120° (in-box via combined paths).
+    //   Extension: 10-15° hyperextension.
+    //     z.max = 0.4 → 23.6° pure ext (slightly above typical).
+    'Hip.dir.x': { min: -0.35, max: 0.7 },
     'Hip.dir.y': { min: -0.55, max: 1.02 },
     'Hip.dir.z': { min: -0.9,  max: 0.4  },
     'Hip.action.External Rotation': { min: -45, max: 45 },
@@ -2781,12 +2796,25 @@ const BioModelPage: React.FC = () => {
       const sideSign = boneId.startsWith('l') ? -1 : 1;
       const rad = 180 / Math.PI;
       // Flexion/Extension axis: X axis dominant → signed angle in sagittal plane.
+      // Unwrap past overhead: when the arm has swept past (0,-1,0) via forward
+      // flexion into the back half-plane (y<0, z>0), atan2 wraps to a negative
+      // value; add 360° so the angle stays continuous with the flexion-sweep
+      // direction. Without unwrap, past-overhead positions would read as
+      // "extension" and the muscle bell eval (which caps |θ-peak| at 180°)
+      // would snap to the weakest-capacity side.
       if (Math.abs(ax.x) > 0.5) {
-          return Math.atan2(-dir.z, dir.y) * rad;
+          let raw = Math.atan2(-dir.z, dir.y) * rad;
+          if (dir.y < 0 && dir.z > 0) raw += 360;
+          return raw;
       }
       // Abduction/Adduction axis: Z axis dominant → signed angle in frontal plane.
+      // Unwrap past overhead via abduction (y<0, x·sideSign<0): arm has
+      // swept past (0,-1,0) counterclockwise into the cross-midline side.
       if (Math.abs(ax.z) > 0.5) {
-          return Math.atan2(dir.x * sideSign, dir.y) * rad;
+          const xs = dir.x * sideSign;
+          let raw = Math.atan2(xs, dir.y) * rad;
+          if (dir.y < 0 && xs < 0) raw += 360;
+          return raw;
       }
       // Horizontal ab/ad: world-Y axis (useWorldAxis) → angle in transverse plane.
       // Singularity at arm-vertical (dir ≈ ±y): the transverse-plane projection
@@ -6473,130 +6501,67 @@ const BioModelPage: React.FC = () => {
                       return { min: Math.min(a, b), max: Math.max(a, b) };
                   }
 
-                  // Case 2: ball-socket direction actions. Walk the pure
-                  // anatomical path for this action (forward sweep for
-                  // flexion, sideways sweep for abduction, transverse
-                  // sweep for horizontal, etc.) and find the furthest
-                  // point still inside the dir.x × dir.y × dir.z limit
-                  // box. That gives a tight, anatomically-motivated
-                  // max action angle in the section's primary direction
-                  // — no gimbal-lock wrap-around, no range inflation
-                  // from box corners that exceed the unit sphere.
+                  // Case 2: ball-socket direction actions. Dense-sample the
+                  // in-box subset of the unit sphere and compute each
+                  // sample's directionAngle via the SAME unwrapped formula
+                  // that getActionAngle uses at runtime. Take min/max.
                   //
-                  // Off-direction peaks (e.g. lats peaking at arm-flexed
-                  // position in Shoulder.extension) land as negative
-                  // peak angles; the peakAngles range-extension step
-                  // below widens the graph to include them.
+                  // Why sphere sampling instead of pure-path binary search:
+                  // the shoulder/hip limit boxes are NOT convex on the unit
+                  // sphere. The pure sagittal sweep for hip flexion, for
+                  // example, ends at ~64° when z hits zLim.min=-0.9; but
+                  // positions at 120°+ flexion are still reachable via
+                  // combined abduction+rotation paths (they live on a
+                  // disjoint in-box arc that the sagittal sweep can't
+                  // reach without going OUT of box). Sphere sampling sees
+                  // all of these reachable positions.
+                  //
+                  // Why unwrap: past-overhead positions (y<0, z>0 for flex,
+                  // or y<0, x·sideSign<0 for abd) have atan2 wrap to the
+                  // negative side. Without unwrap, a fully-flexed arm past
+                  // overhead reads as "-160°" instead of "+200°", which is
+                  // confusing for the user AND makes evaluateCapacity snap
+                  // to the weakest-capacity side (|θ−peak| caps at 180°).
+                  // Unwrap gives continuous values that match the drag-
+                  // direction semantics.
                   if ((group === 'Shoulder' || group === 'Hip') && !ax.isBoneAxis) {
                       const xLim = jointLimits[`${group}.dir.x`];
                       const yLim = jointLimits[`${group}.dir.y`];
                       const zLim = jointLimits[`${group}.dir.z`];
                       if (xLim && yLim && zLim) {
-                          // Parameterize BOTH anatomical sweep paths for this
-                          // axis — positive direction (this section's action:
-                          // flex / abd / horiz-abd) and negative direction
-                          // (the OPPOSITE section: ext / add / horiz-add).
-                          // We need both because the graph X-axis covers a
-                          // SIGNED range: positive = this section's ROM,
-                          // negative = the opposite section's ROM reached on
-                          // this same axis. Without computing both, the
-                          // negative side would stay at 0 and only extend
-                          // when a muscle peak happened to land there —
-                          // which doesn't reflect the joint's actual ROM
-                          // and makes the graph look truncated toward
-                          // neutral on one side.
-                          let pathPos: ((t: number) => { x: number; y: number; z: number }) | null = null;
-                          let pathNeg: ((t: number) => { x: number; y: number; z: number }) | null = null;
-                          if (Math.abs(ax.axis.x) > 0.5) {
-                              // Flex / Ext: sagittal plane sweep from (0,1,0).
-                              // Forward (z<0) = flex, backward (z>0) = ext.
-                              const zSignPos = isPositive ? -1 : 1;
-                              pathPos = (t) => ({ x: 0, y: Math.cos(t), z:  zSignPos * Math.sin(t) });
-                              pathNeg = (t) => ({ x: 0, y: Math.cos(t), z: -zSignPos * Math.sin(t) });
-                          } else if (Math.abs(ax.axis.z) > 0.5) {
-                              // Abd / Add: frontal plane sweep from (0,1,0).
-                              // Out to side (x>0 in right-side convention) = abduction,
-                              // cross body (x<0) = adduction. Limits are bilaterally
-                              // normalized so we sample with sideSign=+1.
-                              const xSignPos = isPositive ? 1 : -1;
-                              pathPos = (t) => ({ x:  xSignPos * Math.sin(t), y: Math.cos(t), z: 0 });
-                              pathNeg = (t) => ({ x: -xSignPos * Math.sin(t), y: Math.cos(t), z: 0 });
-                          } else if (ax.useWorldAxis && Math.abs(ax.axis.y) > 0.5) {
-                              // Horizontal: transverse plane sweep from T-pose
-                              // (1,0,0). Backward (z>0) = horizontal abduction,
-                              // forward/across (z<0) = horizontal adduction.
-                              const zSignPos = isPositive ? 1 : -1;
-                              pathPos = (t) => ({ x: Math.cos(t), y: 0, z:  zSignPos * Math.sin(t) });
-                              pathNeg = (t) => ({ x: Math.cos(t), y: 0, z: -zSignPos * Math.sin(t) });
+                          let minAng = Infinity, maxAng = -Infinity;
+                          const N = 50;
+                          for (let i = 0; i <= N; i++) {
+                              for (let j = 0; j <= N; j++) {
+                                  const x = xLim.min + (xLim.max - xLim.min) * (i / N);
+                                  const y = yLim.min + (yLim.max - yLim.min) * (j / N);
+                                  const zsq = 1 - x * x - y * y;
+                                  if (zsq < 0) continue;
+                                  for (const zsign of [-1, 1]) {
+                                      const z = zsign * Math.sqrt(zsq);
+                                      if (z < zLim.min || z > zLim.max) continue;
+                                      // Bilateral normalization: sample with
+                                      // sideSign=+1 (right-side convention).
+                                      // Left side mirrors symmetrically.
+                                      let raw: number;
+                                      if (Math.abs(ax.axis.x) > 0.5) {
+                                          raw = Math.atan2(-z, y) * 180 / Math.PI;
+                                          if (y < 0 && z > 0) raw += 360;
+                                      } else if (Math.abs(ax.axis.z) > 0.5) {
+                                          raw = Math.atan2(x, y) * 180 / Math.PI;
+                                          if (y < 0 && x < 0) raw += 360;
+                                      } else if (ax.useWorldAxis && Math.abs(ax.axis.y) > 0.5) {
+                                          if (x * x + z * z < 1e-4) continue;
+                                          raw = Math.atan2(-z, x) * 180 / Math.PI;
+                                      } else continue;
+                                      const dirAng = raw * flip;
+                                      if (dirAng < minAng) minAng = dirAng;
+                                      if (dirAng > maxAng) maxAng = dirAng;
+                                  }
+                              }
                           }
-                          if (pathPos && pathNeg) {
-                              const inBox = (d: { x: number; y: number; z: number }) =>
-                                  d.x >= xLim.min && d.x <= xLim.max &&
-                                  d.y >= yLim.min && d.y <= yLim.max &&
-                                  d.z >= zLim.min && d.z <= zLim.max;
-                              // Binary-search the max in-box sweep angle on
-                              // each path. `findMaxAngle` starts at θ=0 (the
-                              // shared neutral anchor) and doubles outward.
-                              const findMaxAngle = (path: (t: number) => { x: number; y: number; z: number }): number => {
-                                  if (!inBox(path(0))) return 0;
-                                  let lo = 0, hi = Math.PI;
-                                  for (let k = 0; k < 24; k++) {
-                                      const mid = (lo + hi) / 2;
-                                      if (inBox(path(mid))) lo = mid;
-                                      else hi = mid;
-                                  }
-                                  return lo * 180 / Math.PI;
-                              };
-                              const maxPos = findMaxAngle(pathPos);
-                              const maxNeg = findMaxAngle(pathNeg);
-                              if (maxPos > 0 || maxNeg > 0) {
-                                  // Graph X-axis: [-maxNeg, +maxPos]. The
-                                  // positive extent is how far the limb can
-                                  // move in THIS section's direction; the
-                                  // negative extent is how far it can move
-                                  // in the OPPOSITE direction on the same
-                                  // axis. Both come from the same dir-box
-                                  // limits.
-                                  return { min: -maxNeg, max: maxPos };
-                              }
-                              // Pure-path anchor (0,1,0) or (1,0,0) is out-of-box
-                              // for this action (e.g. Hip horizontal: the leg can't
-                              // reach the T-pose transverse-plane anchor). Fall back
-                              // to sampling the in-box subset of the unit sphere
-                              // and taking the directionAngle extremes. Bilateral
-                              // normalization means we sample with sideSign=+1.
-                              let rawMin = Infinity, rawMax = -Infinity;
-                              const N = 30;
-                              for (let i = 0; i <= N; i++) {
-                                  for (let j = 0; j <= N; j++) {
-                                      const x = xLim.min + (xLim.max - xLim.min) * (i / N);
-                                      const y = yLim.min + (yLim.max - yLim.min) * (j / N);
-                                      const zsq = 1 - x * x - y * y;
-                                      if (zsq < 0) continue;
-                                      for (const zsign of [-1, 1]) {
-                                          const z = zsign * Math.sqrt(zsq);
-                                          if (!inBox({ x, y, z })) continue;
-                                          let raw: number;
-                                          if (Math.abs(ax.axis.x) > 0.5) {
-                                              raw = Math.atan2(-z, y);
-                                          } else if (Math.abs(ax.axis.z) > 0.5) {
-                                              raw = Math.atan2(x, y);
-                                          } else {
-                                              // horizontal: skip near-singular (limb
-                                              // nearly vertical — angle is ill-defined)
-                                              if (x * x + z * z < 1e-4) continue;
-                                              raw = Math.atan2(-z, x);
-                                          }
-                                          if (raw < rawMin) rawMin = raw;
-                                          if (raw > rawMax) rawMax = raw;
-                                      }
-                                  }
-                              }
-                              if (rawMin !== Infinity) {
-                                  const a = rawMin * flip * 180 / Math.PI;
-                                  const b = rawMax * flip * 180 / Math.PI;
-                                  return { min: Math.min(a, b), max: Math.max(a, b) };
-                              }
+                          if (minAng !== Infinity) {
+                              return { min: minAng, max: maxAng };
                           }
                       }
                   }
