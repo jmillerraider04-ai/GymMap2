@@ -478,95 +478,96 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     //     arm in front.
 
     'Shoulder.flexion': {
-        // Anterior delt's line of pull becomes most advantageous as the arm
-        // elevates — peaks relatively LATE in flexion (past horizontal).
-        'delt-front':        m(30, 100, 110),
-        // Clavicular pec pulls the arm forward/up with best leverage from
-        // neutral to ~60°; falls off quickly above the horizontal.
-        'pec-clavicular':    m(35, 95, 50),
+        // Anterior delt dominates the LOW (0°-40°) and HIGH (120°-180°)
+        // ranges. Uses an INVERTED bell (base > peak, peak at 90°) so the
+        // contribution is high at the extremes of flexion and dips in the
+        // mid-range where clavicular pec takes over.
+        'delt-front':        m(110, 30, 90),
+        // Clavicular pec dominates the MID range (~60-120°). Peak at 90° with
+        // peak >> base gives a strong bump in that band while tailing off at
+        // the extremes.
+        'pec-clavicular':    m(15, 115, 90),
         // Biceps brachii: both heads cross GH anteriorly, modest assist.
         'biceps-long':       m(12, 30, 60),
         'biceps-short':      m(12, 28, 60),
         // Scapulohumeral rhythm: scapular upward rotators are essential past
-        // ~60° elevation. Assigned here with small contribution so that arm
-        // elevation automatically recruits them — peaks near full overhead.
+        // ~60° elevation. Lower traps + serratus are the upward rotators.
+        // Upper traps were removed — they're elevators/retractors, not
+        // flexors at the GH joint.
         'traps-lower':       m(5, 25, 150),
         'serratus-anterior': m(5, 22, 150),
-        'traps-upper':       m(4, 15, 150),
         // Supraspinatus contributes initial elevation (GH-level, not just abd).
         'supraspinatus':     m(4, 12, 20),
         // Coracobrachialis (not in catalog) would be here.
     },
     'Shoulder.extension': {
-        // Lats dominate mid-range pulldown (arm ~60° flexed forward, stretched
-        // with strong moment arm). Falls OFF when the arm goes near overhead
-        // — this is where pec sternal takes over per neuromechanical matching.
-        'lats':           m(30, 110, -60),
-        'teres-major':    m(25, 90, -60),
-        // Sternal pec becomes the dominant extensor/adductor at high
-        // elevation — best mechanical advantage for the stretched line of
-        // pull when the arm is overhead being pulled down.
-        'pec-sternal':    m(25, 95, -120),
+        // Lats: peak in the MID range (arm flexed forward ~50-60°, best
+        // line-of-pull leverage). Narrow bell with low base → steep
+        // dropoff going past 0° (behind body, out of lats' effective range)
+        // AND past -120° (overhead via flex, where pecs take over).
+        'lats':           m(15, 80, -50),
+        'teres-major':    m(20, 75, -55),
+        // Sternal pec: takes over PAST -100° as the arm approaches overhead.
+        // Strong peak at -130° to fully dominate the deep-flex zone.
+        'pec-sternal':    m(25, 110, -130),
         // Posterior delt works through most of extension, peaks near neutral
         // (the dedicated rear-delt range).
         'delt-rear':      m(30, 85, -20),
         // Triceps long head: strongest extension moment with arm overhead
         // (stretched, same territory as sternal pec).
-        'triceps-long':   m(12, 45, -120),
-        // Rhomboids / mid traps don't directly extend GH, but their
-        // contribution shows up via scapular retraction coupling; keeping
-        // them OUT of this section avoids double-counting (they'll appear
-        // through the Scapula.retraction path).
+        'triceps-long':   m(12, 45, -130),
+        // Rhomboids: small contribution via their scapular-retraction role.
+        // Their activation in pulling motions comes through Scapula.retraction
+        // primarily; this bell is just a small coupling assist.
+        'rhomboids':      m(4, 12, -60),
     },
     'Shoulder.abduction': {
-        // Lateral delt is the workhorse; peaks mid-range (~T-pose).
-        'delt-side':         m(35, 100, 90),
+        // Lateral delt is the workhorse; peaks around 70° where its line of
+        // pull is most effective for pure abduction.
+        'delt-side':         m(35, 100, 70),
         // Supraspinatus initiates the first 0-30°, then tapers off quickly.
         'supraspinatus':     m(40, 90, 15),
-        // Anterior delt's anterior fibers share the abduction role, peak
-        // slightly later than peak pure-abd because it tilts the arm
-        // forward as well.
-        'delt-front':        m(12, 38, 75),
-        // Posterior delt fibers assist past 90° (overhead work).
-        'delt-rear':         m(6, 20, 120),
-        // S/H rhythm: upward rotators essential past 60° elevation.
+        // Anterior delt becomes more active PAST 90° (shares elevation role
+        // with lateral delt at higher arm positions).
+        'delt-front':        m(10, 55, 110),
+        // S/H rhythm: upward rotators essential past 60° elevation. Upper
+        // traps were removed — they're scapular elevators, not abductors
+        // of the humerus at the GH joint.
         'traps-lower':       m(5, 25, 150),
         'serratus-anterior': m(5, 22, 150),
-        'traps-upper':       m(4, 15, 150),
-        // Infraspinatus keeps the humeral head centered (stabilization),
-        // firing more in mid-range abduction.
-        'infraspinatus':     m(8, 22, 90),
-        'teres-minor':       m(5, 12, 90),
+        // Posterior delt, infraspinatus, and teres minor removed — they're
+        // external rotators / horizontal abductors, not abductors of the
+        // humerus in the frontal plane.
         // Biceps long head becomes a weak abductor past 90° if the shoulder
         // is externally rotated (tendon rides anterior to head).
         'biceps-long':       m(3, 12, 120),
     },
     'Shoulder.adduction': {
-        // Same as extension: lats dominate mid-range, pecs dominate overhead.
-        'lats':           m(25, 105, -60),
-        'pec-sternal':    m(30, 115, -120),
-        'teres-major':    m(22, 85, -60),
-        // Subscapularis contributes to pulling the arm back down from
-        // overhead; modest role.
+        // Lats: dominant in the MID range (arm abducted 45-100°, being pulled
+        // down). Narrow bell centered at -75° (between user's stated -45 to
+        // -100° range) with low base so they drop off at both extremes.
+        'lats':           m(15, 105, -75),
+        'teres-major':    m(15, 90, -75),
+        // Sternal pec: dominant at BOTH extremes — deep overhead (past -120°)
+        // and cross-body (past +40°). Bell is wide with moderate peak, base is
+        // relatively high so contribution stays meaningful across the whole
+        // ROM except in the mid-lats range.
+        'pec-sternal':    m(60, 115, -140),
+        // Clavicular pec: dominant at the cross-body end (near +40°-+60°).
+        'pec-clavicular': m(15, 75, 45),
+        // Subscapularis: pulls down from overhead; narrow overhead-bias role.
         'subscapularis':  m(10, 30, -90),
         // Triceps long head: extension+adduction at full elevation.
-        'triceps-long':   m(10, 35, -120),
+        'triceps-long':   m(10, 35, -130),
         // Biceps long + short heads: small adduction contribution when arm
-        // is overhead; the line of pull from the coracoid/supraglenoid
-        // tubercle toward the radius pulls the arm down-and-medial.
+        // is overhead (coracoid/supraglenoid line of pull).
         'biceps-long':    m(5, 20, -120),
         'biceps-short':   m(5, 20, -120),
         // Posterior delt: small assist near overhead.
         'delt-rear':      m(5, 18, -120),
-        // Clavicular pec: assists pure pull-down from overhead.
-        'pec-clavicular': m(6, 22, -120),
-        // Cross-body pure adduction (arm crossing midline at side): some
-        // of the same primary muscles work, bell peak around +60.
-        // Already covered — lats/pecs at the bell tails can still contribute
-        // there. For dedicated cross-body-low adduction, subscapularis + pec
-        // clavicular have small bells with positive peaks (added separately
-        // would double the entries; keeping it simple with their -120 peaks
-        // and letting the bell tails cover the cross-body region).
+        // Rhomboids: small contribution via their scapular-retraction role.
+        // Primary activation comes through Scapula.retraction.
+        'rhomboids':      m(3, 10, -75),
     },
     'Shoulder.horizontalAdduction': {
         // Pec sternal dominates cross-body motion; peaks in mid-to-late
@@ -693,11 +694,16 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'glute-min':       m(4, 10, 15),
     },
     'Hip.extension': {
-        // Glute max: peaks deep in flexion (stretched, bottom of squat).
-        'glute-max':       m(35, 135, -60),
-        // Hamstrings (medial): peak in mid-range hip extension.
-        'semitendinosus':  m(25, 90, -30),
-        'semimembranosus': m(25, 90, -30),
+        // Glute max: peak shifted to -45° (moderate flexion) instead of -60°
+        // so it drops off FASTER past -90°. Specific also reduced from 135 to
+        // 105 so it's less dominant at deep flexion, leaving room for the
+        // hamstrings and adductor magnus to take over in that zone.
+        'glute-max':       m(30, 105, -45),
+        // Hamstrings (medial): peak shifted to -75° (mid of user's stated
+        // -100 to -50° dominance range) and specific bumped up so they're
+        // more prominent in this band.
+        'semitendinosus':  m(30, 105, -75),
+        'semimembranosus': m(30, 105, -75),
         // Adductor magnus (posterior fibers) becomes a major hip extensor
         // at deep flexion (coming out of the hole of a squat).
         'adductor-magnus': m(30, 105, -90),
@@ -727,9 +733,9 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'adductor-brevis': m(25, 65, -15),
         'gracilis':        m(15, 45, -15),
         'pectineus':       m(15, 45, 0),
-        // Glute max lower fibers contribute a small adduction moment
-        // (especially when the hip is flexed).
-        'glute-max':       m(6, 15, 0),
+        // Glute max removed — it does not adduct the hip. Its line of pull
+        // from the posterior ilium/sacrum to the gluteal tuberosity is too
+        // lateral + posterior for any meaningful adduction moment.
         // Posterior adductor magnus fibers overlap with hamstrings.
         'semimembranosus': m(5, 12, 0),
         'semitendinosus':  m(4, 10, 0),
@@ -749,11 +755,15 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'sartorius':       m(6, 15, 45),
     },
     'Hip.horizontalAbduction': {
-        // Used to swing a flexed leg outward.
-        'glute-max': m(30, 95, 0),
+        // Used to swing a flexed leg outward. Glute med/min + TFL are the
+        // primary posterior movers in this position.
         'glute-med': m(28, 80, 0),
         'tfl':       m(20, 55, 0),
         'glute-min': m(18, 50, 0),
+        // Glute max: reduced contribution (upper fibers only give a small
+        // assist in hip-flexed positions; the bulk of glute max is an
+        // extensor/ER, not a horizontal abductor).
+        'glute-max': m(10, 35, 0),
         'sartorius': m(5, 12, 0),
         // Piriformis (not in catalog) is a major contributor here.
     },
@@ -827,10 +837,15 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         // EHL, EDL, peroneus tertius (not in catalog) assist.
     },
     'Ankle.plantarFlexion': {
-        // Gastroc + soleus peak when ankle is dorsiflexed (stretched,
-        // OPPOSITE of plantar direction → negative).
-        'gastrocnemius': m(30, 115, -15),
-        'soleus':        m(40, 125, -10),
+        // Gastroc: dominant in the PF range (below neutral). Peak at -30°
+        // (moderate PF) with a tight bell and low base so it drops off hard
+        // in the DF range. Physiologically this reflects its fast-twitch
+        // role in push-off / explosive PF at short muscle length.
+        'gastrocnemius': m(10, 120, -30),
+        // Soleus: dominant in the DF range (above neutral, stretched). Peak
+        // at +15° matches its tonic/postural role — strongest at longer
+        // length where it provides steady PF support.
+        'soleus':        m(25, 140, 15),
         // Tibialis posterior + peroneals (not in catalog) contribute.
     },
 
@@ -904,8 +919,8 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         // Middle traps contribute a little to elevation (transverse fibers
         // with small vertical component) per inclusivity principle.
         'traps-mid':        m(8, 20, 0),
-        // Serratus anterior upper fibers can assist elevation slightly.
-        'serratus-anterior': m(5, 12, 0),
+        // Serratus anterior removed — it's a protractor + upward-rotator,
+        // not an elevator of the scapula.
     },
     'Scapula.depression': {
         'traps-lower':       m(45, 115, 0),
@@ -921,9 +936,9 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     'Scapula.protraction': {
         'serratus-anterior': m(55, 135, 0),
         'pec-minor':         m(25, 65, 0),
-        // Pec major protracts the scapula via the humerus when pulling arm
-        // across body.
-        'pec-clavicular':    m(8, 20, 0),
+        // Sternal pec protracts the scapula via the humerus when pulling arm
+        // across body. Clavicular pec removed — its fiber orientation is
+        // more vertical and doesn't contribute meaningful protraction.
         'pec-sternal':       m(8, 20, 0),
     },
     'Scapula.retraction': {
@@ -6633,8 +6648,13 @@ const BioModelPage: React.FC = () => {
                                               // Current live directionAngle for each side's bone in this
                                               // section, computed the same way distributeMuscleLoadForFrame
                                               // does it so the marker lands exactly where the bell is
-                                              // evaluated at runtime. Widen the graph range to include the
-                                              // live positions so the marker never clips off the edge.
+                                              // evaluated at runtime. The range is NOT widened to include
+                                              // the live positions: the graph represents the joint's full
+                                              // reachable ROM (from the limit box, independent of the
+                                              // current pose). If the live marker ever lands outside the
+                                              // sphere-sampled range, that's a sampling-precision issue
+                                              // — bump N in getActionRange rather than making the graph
+                                              // rubber-band with the pose.
                                               const sectionGroupBones = GROUP_BONES[group];
                                               const sectionIsHinge = sectionGroupBones
                                                   ? /Forearm|Tibia|Foot/.test(sectionGroupBones.left)
@@ -6649,14 +6669,6 @@ const BioModelPage: React.FC = () => {
                                               };
                                               const lLive = sectionGroupBones ? liveDirAngle(sectionGroupBones.left) : null;
                                               const rLive = sectionGroupBones ? liveDirAngle(sectionGroupBones.right) : null;
-                                              if (lLive !== null) {
-                                                  range.min = Math.min(range.min, lLive);
-                                                  range.max = Math.max(range.max, lLive);
-                                              }
-                                              if (rLive !== null) {
-                                                  range.min = Math.min(range.min, rLive);
-                                                  range.max = Math.max(range.max, rLive);
-                                              }
 
                                               // Sample the bell curves across
                                               // the X range, normalize each
