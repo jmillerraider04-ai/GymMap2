@@ -180,9 +180,13 @@ interface MuscleDef {
 }
 
 interface MuscleContribution {
-    base: number;     // contribution at the worst angle
-    peak: number;     // contribution at the peak angle
-    angle: number;    // peak angle (degrees)
+    base: number;      // contribution at the worst angle
+    peak: number;      // contribution at the peak angle
+    angle: number;     // peak angle (degrees)
+    steepness?: number; // bell sharpness. 1 = default cosine bell.
+                        // >1 narrows the bell (faster transition base↔peak).
+                        // <1 widens it (more gradual transition).
+                        // Default is 1 for backward compatibility.
 }
 
 // Outer key: `${JointGroup}.${actionKey(directionName)}`, where directionName
@@ -279,7 +283,7 @@ const createCap = (base: number, specific: number = base, angle: number = 90): C
 // This is a deliberate simplification — real strength curves aren't
 // perfectly cosine-shaped — but it's the right shape (bell, smooth, peaked
 // at mid-range) and only uses the three numbers already in CapacityConfig.
-const evaluateCapacity = (cap: CapacityConfig, currentAngle: number): number => {
+const evaluateCapacity = (cap: CapacityConfig, currentAngle: number, steepness: number = 1): number => {
     // Circular distance — handles both wrapped and unwrapped currentAngle
     // values consistently. Arm at +220° flex (unwrapped) and at −140° flex
     // (wrapped) are the SAME physical position, and both must yield the
@@ -287,10 +291,19 @@ const evaluateCapacity = (cap: CapacityConfig, currentAngle: number): number => 
     // unwrapped +220 vs peak +100 gives dist=120 (correct), but a wrapped
     // -140 vs +100 gives dist=240 capped to 180 (wrong, muscle reads as
     // fully weak).
+    //
+    // `steepness` controls how sharply the bell transitions from peak back
+    // down to base. Applied as an exponent on the normalized cosine blend:
+    //    1   → default cosine bell (gradual, full-width 360°).
+    //    > 1 → narrower, more abrupt transition (2 ≈ half-width halved).
+    //    < 1 → wider, more gradual transition.
+    // The peak (dist=0) and base (dist=180°) are invariant regardless of
+    // steepness — only the SHAPE between them changes.
     const diff = currentAngle - cap.angle;
     const modDiff = ((diff % 360) + 360) % 360;
     const dist = Math.min(modDiff, 360 - modDiff);
-    const blend = 0.5 + 0.5 * Math.cos(dist * Math.PI / 180);
+    const cosBlend = 0.5 + 0.5 * Math.cos(dist * Math.PI / 180);
+    const blend = steepness === 1 ? cosBlend : Math.pow(cosBlend, steepness);
     return Math.max(cap.base + (cap.specific - cap.base) * blend, 0.001);
 };
 
@@ -460,7 +473,7 @@ const MUSCLE_CATALOG: MuscleDef[] = [
 //   upper traps and serratus anterior for overhead motion) show up in the
 //   relevant shoulder sections as small contributions peaking near full
 //   elevation (angle = +150).
-const m = (base: number, peak: number, angle: number): MuscleContribution => ({ base, peak, angle });
+const m = (base: number, peak: number, angle: number, steepness: number = 1): MuscleContribution => ({ base, peak, angle, steepness });
 const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // =========================================================================
     // SHOULDER
@@ -3715,7 +3728,7 @@ const BioModelPage: React.FC = () => {
           const weights: { id: string; w: number }[] = [];
           for (const id of ids) {
               const c = assigned[id];
-              const w = evaluateCapacity({ base: c.base, specific: c.peak, angle: c.angle }, angleInDirection);
+              const w = evaluateCapacity({ base: c.base, specific: c.peak, angle: c.angle }, angleInDirection, c.steepness ?? 1);
               weights.push({ id, w });
               total += w;
           }
@@ -4820,7 +4833,7 @@ const BioModelPage: React.FC = () => {
               ...prev,
               [sectionKey]: {
                   ...existing,
-                  [muscleId]: { base: 30, peak: 80, angle: 90 },
+                  [muscleId]: { base: 30, peak: 80, angle: 90, steepness: 1 },
               },
           };
       });
@@ -6684,7 +6697,7 @@ const BioModelPage: React.FC = () => {
                                                       // bell as joint capacities
                                                       // so muscle contributions
                                                       // share the curve shape.
-                                                      const v = evaluateCapacity({ base: c.base, specific: c.peak, angle: c.angle }, angle);
+                                                      const v = evaluateCapacity({ base: c.base, specific: c.peak, angle: c.angle }, angle, c.steepness ?? 1);
                                                       values.push({ id, v });
                                                       total += v;
                                                   }
@@ -6879,6 +6892,23 @@ const BioModelPage: React.FC = () => {
                                                                                   className="flex-1 bio-range text-teal-500"
                                                                               />
                                                                               <span className="text-[10px] font-mono font-bold text-gray-500 w-10 text-right">{Math.round(c.angle)}°</span>
+                                                                          </div>
+                                                                      </div>
+                                                                      <div className="mt-2">
+                                                                          <label className="text-[8px] font-bold text-gray-400 uppercase block mb-1">
+                                                                              Steepness <span className="text-gray-300 normal-case">(1 = gradual, higher = narrower)</span>
+                                                                          </label>
+                                                                          <div className="flex items-center gap-2">
+                                                                              <input
+                                                                                  type="range"
+                                                                                  min={0.25}
+                                                                                  max={5}
+                                                                                  step={0.05}
+                                                                                  value={isNaN(c.steepness ?? 1) ? 1 : (c.steepness ?? 1)}
+                                                                                  onChange={(e) => updateMuscleContribution(sectionKey, id, 'steepness', parseFloat(e.target.value))}
+                                                                                  className="flex-1 bio-range text-purple-500"
+                                                                              />
+                                                                              <span className="text-[10px] font-mono font-bold text-gray-500 w-10 text-right">{(c.steepness ?? 1).toFixed(2)}</span>
                                                                           </div>
                                                                       </div>
                                                                   </div>
