@@ -1352,6 +1352,12 @@ const BioModelPage: React.FC = () => {
   // inner key is muscle id from MUSCLE_CATALOG, value is the {base, peak, angle}
   // contribution profile evaluated by the same cosine bell as joint capacities.
   const [muscleAssignments, setMuscleAssignments] = useState<MuscleAssignmentMap>(DEFAULT_MUSCLE_ASSIGNMENTS);
+  // Biarticular-muscle coupling toggle (Capacities tab). When OFF,
+  // sectionAvailabilityModifier short-circuits to 1 — capacities are the
+  // raw bell values with no cross-joint inhibition. Useful for A/B
+  // testing: flip this off, note the effort distribution, flip it back
+  // on, compare.
+  const [biarticularCouplingEnabled, setBiarticularCouplingEnabled] = useState(true);
   // Joint Analysis tab display mode:
   //   '1rm-local' — normalize so the hardest action at the current pose reads
   //                 100%. Interprets the pose as "loaded to 1RM right now."
@@ -2995,6 +3001,8 @@ const BioModelPage: React.FC = () => {
       curPosture: Posture,
       curTwists: Record<string, number>,
   ): number => {
+      // Early out when the Capacities-tab toggle is off — feature disabled.
+      if (!biarticularCouplingEnabled) return 1;
       const sectionName = isPositive ? ax.positiveAction : ax.negativeAction;
       const sectionKey = `${jg}.${actionKey(sectionName)}`;
       const muscles = muscleAssignments[sectionKey];
@@ -6693,6 +6701,30 @@ const BioModelPage: React.FC = () => {
                        <p className="text-xs text-purple-900 font-medium leading-relaxed">
                            Define the base and specific strength capacities for each joint action to drive the "Challenge" metric.
                        </p>
+                   </div>
+                   {/* Biarticular coupling toggle. When enabled, a two-joint
+                       muscle being used as an antagonist at one of its joints
+                       reduces the capacity of its agonist actions at the
+                       OTHER joint (bounded by 15% per action). Flip off to
+                       A/B-test effort distribution. */}
+                   <div className={`flex items-center justify-between px-4 py-3 rounded-xl border mb-6 ${biarticularCouplingEnabled ? 'bg-emerald-50 border-emerald-200' : 'bg-gray-50 border-gray-200'}`}>
+                       <div className="flex flex-col gap-0.5 min-w-0 mr-3">
+                           <span className="text-xs font-bold uppercase tracking-wide text-gray-700">
+                               Biarticular Coupling
+                           </span>
+                           <span className="text-[10px] text-gray-500 leading-snug">
+                               {biarticularCouplingEnabled
+                                   ? 'ON — two-joint muscles reduce the other joint\u2019s capacity when antagonized'
+                                   : 'OFF — capacities are raw bell values, no cross-joint inhibition'}
+                           </span>
+                       </div>
+                       <button
+                           onClick={() => setBiarticularCouplingEnabled(v => !v)}
+                           className={`relative w-11 h-6 rounded-full transition-colors duration-200 flex-shrink-0 ${biarticularCouplingEnabled ? 'bg-emerald-500' : 'bg-gray-300'}`}
+                           title={biarticularCouplingEnabled ? 'Disable biarticular coupling' : 'Enable biarticular coupling'}
+                       >
+                           <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${biarticularCouplingEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
+                       </button>
                    </div>
                    <div className="flex-1 overflow-y-auto pr-2 space-y-6">
                        {Object.entries(jointCapacities).map(([group, actions]) => {
