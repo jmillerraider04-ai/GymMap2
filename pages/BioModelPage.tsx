@@ -2331,8 +2331,11 @@ const BioModelPage: React.FC = () => {
                           const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
                           const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
                           const isPos = actName === act.positiveAction;
+                          const availability = sectionAvailabilityModifier(
+                              jg, act, isPos, bone, rawTorques, currentPosture, currentTwists,
+                          );
                           const capVal = capLk
-                              ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists))
+                              ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists)) * availability
                               : 1;
                           const sens: number[] = [];
                           for (const cref of consRefs) {
@@ -2387,8 +2390,11 @@ const BioModelPage: React.FC = () => {
                       const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
                       const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
                       const isPos = actName === act.positiveAction;
+                      const availability = sectionAvailabilityModifier(
+                          jg, act, isPos, bone, rawTorques, currentPosture, currentTwists,
+                      );
                       const capVal = capLk
-                          ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists))
+                          ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists)) * availability
                           : 1;
 
                       const sens: number[] = [];
@@ -3001,6 +3007,156 @@ const BioModelPage: React.FC = () => {
 
       // Case 3: fallback.
       return { min: 0, max: 180 };
+  };
+
+  // ===========================================================================
+  // BIARTICULAR MUSCLE COUPLING (Phase B capacity modifier)
+  // ===========================================================================
+  //
+  // Real physiology: a two-joint muscle's neural drive is partially suppressed
+  // when it would act as an ANTAGONIST at one of the joints it crosses. The
+  // monoarticular synergists at the other joint compensate, but not fully —
+  // net joint capacity there drops a bit.
+  //
+  // Concrete example: in a bench press the shoulder demands flexion +
+  // horizontal adduction. The triceps long head — which extends both shoulder
+  // and elbow — is being recruited as an antagonist at the shoulder, so its
+  // neural drive is inhibited. Because it ALSO does elbow extension, the
+  // elbow's effective capacity for extension drops by the triceps long head's
+  // share of that action × its antagonist engagement at the shoulder. Phase
+  // B's KKT optimization then distributes less reaction load to the elbow and
+  // more to the shoulder — matching the empirical reality that bench press
+  // is chest-dominant, not triceps-dominant.
+  //
+  // `muscleJointMap`: muscle ID → set of joint groups where it's currently
+  // assigned. A muscle with |groups| >= 2 is biarticular (or multi-articular).
+  // Recomputed when muscleAssignments changes.
+  const muscleJointMap = useMemo(() => {
+      const map: Record<string, Set<JointGroup>> = {};
+      for (const sectionKey of Object.keys(muscleAssignments)) {
+          const dotIdx = sectionKey.indexOf('.');
+          if (dotIdx < 0) continue;
+          const jg = sectionKey.slice(0, dotIdx) as JointGroup;
+          for (const muscleId of Object.keys(muscleAssignments[sectionKey])) {
+              if (!map[muscleId]) map[muscleId] = new Set<JointGroup>();
+              map[muscleId].add(jg);
+          }
+      }
+      return map;
+  }, [muscleAssignments]);
+
+  // Availability multiplier for a joint-action's capacity, accounting for
+  // biarticular muscles inhibited at their other joints. Returns a factor
+  // in [1 - MAX_REDUCTION, 1]. Called from Phase B col-building.
+  //
+  // Formula: for each biarticular muscle m contributing to (jg, section):
+  //   • Compute m's share at (jg, section) via its bell at the current
+  //     direction-angle, normalized against the section's total weight.
+  //   • For each OTHER joint group K where m is assigned, check whether m
+  //     appears in the ANTAGONIST section at K relative to K's current demand
+  //     direction (from Phase A rawTorques).
+  //   • If yes, accumulate: reductionSum += shareAtHere × shareAtAntagonistK.
+  // Then effective availability = 1 - min(MAX_REDUCTION, COUPLING_STRENGTH ×
+  // reductionSum). Capped so no single action can drop more than 15%.
+  const MAX_CAPACITY_REDUCTION = 0.15;
+  const COUPLING_STRENGTH = 1.0;
+  const sectionAvailabilityModifier = (
+      jg: JointGroup,
+      ax: ActionAxis,
+      isPositive: boolean,
+      bone: string,
+      rawTorques: Record<string, Vector3>,
+      curPosture: Posture,
+      curTwists: Record<string, number>,
+  ): number => {
+      const sectionName = isPositive ? ax.positiveAction : ax.negativeAction;
+      const sectionKey = `${jg}.${actionKey(sectionName)}`;
+      const muscles = muscleAssignments[sectionKey];
+      if (!muscles) return 1;
+
+      const dirAngle = sectionDirectionAngle(bone, ax, isPositive, curPosture, curTwists);
+
+      // Compute per-muscle weights at this section.
+      const weights: Record<string, number> = {};
+      let totalWeight = 0;
+      for (const [mid, m] of Object.entries(muscles)) {
+          const w = Math.max(0, evaluateCapacity(
+              { base: m.base, specific: m.peak, angle: m.angle },
+              dirAngle,
+              m.steepness ?? 1,
+          ));
+          weights[mid] = w;
+          totalWeight += w;
+      }
+      if (totalWeight < 1e-6) return 1;
+
+      let reductionSum = 0;
+
+      for (const [muscleId, _m] of Object.entries(muscles)) {
+          const presentAt = muscleJointMap[muscleId];
+          if (!presentAt || presentAt.size < 2) continue;
+
+          const shareHere = weights[muscleId] / totalWeight;
+          if (shareHere < 1e-6) continue;
+
+          // Check antagonist engagement at each other joint where m is present.
+          for (const otherJoint of presentAt) {
+              if (otherJoint === jg) continue;
+              const otherBones = GROUP_BONES[otherJoint];
+              if (!otherBones) continue;
+              // Same-side bone at the other joint — biarticulars stay on one side.
+              const sideBone = bone.startsWith('l') ? otherBones.left : otherBones.right;
+              const otherRawTau = rawTorques[sideBone];
+              if (!otherRawTau) continue;
+
+              const otherActs = JOINT_ACTIONS[otherJoint];
+              if (!otherActs) continue;
+
+              for (const otherAx of otherActs) {
+                  // Skip bone-axis (twist) and world-axis (horizontal) actions
+                  // for now — they need frame transforms to get a correct tau0
+                  // and the coupling contribution is small for those.
+                  if (otherAx.isBoneAxis || otherAx.useWorldAxis) continue;
+
+                  // Coarse tau0 using local-frame axis (fine for sign-of-demand).
+                  const tau0Other =
+                      otherRawTau.x * otherAx.axis.x +
+                      otherRawTau.y * otherAx.axis.y +
+                      otherRawTau.z * otherAx.axis.z;
+                  if (Math.abs(tau0Other) < 1e-6) continue;
+
+                  // The section OPPOSITE to the demand direction at this joint.
+                  // If m is in THAT section's muscles, m is being recruited as
+                  // an antagonist and its neural drive is inhibited.
+                  const antagonistName = tau0Other > 0 ? otherAx.negativeAction : otherAx.positiveAction;
+                  const antKey = `${otherJoint}.${actionKey(antagonistName)}`;
+                  const antMuscles = muscleAssignments[antKey];
+                  if (!antMuscles || !antMuscles[muscleId]) continue;
+
+                  // m is in the antagonist section. Compute its share there.
+                  const antIsPos = antagonistName === otherAx.positiveAction;
+                  const antDirAngle = sectionDirectionAngle(sideBone, otherAx, antIsPos, curPosture, curTwists);
+                  let antMyContrib = 0;
+                  let antTotal = 0;
+                  for (const [mid, am] of Object.entries(antMuscles)) {
+                      const w = Math.max(0, evaluateCapacity(
+                          { base: am.base, specific: am.peak, angle: am.angle },
+                          antDirAngle,
+                          am.steepness ?? 1,
+                      ));
+                      if (mid === muscleId) antMyContrib = w;
+                      antTotal += w;
+                  }
+                  if (antTotal < 1e-6) continue;
+
+                  const shareAtAntagonist = antMyContrib / antTotal;
+                  reductionSum += shareHere * shareAtAntagonist;
+              }
+          }
+      }
+
+      const reduction = Math.min(MAX_CAPACITY_REDUCTION, COUPLING_STRENGTH * reductionSum);
+      return 1 - reduction;
   };
 
   // A limit dimension is a single scalar axis that a user can bound. It's
