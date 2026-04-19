@@ -490,88 +490,50 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     //   HorizontalAbduction: 0=T-pose, +90=arm pulled behind body, negative=
     //     arm in front.
 
+    // NOTE: these defaults were captured from the in-app Muscles tab after
+    // the user hand-tuned each curve. Values with an explicit steepness
+    // argument have a non-default (non-1) bell sharpness; bells without it
+    // default to the standard cosine shape. To re-tune, edit here or edit
+    // in the app and re-capture.
+
     'Shoulder.flexion': {
-        // Anterior delt dominates the LOW and HIGH ranges. Uses an INVERTED
-        // bell (base > peak, peak at 70°) so contribution dips in the mid-
-        // range where clavicular pec takes over. Softened from the previous
-        // 110/30 split to 85/45 so the tradeoff is less extreme.
-        'delt-front':        m(85, 45, 70),
-        // Clavicular pec dominates the MID range. Peak at 70° with a
-        // moderately higher peak than base — noticeable mid-range bump
-        // without being over-the-top.
+        'delt-front':        m(85, 45, 38),
         'pec-clavicular':    m(30, 85, 70),
-        // Biceps brachii: both heads cross GH anteriorly, modest assist.
         'biceps-long':       m(12, 30, 60),
         'biceps-short':      m(12, 28, 60),
-        // Scapulohumeral rhythm: scapular upward rotators are essential past
-        // ~60° elevation. Lower traps + serratus are the upward rotators.
-        // Upper traps were removed — they're elevators/retractors, not
-        // flexors at the GH joint.
         'traps-lower':       m(5, 25, 150),
         'serratus-anterior': m(5, 22, 150),
-        // Supraspinatus contributes initial elevation (GH-level, not just abd).
         'supraspinatus':     m(4, 12, 20),
-        // Coracobrachialis (not in catalog) would be here.
+        'pec-sternal':       m(0, 19, -65, 5),
     },
     'Shoulder.extension': {
-        // Lats: slightly more active across the ROM overall, with peak shifted
-        // to -60° (deeper in the lats' effective zone). Narrow bell drops
-        // significantly past 0° (behind body — lats can't extend from there).
-        'lats':           m(20, 95, -60),
-        'teres-major':    m(20, 80, -60),
-        // Sternal pec: reduced slightly overall — was dominant past -100°,
-        // still is, but less so. Still peaks at -130° (deep overhead).
-        'pec-sternal':    m(20, 95, -130),
-        // Posterior delt works through most of extension, peaks near neutral
-        // (the dedicated rear-delt range).
+        'lats':           m(0, 127, -73, 2.6),
+        'teres-major':    m(20, 63, -60),
+        'pec-sternal':    m(23, 89, -143, 1.85),
         'delt-rear':      m(30, 85, -20),
-        // Triceps long head: reduced base/peak so it drops more at >0° ext
-        // as the user requested.
-        'triceps-long':   m(8, 35, -130),
-        // Rhomboids: bumped up a bit from the previous token contribution.
-        'rhomboids':      m(8, 25, -60),
+        'triceps-long':   m(1, 72, -86, 2.6),
+        'rhomboids':      m(25, 26, -60),
     },
     'Shoulder.abduction': {
-        // Lateral delt is the workhorse; peaks around 70° where its line of
-        // pull is most effective for pure abduction.
-        'delt-side':         m(35, 100, 70),
-        // Supraspinatus initiates the first 0-30°, then tapers off quickly.
-        'supraspinatus':     m(40, 90, 15),
-        // Anterior delt becomes more active PAST 90° (shares elevation role
-        // with lateral delt at higher arm positions).
-        'delt-front':        m(10, 55, 110),
-        // S/H rhythm: upward rotators essential past 60° elevation. Peaks
-        // shifted to 130° + bumped up so they're more active past 100° as
-        // the user requested.
-        'traps-lower':       m(10, 45, 130),
-        'serratus-anterior': m(10, 40, 130),
-        // Biceps long head becomes a weak abductor past 90° if the shoulder
-        // is externally rotated (tendon rides anterior to head).
+        'delt-side':         m(10, 100, 72, 2.75),
+        'supraspinatus':     m(40, 55, 15, 2.05),
+        'delt-front':        m(10, 81, 110, 1.9),
+        'traps-lower':       m(5, 45, 95, 3.8),
+        'serratus-anterior': m(3, 40, 81, 3.7),
         'biceps-long':       m(3, 12, 120),
     },
     'Shoulder.adduction': {
-        // Lats: dominant in the MID range. Bumped up across the entire ROM
-        // (base 15→25, peak 105→120) per user request.
-        'lats':           m(25, 120, -75),
+        'lats':           m(4, 130, -75, 2.5),
         'teres-major':    m(20, 95, -75),
-        // Sternal pec: base reduced (60→30) to drop contribution particularly
-        // in the -100 to -40 mid-range zone; peak kept at -140° so it still
-        // owns the deep-overhead extreme.
-        'pec-sternal':    m(30, 110, -140),
-        // Clavicular pec: reduced significantly — only a very small bell
-        // centered at +45° (cross-body) as the user requested (peak angle
-        // kept as-is).
+        // Note: inverted bell (base > peak) so sternal-pec is WEAKEST at the
+        // mid-range (-100° to -40°) and strongest at the extremes (overhead
+        // and cross-body), where it shares the load with lats/pec-clavicular.
+        'pec-sternal':    m(70, 17, -70, 5),
         'pec-clavicular': m(3, 18, 45),
-        // Subscapularis: pulls down from overhead; narrow overhead-bias role.
         'subscapularis':  m(10, 30, -90),
-        // Triceps long head: extension+adduction at full elevation.
         'triceps-long':   m(10, 35, -130),
-        // Posterior delt: more prominent across the entire ROM (was 5/18,
-        // now 15/40). Still peaks at overhead territory.
         'delt-rear':      m(15, 40, -120),
-        // Rhomboids: small contribution via their scapular-retraction role.
         'rhomboids':      m(3, 10, -75),
-        // Biceps heads removed — they don't adduct the shoulder.
     },
     'Shoulder.horizontalAdduction': {
         // Pec sternal dominates cross-body motion; peaks in mid-to-late
@@ -698,27 +660,19 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'glute-min':       m(4, 10, 15),
     },
     'Hip.extension': {
-        // Three-muscle tradeoff across ROM:
-        //   glute-max  dominates   0° to −40°  (shallow flex / hip extended)
-        //   hamstrings dominate  −40° to −65°  (mid flex)
-        //   add-magnus dominates       < −65°  (deep flex)
-        // Glute max: peak near standing (−15°), high specific; drops
-        // smoothly as flex deepens so adductor-magnus can take over.
-        'glute-max':       m(30, 120, -15),
-        // Medial hamstrings: peak at −55° (center of the −40 to −65 zone)
-        // with strong specific. Bell overlaps glute-max on the shallow side
-        // and adductor-magnus on the deep side.
-        'semitendinosus':  m(25, 115, -55),
-        'semimembranosus': m(25, 115, -55),
-        // Adductor magnus (posterior fibers): peak at −100° (deep flexion,
-        // coming out of the hole). Less prominent at shallow flex, so its
-        // contribution tapers as glute-max takes over near standing.
-        'adductor-magnus': m(20, 120, -100),
-        // Glute med/min posterior fibers assist extension near neutral.
+        // Three-muscle tradeoff across ROM (tuned with higher steepness on
+        // the big three so each owns its zone more sharply):
+        //   glute-max   dominates   0° to −40°  (shallow flex)
+        //   hamstrings  dominate  −40° to −65°  (mid flex)
+        //   add-magnus  dominates       < −65°  (deep flex)
+        'glute-max':       m(30, 120, -15, 3.65),
+        'semitendinosus':  m(25, 115, -55, 2.05),
+        'semimembranosus': m(25, 115, -55, 2.45),
+        // Negative base — the bell drops fast to effectively zero away from
+        // the peak, concentrating contribution tightly at deep flexion.
+        'adductor-magnus': m(-16, 120, -100),
         'glute-med':       m(10, 25, 0),
         'glute-min':       m(6, 15, 0),
-        // biceps-femoris: catalog entry represents the short head only
-        // (knee flexor, no hip extension role).
     },
     'Hip.abduction': {
         'glute-med': m(40, 115, 30),
@@ -846,15 +800,10 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         // EHL, EDL, peroneus tertius (not in catalog) assist.
     },
     'Ankle.plantarFlexion': {
-        // Gastroc: dominant in the PF range (below neutral). Peak at -30°
-        // (moderate PF) with a tight bell and low base so it drops off hard
-        // in the DF range. Physiologically this reflects its fast-twitch
-        // role in push-off / explosive PF at short muscle length.
-        'gastrocnemius': m(10, 120, -30),
-        // Soleus: dominant in the DF range (above neutral, stretched). Peak
-        // at +15° matches its tonic/postural role — strongest at longer
-        // length where it provides steady PF support.
-        'soleus':        m(25, 140, 15),
+        // Tight bells (steepness 5) so each muscle owns its zone sharply:
+        // gastroc dominates the PF side, soleus the DF side.
+        'gastrocnemius': m(0, 151, -30, 5),
+        'soleus':        m(25, 140, 8, 5),
         // Tibialis posterior + peroneals (not in catalog) contribute.
     },
 
