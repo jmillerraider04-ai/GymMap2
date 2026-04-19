@@ -317,65 +317,122 @@ const evaluateCapacity = (cap: CapacityConfig, currentAngle: number, steepness: 
     return Math.max(cap.base + (cap.specific - cap.base) * blend, 0.001);
 };
 
-// Peak angles are in DIRECTIONANGLE convention (matching the Muscles tab).
-// Positive angle = the section's ACTION DIRECTION; negative = opposite.
-// E.g. Shoulder.extension peak = -45 means capacity peaks when the arm is
-// 45° FLEXED forward (because for the Extension section, positive direction
-// = extension, so -45 = arm flexed forward in the section's convention).
-// This matches how muscle-tab peak angles are specified per section.
+// DEFAULT_CAPACITIES — research-grounded peak torques by joint action.
+// =============================================================================
 //
-// Capacity evaluation: call sites must pass directionAngle (not rawAngle).
-// The helper `capacitySectionDirectionAngle(bone, axis, isPositive, ...)`
-// handles this conversion; evaluateCapacity is bell-only and agnostic to
-// convention.
+// Peak angles in DIRECTIONANGLE convention (positive = this section's action
+// direction, matching the Muscles tab). Bells pass through evaluateCapacity
+// with sectionDirectionAngle applied at the call site — storage and display
+// share the same convention.
+//
+// VALUES are based on published isokinetic/isometric peak torque data
+// (population means, adult males, slow velocity, optimal angle): Morrow 2020
+// (shoulder), Finley (elbow), Walmsley (hip), Wretenberg + Lindahl 1969
+// (knee), Sale 1982 (ankle), Andersson + Smidt (spine). Numbers are
+// rounded — relative ratios between joints matter more than absolute Nm.
+//
+// KEY RATIOS PRESERVED:
+//   • Hams / quads ≈ 0.60  (knee flex 135 / knee ext 230)
+//   • Ankle PF / DF ≈ 3.3  (plantar 150 / dorsi 45)
+//   • Shoulder IR / ER ≈ 1.8 (IR 55 / ER 30)
+//   • Elbow flex / ext ≈ 1.1 (90 / 80)
+//   • Hip ext / hip flex ≈ 1.7 (240 / 145)
+//   • Knee ext ≈ hip ext (230 vs 240)
+//   • Upper body << lower body (shoulder flex 75 vs hip flex 145)
+//
+// PEAK ANGLES chosen for length-tension + moment-arm optima of the dominant
+// muscle: glutes at 80° flex (stretched / out-of-hole), quads at 60° flex
+// (Lindahl classic), lats at 45° shoulder flex, hams at 60° knee flex,
+// soleus/gastroc at 15° dorsi, erectors at 20° flex, etc.
+//
+// BASES scale as ~40-55% of peak depending on how steep the torque-angle
+// curve is for the dominant muscle:
+//   • Steep (quads, glutes, soleus): 40-45% of peak at off-optimal.
+//   • Moderate (hams, triceps, adductors): 45-50%.
+//   • Flat (shoulder rotators, spine, small muscles): 50-55%.
 const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
     'Shoulder': {
-        'flexion':              createCap(40, 80,  0),     // peak at neutral (no flip)
-        'extension':            createCap(50, 95,  -45),   // peaks at 45° forward-flexed (lats stretched)
-        'abduction':            createCap(35, 70,  75),    // peak at 75° abd (mid-range)
-        'adduction':            createCap(50, 95,  -75),   // peak at 75° abducted (cross-body pull stretched)
-        'horizontalAbduction':  createCap(35, 65,  -90),   // peak at arm-forward (rear delt stretched)
-        'horizontalAdduction':  createCap(45, 90,  90),    // peak at arm-forward (pec stretched)
-        'internalRotation':     createCap(40, 70,  0),     // symmetric
-        'externalRotation':     createCap(25, 45,  0)      // symmetric
+        // Flex peak 75 Nm @ 90° (delt anterior + pec clav at best length).
+        // Base 40 (53% of peak — moderate curve).
+        'flexion':              createCap(40, 75,  90),
+        // Ext peak 100 Nm @ -45° (lats stretched at 45° forward flex).
+        // Stronger than flex as expected.
+        'extension':            createCap(50, 100, -45),
+        // Abd peak 65 Nm @ 90° (lateral delt at T-pose, Inman 1944).
+        'abduction':            createCap(35, 65,  90),
+        // Add peak 95 Nm @ -90° (adductors stretched at abducted position).
+        'adduction':            createCap(45, 95,  -90),
+        // HorizAbd peak 75 Nm @ -70° (rear delt + post cuff stretched when
+        // arm is crossed forward).
+        'horizontalAbduction':  createCap(40, 75,  -70),
+        // HorizAdd peak 115 Nm @ -15° (pec sternal slightly behind T-pose,
+        // STRETCHED — this is the bench-press axis and very strong).
+        'horizontalAdduction':  createCap(55, 115, -15),
+        // IR peak 55 Nm @ 0° (subscap mid-rotation).
+        'internalRotation':     createCap(30, 55,  0),
+        // ER peak 30 Nm @ +10° (infraspinatus slightly into ER).
+        // IR/ER ratio ≈ 1.8, well-established in throwing athlete research.
+        'externalRotation':     createCap(17, 30,  10)
     },
     'Elbow': {
-        'flexion':              createCap(30, 60,  -90),   // peak at 90° flex (muscle stretched)
-        'extension':            createCap(40, 75,  75)     // peak at 75° (hinge raw convention → pos-side)
+        // Flex peak 90 Nm @ +90° (biceps+brachialis optimal 80-100° flex).
+        'flexion':              createCap(45, 90,  90),
+        // Ext peak 80 Nm @ -75° (triceps stretched at deep flex).
+        // Flex/ext ratio ≈ 1.1, biceps slightly outpull triceps.
+        'extension':            createCap(35, 80,  -75)
     },
     'Hip': {
-        'flexion':              createCap(55, 110, 0),
-        'extension':            createCap(95, 215, -40),   // peak at 40° flexed (glute stretched, bottom of squat)
-        'abduction':            createCap(90, 150, 20),
-        'adduction':            createCap(75, 125, 0),
-        'internalRotation':     createCap(35, 60,  0),
-        'externalRotation':     createCap(30, 50,  0)
+        // Flex peak 145 Nm @ +90° (iliopsoas mid-range).
+        'flexion':              createCap(70, 145, 90),
+        // Ext peak 240 Nm @ -80° (glutes stretched deep in flexion,
+        // bottom-of-squat leverage). Hip ext / hip flex ≈ 1.66.
+        'extension':            createCap(95, 240, -80),
+        // Abd peak 135 Nm @ +25° (glute med mid-range).
+        'abduction':            createCap(65, 135, 25),
+        // Add peak 115 Nm @ -45° (adductors stretched at abducted position).
+        'adduction':            createCap(55, 115, -45),
+        // IR peak 45 Nm. ER peak 50 Nm (ER slightly > IR — hip is opposite
+        // of shoulder in this respect, deep-6 rotators + glute max).
+        'internalRotation':     createCap(22, 45,  0),
+        'externalRotation':     createCap(25, 50,  0)
     },
     'Knee': {
-        'flexion':              createCap(45, 105, 40),    // peak at 40° flex
-        'extension':            createCap(75, 165, -60)    // peak at 60° flex (vasti stretched)
+        // Flex peak 135 Nm @ +60° (hamstrings mid-range).
+        // Hams/quads ≈ 0.59 — the classic ratio.
+        'flexion':              createCap(65, 135, 60),
+        // Ext peak 230 Nm @ -60° (Lindahl 1969 — quads stretched at 60°
+        // flex). Quads are MASSIVE — ~1.0× hip extension.
+        // Steep curve: base 105 is ~46% of peak (quads lose ~55% of torque
+        // at full extension).
+        'extension':            createCap(105, 230, -60)
     },
     'Ankle': {
-        // Keys use camelCase to match actionKey("Plantar Flexion") output.
-        // Previously all-lowercase ("plantarflexion") silently failed the
-        // lookup in Phase B and the Capacities tab — capacity defaulted to
-        // 1, which made ankle efforts read as if the joint had limitless
-        // strength. The mismatch was pre-existing; renaming to camelCase
-        // fixes it.
-        'plantarFlexion':       createCap(65, 105, 15),    // peak at 15° dorsi (stretched)
-        'dorsiFlexion':         createCap(35, 35,  0)
+        // PF peak 150 Nm @ +15° dorsi (soleus/gastroc stretched — Sale 1982).
+        // Base 60 ~40% of peak (steep curve — big torque loss at full PF).
+        'plantarFlexion':       createCap(60, 150, 15),
+        // DF peak 45 Nm @ -10° PF (tib anterior stretched when foot PF'd).
+        // PF/DF ≈ 3.3 — ankle plantarflexion is dramatically stronger.
+        'dorsiFlexion':         createCap(20, 45,  -10)
     },
     'Scapula': {
-        'elevation':            createCap(40, 65,  0),
-        'depression':           createCap(25, 45,  0),
-        'protraction':          createCap(25, 45,  0),
-        'retraction':           createCap(30, 55,  0)
+        // Scapular torques here are stand-ins for translation forces (scapula
+        // moves in offset space, not rotationally). Ratios reflect typical
+        // scapular muscle PCSA.
+        'elevation':            createCap(35, 70,  0),     // traps upper + levator
+        'depression':           createCap(25, 50,  0),     // traps lower + pec minor
+        'protraction':          createCap(25, 50,  0),     // serratus + pec minor
+        'retraction':           createCap(30, 60,  0)      // traps mid + rhomboids
     },
     'Spine': {
-        'flexion':              createCap(110, 190, 0),
-        'extension':            createCap(140, 260, -25),  // peak at 25° flexed (erectors stretched)
-        'lateralFlexion':       createCap(70, 130, 0),
-        'rotation':             createCap(70, 120, 0)
+        // Spine flex peak 200 Nm @ 0° (abdominals + obliques).
+        'flexion':              createCap(90, 200, 0),
+        // Spine ext peak 255 Nm @ -20° (erectors stretched at slight flex —
+        // out-of-deadlift-bottom). Erectors are among the strongest muscles.
+        'extension':            createCap(110, 255, -20),
+        // Lateral flex peak 145 Nm (QL + obliques).
+        'lateralFlexion':       createCap(65, 145, 0),
+        // Rotation peak 90 Nm (obliques dominant).
+        'rotation':             createCap(40, 90,  0)
     }
 };
 
