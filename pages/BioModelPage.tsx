@@ -425,7 +425,16 @@ const MUSCLE_CATALOG: MuscleDef[] = [
     { id: 'tfl',        name: 'Tensor Fasciae Latae',region: 'Hips' },
     { id: 'sartorius',  name: 'Sartorius',           region: 'Hips' },
     // Adductors
-    { id: 'adductor-magnus', name: 'Adductor Magnus', region: 'Adductors' },
+    // Two functionally distinct portions with different innervations:
+    //   Anterior  (obturator nerve): the classic adductor portion — pure hip
+    //             adductor, slight flexion assist when hip is extended.
+    //   Posterior (sciatic / tibial part): the \"ischiocondylar\" / \"hamstring
+    //             portion\" — major hip extensor in deep flexion (squat-out-of-
+    //             the-hole), plus minor adduction and ER contributions. Inserts
+    //             on the adductor tubercle of the femur, so monoarticular at
+    //             the hip (does NOT cross the knee despite the hamstring moniker).
+    { id: 'adductor-magnus-anterior',  name: 'Adductor Magnus (Anterior)',  region: 'Adductors' },
+    { id: 'adductor-magnus-posterior', name: 'Adductor Magnus (Posterior)', region: 'Adductors' },
     { id: 'adductor-longus', name: 'Adductor Longus', region: 'Adductors' },
     { id: 'adductor-brevis', name: 'Adductor Brevis', region: 'Adductors' },
     { id: 'gracilis',        name: 'Gracilis',        region: 'Adductors' },
@@ -723,9 +732,11 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         // hip extensor just like the other hams. Short head crosses only
         // the knee and doesn't contribute here.
         'biceps-femoris-long': m(25, 110, -55, 2.2),
-        // Negative base — the bell drops fast to effectively zero away from
-        // the peak, concentrating contribution tightly at deep flexion.
-        'adductor-magnus':    m(-16, 120, -100),
+        // Adductor magnus POSTERIOR portion (the ischiocondylar / \"hamstring\"
+        // portion). Negative base — bell drops fast away from peak,
+        // concentrating contribution tightly at deep flexion (bottom of squat).
+        // Anterior portion doesn't extend the hip and isn't in this section.
+        'adductor-magnus-posterior': m(-16, 120, -100),
         'glute-med':          m(10, 25, 0),
         'glute-min':          m(6, 15, 0),
     },
@@ -744,7 +755,11 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     'Hip.adduction': {
         // Adductor group + gracilis + pectineus peak when the hip is
         // abducted (stretched, opposite of adduction direction).
-        'adductor-magnus': m(40, 110, -30),
+        // Adductor magnus: anterior portion is the primary adductor; the
+        // posterior portion still adducts but with a smaller share (its
+        // line of pull is more vertical/extensor-biased than medial).
+        'adductor-magnus-anterior':  m(32, 85, -30),
+        'adductor-magnus-posterior': m(10, 28, -30),
         'adductor-longus': m(30, 85, -15),
         'adductor-brevis': m(25, 65, -15),
         'gracilis':        m(15, 45, -15),
@@ -752,7 +767,7 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         // Glute max removed — it does not adduct the hip. Its line of pull
         // from the posterior ilium/sacrum to the gluteal tuberosity is too
         // lateral + posterior for any meaningful adduction moment.
-        // Posterior adductor magnus fibers overlap with hamstrings.
+        // Posterior hamstring overlap:
         'semimembranosus': m(5, 12, 0),
         'semitendinosus':  m(4, 10, 0),
         // Quadratus femoris (not in catalog) also adducts.
@@ -760,7 +775,8 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     'Hip.horizontalAdduction': {
         // Horizontal adduction = bringing a flexed leg across the body.
         // All adductors active in mid-range.
-        'adductor-magnus': m(30, 95, 45),
+        'adductor-magnus-anterior':  m(24, 75, 45),
+        'adductor-magnus-posterior': m(8, 22, 45),
         'adductor-longus': m(30, 90, 45),
         'adductor-brevis': m(25, 70, 45),
         'gracilis':        m(15, 45, 45),
