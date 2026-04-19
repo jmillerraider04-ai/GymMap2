@@ -948,17 +948,27 @@ const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
     },
 
     // --- Shoulder (humerus unit direction, right-normalized) ---
-    // Right arm at rest is (0, 1, 0).
-    //   Abduction: full to ≈ (1, 0, 0) at 90°; overhead via abd (0, -1, 0).
-    //   Cross-body adduction: x.min = -0.4 → ~24° cross-midline.
-    //   Flexion: to (0, 0, -1) at 90°; overhead via flex (0, -1, 0).
-    //     dir.y.min = -1 caps at straight overhead (no past-overhead via
-    //     pure flex sweep) — typical healthy shoulder ends at 180°, not 200°.
-    //   Extension: z.max = 0.5 → 30° pure-path extension. Combined with
-    //     other motions the humerus can reach maybe 40-45° behind the body,
-    //     matching typical adult ext ROM (was 0.9 → 64°, too permissive).
-    'Shoulder.dir.x': { min: -0.4, max: 1.02 },
-    'Shoulder.dir.y': { min: -1.0, max: 1.02 },
+    // Right arm at rest is (0, 1, 0). MUTUAL COUPLING between x and y keeps
+    // the humerus out of anatomically invalid regions — specifically, the
+    // "overhead AND crossed-over" zone. Without coupling, each component's
+    // box is independent and a user can drag one axis, then the other, and
+    // end up at (-0.4, -0.9, 0) (overhead past midline), which is not
+    // reachable with a real shoulder.
+    //   x ↔ y coupling (slopeMin −0.35 on both):
+    //     As y becomes negative (arm elevating toward overhead), x.min
+    //     tightens toward 0 (no cross-body when overhead). Symmetrically,
+    //     when x is negative (arm crossed-over), y.min tightens so the
+    //     arm can't go as high overhead.
+    //   z = flex/ext; no coupling (the sagittal-plane limit box is already
+    //     asymmetric enough).
+    'Shoulder.dir.x': {
+        min: -0.4, max: 1.02,
+        coupling: { dependsOn: 'Shoulder.dir.y', slopeMin: -0.35, slopeMax: 0 },
+    },
+    'Shoulder.dir.y': {
+        min: -1.0, max: 1.02,
+        coupling: { dependsOn: 'Shoulder.dir.x', slopeMin: -0.5, slopeMax: 0 },
+    },
     'Shoulder.dir.z': { min: -1.02, max: 0.5 },
     'Shoulder.action.External Rotation': { min: -90, max: 90 },
 
@@ -2967,6 +2977,57 @@ const BioModelPage: React.FC = () => {
       return clamp(normalizedValue, eff.min, eff.max);
   };
 
+  // Project a bone direction back into its (coupling-aware) effective
+  // limit box, then re-normalize to the unit sphere. Called after drag
+  // handlers commit so that axes which WEREN'T dragged still respect
+  // their effective limits — those limits may have shifted because the
+  // dragged axis is a source of a coupling relationship (e.g. dragging
+  // Shoulder.dir.y overhead tightens Shoulder.dir.x's cross-body limit).
+  // Iterates clamp+renormalize a few times because coupling makes the
+  // constraint cross-component (one clamp can shift another's effective
+  // range). Converges quickly in practice (≤3 passes).
+  const projectDirIntoLimitBox = (
+      boneId: string,
+      dir: Vector3,
+      curPosture: Posture,
+      curTwists: Record<string, number>,
+  ): Vector3 => {
+      const group = getBoneJointGroup(boneId);
+      if (!group) return dir;
+      const dims = limitDimensionsForGroup(group).filter(d => d.kind === 'dir' && d.component);
+      if (dims.length === 0) return dir;
+      let result: Vector3 = { ...dir };
+      const flipX = boneId.startsWith('l');
+      for (let iter = 0; iter < 4; iter++) {
+          // Each iteration sees the latest `result` via the posture snapshot.
+          const snapshot = { ...curPosture, [boneId]: result };
+          let changed = false;
+          for (const dim of dims) {
+              const eff = getEffectiveLimit(dim.key, boneId, snapshot, curTwists);
+              if (!eff) continue;
+              const comp = dim.component as 'x' | 'y' | 'z';
+              const stored = result[comp];
+              const normalized = (comp === 'x' && flipX) ? -stored : stored;
+              const clamped = clamp(normalized, eff.min, eff.max);
+              if (Math.abs(clamped - normalized) > 1e-6) {
+                  result[comp] = (comp === 'x' && flipX) ? -clamped : clamped;
+                  changed = true;
+              }
+          }
+          if (!changed) break;
+          // Re-normalize — clamping can take the direction off the unit
+          // sphere. Only re-normalize if magnitude is sane (avoid divide
+          // by near-zero).
+          const mag = Math.sqrt(result.x * result.x + result.y * result.y + result.z * result.z);
+          if (mag > 1e-3) {
+              result.x /= mag;
+              result.y /= mag;
+              result.z /= mag;
+          }
+      }
+      return result;
+  };
+
   // All dimensions across all groups — used by the coupling dropdown.
   const allLimitDimensions: Array<{ group: JointGroup; dim: LimitDimension }> = (
       Object.keys(JOINT_ACTIONS) as JointGroup[]
@@ -4531,6 +4592,28 @@ const BioModelPage: React.FC = () => {
             step = step / 2;
             if (step < MIN_STEP) break;
         }
+    }
+
+    // Post-drag projection: the solver only saw the dragged axis lock,
+    // not the joint's full box limits. If a non-dragged axis was left at
+    // a value that's now out-of-bounds because of coupling (e.g. X was
+    // -0.4 but we just dragged Y overhead, making X.eff.min = 0), clamp
+    // it back into the box and re-normalize.
+    const projected = projectDirIntoLimitBox(
+        selectedBone,
+        lastAcceptedPosture[selectedBone],
+        lastAcceptedPosture,
+        lastAcceptedTwists
+    );
+    lastAcceptedPosture = { ...lastAcceptedPosture, [selectedBone]: projected };
+    if (symmetryMode && oppBone) {
+        const oppProjected = projectDirIntoLimitBox(
+            oppBone,
+            lastAcceptedPosture[oppBone],
+            lastAcceptedPosture,
+            lastAcceptedTwists
+        );
+        lastAcceptedPosture = { ...lastAcceptedPosture, [oppBone]: oppProjected };
     }
 
     const finalDir = lastAcceptedPosture[selectedBone];
