@@ -1441,6 +1441,16 @@ const BioModelPage: React.FC = () => {
           return next;
       });
   };
+  // Expansion state for the Capacities tab — one entry per joint group
+  // (not per action). Start with all groups collapsed for a tidy overview.
+  const [expandedCapacityGroups, setExpandedCapacityGroups] = useState<Set<string>>(new Set());
+  const toggleCapacityGroup = (group: string) => {
+      setExpandedCapacityGroups(prev => {
+          const next = new Set(prev);
+          if (next.has(group)) next.delete(group); else next.add(group);
+          return next;
+      });
+  };
   
   // Removed reactionForces state — replaced by the jointForceArrows memo
   // below which derives net proximal force per bone from torqueDistribution.
@@ -6783,13 +6793,25 @@ const BioModelPage: React.FC = () => {
                            <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${biarticularCouplingEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
                        </button>
                    </div>
-                   <div className="flex-1 overflow-y-auto pr-2 space-y-6">
+                   <div className="flex-1 overflow-y-auto pr-2 space-y-3">
                        {Object.entries(jointCapacities).map(([group, actions]) => {
                            const groupBones = GROUP_BONES[group as JointGroup];
+                           const groupExpanded = expandedCapacityGroups.has(group);
+                           const actionCount = Object.keys(actions).length;
                            return (
-                           <div key={group}>
-                               <h4 className="font-bold text-gray-900 text-xs uppercase tracking-wide mb-3 sticky top-0 bg-white py-2 border-b border-gray-100">{group}</h4>
-                               <div className="space-y-4">
+                           <div key={group} className="bg-gray-50 rounded-lg border border-gray-100 overflow-hidden">
+                               <button
+                                   onClick={() => toggleCapacityGroup(group)}
+                                   className="w-full flex items-center justify-between px-3 py-2 hover:bg-gray-100 transition-colors"
+                               >
+                                   <div className="flex items-center gap-2 min-w-0">
+                                       {groupExpanded ? <ChevronDown className="w-3 h-3 text-gray-400 flex-shrink-0" /> : <ChevronRight className="w-3 h-3 text-gray-400 flex-shrink-0" />}
+                                       <span className="text-xs font-bold uppercase tracking-wide text-gray-800">{group}</span>
+                                   </div>
+                                   <span className="text-[10px] font-mono font-bold text-gray-400 flex-shrink-0 ml-2">{actionCount} action{actionCount === 1 ? '' : 's'}</span>
+                               </button>
+                               {groupExpanded && (
+                               <div className="px-3 pb-3 pt-1 border-t border-gray-100 space-y-4">
                                    {Object.entries(actions).map(([action, config]) => {
                                        // Find the ActionAxis that matches this capacity entry's
                                        // action-key. Uses capacityKey() (strips " L"/" R" side
@@ -6826,8 +6848,36 @@ const BioModelPage: React.FC = () => {
                                            capTrackMax === capTrackMin
                                                ? 50
                                                : ((v - capTrackMin) / (capTrackMax - capTrackMin)) * 100;
+                                       // Bell-curve graph points. Sample capacity across the
+                                       // section's ROM (per-section computed range) so the user
+                                       // can SEE the torque profile at a glance. 40 samples is
+                                       // plenty for a smooth curve at this size.
+                                       const capSvgW = 240;
+                                       const capSvgH = 48;
+                                       const bellN = 40;
+                                       const bellSamples: Array<{ angle: number; val: number }> = [];
+                                       const bellCap = { base: config.base, specific: config.specific, angle: config.angle || 0 };
+                                       for (let bi = 0; bi <= bellN; bi++) {
+                                           const angle = capTrackMin + (capTrackMax - capTrackMin) * (bi / bellN);
+                                           bellSamples.push({ angle, val: evaluateCapacity(bellCap, angle) });
+                                       }
+                                       const bellValMax = Math.max(config.base, config.specific, 1);
+                                       const bellValMin = Math.min(0, config.base, config.specific);
+                                       const bellYSpan = Math.max(bellValMax - bellValMin, 1);
+                                       const bellX = (a: number) =>
+                                           capTrackMax === capTrackMin
+                                               ? capSvgW / 2
+                                               : ((a - capTrackMin) / (capTrackMax - capTrackMin)) * capSvgW;
+                                       const bellY = (v: number) =>
+                                           capSvgH - ((v - bellValMin) / bellYSpan) * (capSvgH - 4) - 2;
+                                       const bellPoints = bellSamples.map(s => `${bellX(s.angle).toFixed(2)},${bellY(s.val).toFixed(2)}`).join(' ');
+                                       // Close the polygon to the bottom for a filled area.
+                                       const bellPolygon =
+                                           `${bellX(capTrackMin).toFixed(2)},${(capSvgH - 2).toFixed(2)} ` +
+                                           bellPoints + ' ' +
+                                           `${bellX(capTrackMax).toFixed(2)},${(capSvgH - 2).toFixed(2)}`;
                                        return (
-                                       <div key={action} className="bg-gray-50 rounded-xl p-3 border border-gray-100">
+                                       <div key={action} className="bg-white rounded-xl p-3 border border-gray-100">
                                            <div className="flex justify-between items-center mb-2">
                                                <span className="text-xs font-bold text-gray-700 capitalize">{action.replace(/([A-Z])/g, ' $1').trim()}</span>
                                                {groupBones && (
@@ -6841,59 +6891,83 @@ const BioModelPage: React.FC = () => {
                                                    </div>
                                                )}
                                            </div>
+                                           {/* Torque-ROM bell graph: filled-area curve showing
+                                               the capacity (Nm) at every angle across the ROM.
+                                               Zero-reference dashed line, peak angle marker, and
+                                               L/R live-position markers overlaid. */}
+                                           <div className="bg-gray-50 rounded-lg border border-gray-200 p-1.5 mb-2">
+                                               <svg width="100%" viewBox={`0 0 ${capSvgW} ${capSvgH + 14}`} preserveAspectRatio="none" className="block">
+                                                   {/* Zero-Nm reference line (only draw if 0 is inside the y-range) */}
+                                                   {bellValMin <= 0 && bellValMax >= 0 && (
+                                                       <line
+                                                           x1="0" x2={capSvgW}
+                                                           y1={bellY(0)} y2={bellY(0)}
+                                                           stroke="#e5e7eb" strokeWidth="0.5" strokeDasharray="2 2"
+                                                       />
+                                                   )}
+                                                   {/* Zero-angle vertical reference */}
+                                                   {capTrackMin <= 0 && capTrackMax >= 0 && (
+                                                       <line
+                                                           x1={bellX(0)} x2={bellX(0)}
+                                                           y1="0" y2={capSvgH}
+                                                           stroke="#e5e7eb" strokeWidth="0.5" strokeDasharray="2 2"
+                                                       />
+                                                   )}
+                                                   {/* Filled bell curve */}
+                                                   <polygon
+                                                       points={bellPolygon}
+                                                       fill="#a78bfa" fillOpacity="0.35"
+                                                       stroke="#8b5cf6" strokeWidth="1"
+                                                   />
+                                                   {/* Peak-angle marker */}
+                                                   <line
+                                                       x1={bellX(config.angle || 0)} x2={bellX(config.angle || 0)}
+                                                       y1={0} y2={capSvgH}
+                                                       stroke="#8b5cf6" strokeWidth="1" strokeDasharray="3 2" opacity="0.6"
+                                                   />
+                                                   {/* L/R live-position markers */}
+                                                   {lCap !== null && (
+                                                       <g>
+                                                           <line x1={bellX(lCap)} x2={bellX(lCap)} y1={0} y2={capSvgH} stroke="#3b82f6" strokeWidth="1.2" strokeDasharray="3 2" opacity="0.9" />
+                                                           <circle cx={bellX(lCap)} cy={3} r="2.5" fill="#3b82f6" />
+                                                           <title>{`Left: ${Math.round(lCap)}°`}</title>
+                                                       </g>
+                                                   )}
+                                                   {rCap !== null && (
+                                                       <g>
+                                                           <line x1={bellX(rCap)} x2={bellX(rCap)} y1={0} y2={capSvgH} stroke="#4f46e5" strokeWidth="1.2" strokeDasharray="3 2" opacity="0.9" />
+                                                           <circle cx={bellX(rCap)} cy={3} r="2.5" fill="#4f46e5" />
+                                                           <title>{`Right: ${Math.round(rCap)}°`}</title>
+                                                       </g>
+                                                   )}
+                                                   {/* X-axis min/mid/max labels */}
+                                                   <text x="0" y={capSvgH + 10} fontSize="8" fill="#9ca3af">{capTrackMin.toFixed(0)}°</text>
+                                                   <text x={capSvgW / 2} y={capSvgH + 10} fontSize="8" fill="#9ca3af" textAnchor="middle">{((capTrackMin + capTrackMax) / 2).toFixed(0)}°</text>
+                                                   <text x={capSvgW} y={capSvgH + 10} fontSize="8" fill="#9ca3af" textAnchor="end">{capTrackMax.toFixed(0)}°</text>
+                                               </svg>
+                                           </div>
                                            <div className="grid grid-cols-2 gap-4 mb-2">
                                                <div>
                                                    <label className="text-[9px] font-bold text-gray-400 uppercase block mb-1">Base (Nm)</label>
-                                                   <input type="number" value={isNaN(config.base) ? 0 : config.base} onChange={(e) => updateCapacity(group as JointGroup, action, 'base', parseFloat(e.target.value))} className="w-full text-xs font-medium bg-white border border-gray-200 rounded px-2 py-1 outline-none focus:border-purple-500" />
+                                                   <input type="number" value={isNaN(config.base) ? 0 : config.base} onChange={(e) => updateCapacity(group as JointGroup, action, 'base', parseFloat(e.target.value))} className="w-full text-xs font-medium bg-gray-50 border border-gray-200 rounded px-2 py-1 outline-none focus:border-purple-500" />
                                                </div>
                                                <div>
                                                    <label className="text-[9px] font-bold text-gray-400 uppercase block mb-1">Peak (Nm)</label>
-                                                   <input type="number" value={isNaN(config.specific) ? 0 : config.specific} onChange={(e) => updateCapacity(group as JointGroup, action, 'specific', parseFloat(e.target.value))} className="w-full text-xs font-medium bg-white border border-gray-200 rounded px-2 py-1 outline-none focus:border-purple-500" />
+                                                   <input type="number" value={isNaN(config.specific) ? 0 : config.specific} onChange={(e) => updateCapacity(group as JointGroup, action, 'specific', parseFloat(e.target.value))} className="w-full text-xs font-medium bg-gray-50 border border-gray-200 rounded px-2 py-1 outline-none focus:border-purple-500" />
                                                </div>
                                            </div>
-                                            <div>
+                                           <div>
                                                <label className="text-[9px] font-bold text-gray-400 uppercase block mb-1">Peak Angle (°)</label>
                                                <div className="flex items-center gap-2">
                                                    <input type="range" min={-180} max={180} value={isNaN(config.angle) ? 0 : config.angle} onChange={(e) => updateCapacity(group as JointGroup, action, 'angle', parseFloat(e.target.value))} className="flex-1 bio-range text-purple-500" />
                                                    <span className="text-[10px] font-mono font-bold text-gray-500 w-10 text-right">{isNaN(config.angle) ? 0 : config.angle}°</span>
                                                </div>
-                                               {/* Live-position track. Shows the peak angle, the
-                                                   zero reference, and each side's current rawAngle
-                                                   together on a single visual bar so the user can
-                                                   see where the capacity bell will be evaluated for
-                                                   the current pose. */}
-                                               {groupBones && (
-                                                   <div className="relative h-4 mt-2 mb-1">
-                                                       <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-1 bg-gray-200 rounded-full" />
-                                                       {/* Zero tick */}
-                                                       <div className="absolute top-1/2 -translate-y-1/2 w-px h-3 bg-gray-300" style={{ left: `${capPct(0)}%` }} />
-                                                       {/* Peak-angle marker (purple, matches slider colour) */}
-                                                       <div
-                                                           className="absolute top-1/2 -translate-y-1/2 w-2.5 h-2.5 -ml-1.5 rounded-sm bg-purple-500 border border-white shadow"
-                                                           style={{ left: `${clamp(capPct(config.angle || 0), 0, 100)}%` }}
-                                                           title={`Peak: ${Math.round(config.angle || 0)}°`}
-                                                       />
-                                                       {lCap !== null && (
-                                                           <div
-                                                               className="absolute top-1/2 -mt-1 -ml-1 w-2 h-2 rounded-full bg-blue-500 border border-white shadow"
-                                                               style={{ left: `${clamp(capPct(lCap), 0, 100)}%` }}
-                                                               title={`Left: ${Math.round(lCap)}°`}
-                                                           />
-                                                       )}
-                                                       {rCap !== null && (
-                                                           <div
-                                                               className="absolute top-1/2 -mt-1 -ml-1 w-2 h-2 rounded-full bg-indigo-600 border border-white shadow"
-                                                               style={{ left: `${clamp(capPct(rCap), 0, 100)}%` }}
-                                                               title={`Right: ${Math.round(rCap)}°`}
-                                                           />
-                                                       )}
-                                                   </div>
-                                               )}
                                            </div>
                                        </div>
                                        );
                                    })}
                                </div>
+                               )}
                            </div>
                            );
                        })}
