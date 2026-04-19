@@ -317,48 +317,59 @@ const evaluateCapacity = (cap: CapacityConfig, currentAngle: number, steepness: 
     return Math.max(cap.base + (cap.specific - cap.base) * blend, 0.001);
 };
 
+// Peak angles are in DIRECTIONANGLE convention (matching the Muscles tab).
+// Positive angle = the section's ACTION DIRECTION; negative = opposite.
+// E.g. Shoulder.extension peak = -45 means capacity peaks when the arm is
+// 45° FLEXED forward (because for the Extension section, positive direction
+// = extension, so -45 = arm flexed forward in the section's convention).
+// This matches how muscle-tab peak angles are specified per section.
+//
+// Capacity evaluation: call sites must pass directionAngle (not rawAngle).
+// The helper `capacitySectionDirectionAngle(bone, axis, isPositive, ...)`
+// handles this conversion; evaluateCapacity is bell-only and agnostic to
+// convention.
 const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
     'Shoulder': {
-        'flexion': createCap(40, 80, 0),
-        'extension': createCap(50, 95, 45),
-        'abduction': createCap(35, 70, 75),
-        'adduction': createCap(50, 95, 75),
-        'horizontalAbduction': createCap(35, 65, 90),
-        'horizontalAdduction': createCap(45, 90, 90),
-        'internalRotation': createCap(40, 70, 0),
-        'externalRotation': createCap(25, 45, 0)
+        'flexion':              createCap(40, 80,  0),     // peak at neutral (no flip)
+        'extension':            createCap(50, 95,  -45),   // peaks at 45° forward-flexed (lats stretched)
+        'abduction':            createCap(35, 70,  75),    // peak at 75° abd (mid-range)
+        'adduction':            createCap(50, 95,  -75),   // peak at 75° abducted (cross-body pull stretched)
+        'horizontalAbduction':  createCap(35, 65,  -90),   // peak at arm-forward (rear delt stretched)
+        'horizontalAdduction':  createCap(45, 90,  90),    // peak at arm-forward (pec stretched)
+        'internalRotation':     createCap(40, 70,  0),     // symmetric
+        'externalRotation':     createCap(25, 45,  0)      // symmetric
     },
     'Elbow': {
-        'flexion': createCap(30, 60, 90),
-        'extension': createCap(40, 75, 75),
+        'flexion':              createCap(30, 60,  -90),   // peak at 90° flex (muscle stretched)
+        'extension':            createCap(40, 75,  75)     // peak at 75° (hinge raw convention → pos-side)
     },
     'Hip': {
-        'flexion': createCap(55, 110, 0),
-        'extension': createCap(95, 215, 40),
-        'abduction': createCap(90, 150, 20),
-        'adduction': createCap(75, 125, 0),
-        'internalRotation': createCap(35, 60, 0),
-        'externalRotation': createCap(30, 50, 0)
+        'flexion':              createCap(55, 110, 0),
+        'extension':            createCap(95, 215, -40),   // peak at 40° flexed (glute stretched, bottom of squat)
+        'abduction':            createCap(90, 150, 20),
+        'adduction':            createCap(75, 125, 0),
+        'internalRotation':     createCap(35, 60,  0),
+        'externalRotation':     createCap(30, 50,  0)
     },
     'Knee': {
-        'flexion': createCap(45, 105, 40),
-        'extension': createCap(75, 165, 60),
+        'flexion':              createCap(45, 105, 40),    // peak at 40° flex
+        'extension':            createCap(75, 165, -60)    // peak at 60° flex (vasti stretched)
     },
     'Ankle': {
-        'plantarflexion': createCap(65, 105, 15),
-        'dorsiflexion': createCap(35, 35, 0)
+        'plantarflexion':       createCap(65, 105, 15),    // peak at 15° dorsi (stretched)
+        'dorsiflexion':         createCap(35, 35,  0)
     },
     'Scapula': {
-        'elevation': createCap(40, 65, 0),
-        'depression': createCap(25, 45, 0),
-        'protraction': createCap(25, 45, 0),
-        'retraction': createCap(30, 55, 0)
+        'elevation':            createCap(40, 65,  0),
+        'depression':           createCap(25, 45,  0),
+        'protraction':          createCap(25, 45,  0),
+        'retraction':           createCap(30, 55,  0)
     },
     'Spine': {
-        'flexion': createCap(110, 190, 0),
-        'extension': createCap(140, 260, 25),
-        'lateralFlexion': createCap(70, 130, 0),
-        'rotation': createCap(70, 120, 0)
+        'flexion':              createCap(110, 190, 0),
+        'extension':            createCap(140, 260, -25),  // peak at 25° flexed (erectors stretched)
+        'lateralFlexion':       createCap(70, 130, 0),
+        'rotation':             createCap(70, 120, 0)
     }
 };
 
@@ -2319,7 +2330,10 @@ const BioModelPage: React.FC = () => {
                           const tau0 = dotProduct(forceVec, act.axis);
                           const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
                           const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
-                          const capVal = capLk ? evaluateCapacity(capLk, getActionAngle(bone, act, currentPosture, currentTwists)) : 1;
+                          const isPos = actName === act.positiveAction;
+                          const capVal = capLk
+                              ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists))
+                              : 1;
                           const sens: number[] = [];
                           for (const cref of consRefs) {
                               if (!cref.ancestors.has(bone)) { sens.push(0); continue; }
@@ -2372,7 +2386,10 @@ const BioModelPage: React.FC = () => {
 
                       const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
                       const capLk = capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
-                      const capVal = capLk ? evaluateCapacity(capLk, getActionAngle(bone, act, currentPosture, currentTwists)) : 1;
+                      const isPos = actName === act.positiveAction;
+                      const capVal = capLk
+                          ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists))
+                          : 1;
 
                       const sens: number[] = [];
                       for (const cref of consRefs) {
@@ -2882,6 +2899,108 @@ const BioModelPage: React.FC = () => {
           angleDeg = -angleDeg;
       }
       return angleDeg;
+  };
+
+  // Convert rawAngle → directionAngle for the given section. Positive
+  // directionAngle = "more of THIS section's action direction"; negative =
+  // opposite direction on the same axis. This is the convention used by
+  // muscle-tab peak angles AND (after the 2026-04 capacity migration) by
+  // capacity-tab peak angles, so call sites that evaluate a bell need to
+  // pass directionAngle, not rawAngle.
+  //
+  // Per-axis actionSign convention (derived from how each bone's
+  // dirToHingeAngle / plane-projection formula signs the rawAngle):
+  //   • Shoulder/Hip ball-socket flex/abd (plane-projection): +1
+  //   • Horizontal ab/ad (useWorldAxis):                       −1
+  //   • Twist (isBoneAxis):                                    +1
+  //   • Elbow hinge (forearm atan2(z,y) → neg for flexion):    +1
+  //   • Knee/Ankle hinge (tibia/foot → pos for flexion/PF):    −1
+  //   • Scapula / Spine / others:                              +1
+  const sectionDirectionAngle = (
+      boneId: string,
+      action: ActionAxis,
+      isPositive: boolean,
+      curPosture: Posture,
+      curTwists: Record<string, number>,
+  ): number => {
+      const rawAngle = getActionAngle(boneId, action, curPosture, curTwists);
+      const isElbow = /Forearm/.test(boneId);
+      const isKneeOrAnkle = /Tibia|Foot/.test(boneId);
+      const actionSign = action.isBoneAxis ? 1 :
+                         action.useWorldAxis ? -1 :
+                         isElbow ? 1 :
+                         isKneeOrAnkle ? -1 :
+                         1;
+      return rawAngle * actionSign * (isPositive ? 1 : -1);
+  };
+
+  // Compute the graph X-axis range (in directionAngle) for a given joint
+  // action section, based on the currently-configured joint limits. Used
+  // by the Muscles tab AND the Capacities tab so their tracks match.
+  // Three cases:
+  //   1. Hinges (Knee / Elbow / Ankle) and twists (IR/ER): limits are
+  //      stored as action angles in rawAngle space; map them to
+  //      directionAngle via flip.
+  //   2. Ball-socket direction actions (Shoulder / Hip flex-ext, abd-add,
+  //      horiz): dense-sample the in-box subset of the unit sphere, compute
+  //      directionAngle via the same unwrapped formula getActionAngle
+  //      uses at runtime, take min/max.
+  //   3. Fallback: 0–180.
+  const getActionRange = (group: JointGroup, ax: ActionAxis, isPositive: boolean): { min: number; max: number } => {
+      const isHinge = group === 'Knee' || group === 'Elbow' || group === 'Ankle';
+      const actionSign = ax.isBoneAxis ? 1 :
+                         ax.useWorldAxis ? -1 :
+                         isHinge ? -1 : 1;
+      const flip = actionSign * (isPositive ? 1 : -1);
+
+      // Case 1: hinge / twist action limits.
+      const actionLim = jointLimits[`${group}.action.${ax.positiveAction}`];
+      if (actionLim && Math.abs(actionLim.max - actionLim.min) >= 30) {
+          const a = actionLim.min * flip;
+          const b = actionLim.max * flip;
+          return { min: Math.min(a, b), max: Math.max(a, b) };
+      }
+
+      // Case 2: ball-socket direction actions via dense sphere sampling.
+      if ((group === 'Shoulder' || group === 'Hip') && !ax.isBoneAxis) {
+          const xLim = jointLimits[`${group}.dir.x`];
+          const yLim = jointLimits[`${group}.dir.y`];
+          const zLim = jointLimits[`${group}.dir.z`];
+          if (xLim && yLim && zLim) {
+              let minAng = Infinity, maxAng = -Infinity;
+              const N = 50;
+              for (let i = 0; i <= N; i++) {
+                  for (let j = 0; j <= N; j++) {
+                      const x = xLim.min + (xLim.max - xLim.min) * (i / N);
+                      const y = yLim.min + (yLim.max - yLim.min) * (j / N);
+                      const zsq = 1 - x * x - y * y;
+                      if (zsq < 0) continue;
+                      for (const zsign of [-1, 1]) {
+                          const z = zsign * Math.sqrt(zsq);
+                          if (z < zLim.min || z > zLim.max) continue;
+                          let raw: number;
+                          if (Math.abs(ax.axis.x) > 0.5) {
+                              raw = Math.atan2(-z, y) * 180 / Math.PI;
+                              if (y < 0 && z > 0) raw += 360;
+                          } else if (Math.abs(ax.axis.z) > 0.5) {
+                              raw = Math.atan2(x, y) * 180 / Math.PI;
+                              if (y < 0 && x < 0) raw += 360;
+                          } else if (ax.useWorldAxis && Math.abs(ax.axis.y) > 0.5) {
+                              if (x * x + z * z < 1e-4) continue;
+                              raw = Math.atan2(-z, x) * 180 / Math.PI;
+                          } else continue;
+                          const dirAng = raw * flip;
+                          if (dirAng < minAng) minAng = dirAng;
+                          if (dirAng > maxAng) maxAng = dirAng;
+                      }
+                  }
+              }
+              if (minAng !== Infinity) return { min: minAng, max: maxAng };
+          }
+      }
+
+      // Case 3: fallback.
+      return { min: 0, max: 180 };
   };
 
   // A limit dimension is a single scalar axis that a user can bound. It's
@@ -6501,25 +6620,38 @@ const BioModelPage: React.FC = () => {
                                <div className="space-y-4">
                                    {Object.entries(actions).map(([action, config]) => {
                                        // Find the ActionAxis that matches this capacity entry's
-                                       // action-key so we can sample getActionAngle on each side
-                                       // and render a live position marker against the peak-angle
-                                       // slider. Capacities are evaluated at rawAngle (not the
-                                       // sign-flipped directionAngle muscles use), so the markers
-                                       // here show rawAngle directly.
+                                       // action-key. Capacity peak angles are stored in the
+                                       // DIRECTIONANGLE convention (positive = more of this
+                                       // section's action direction) matching the Muscles tab,
+                                       // so the L/R markers below also show directionAngle.
                                        const ax = JOINT_ACTIONS[group as JointGroup]?.find(a =>
                                            actionKey(a.positiveAction) === action ||
                                            actionKey(a.negativeAction) === action
                                        );
+                                       const isPos = ax ? actionKey(ax.positiveAction) === action : true;
                                        const lCap = (ax && groupBones)
-                                           ? getActionAngle(groupBones.left, ax, posture, twists)
+                                           ? sectionDirectionAngle(groupBones.left, ax, isPos, posture, twists)
                                            : null;
                                        const rCap = (ax && groupBones)
-                                           ? getActionAngle(groupBones.right, ax, posture, twists)
+                                           ? sectionDirectionAngle(groupBones.right, ax, isPos, posture, twists)
                                            : null;
-                                       // Track spans from -180 to 180 and matches the slider range.
-                                       const capTrackMin = -180;
-                                       const capTrackMax = 180;
-                                       const capPct = (v: number) => ((v - capTrackMin) / (capTrackMax - capTrackMin)) * 100;
+                                       // Per-section computed range (same sphere-sampled approach
+                                       // the Muscles tab uses) so the track spans the joint's
+                                       // actual reachable ROM for this section, not a fixed ±180.
+                                       const sectionRange = ax
+                                           ? getActionRange(group as JointGroup, ax, isPos)
+                                           : { min: -180, max: 180 };
+                                       // Widen the range to include the peak angle + L/R live
+                                       // positions so nothing clips at the edges.
+                                       const candidates = [sectionRange.min, sectionRange.max, config.angle || 0];
+                                       if (lCap !== null) candidates.push(lCap);
+                                       if (rCap !== null) candidates.push(rCap);
+                                       const capTrackMin = Math.min(...candidates);
+                                       const capTrackMax = Math.max(...candidates);
+                                       const capPct = (v: number) =>
+                                           capTrackMax === capTrackMin
+                                               ? 50
+                                               : ((v - capTrackMin) / (capTrackMax - capTrackMin)) * 100;
                                        return (
                                        <div key={action} className="bg-gray-50 rounded-xl p-3 border border-gray-100">
                                            <div className="flex justify-between items-center mb-2">
@@ -6596,115 +6728,8 @@ const BioModelPage: React.FC = () => {
           )}
 
           {activeTab === 'muscles' && (() => {
-              // Per-section X-axis range. Pull from joint limits when an
-              // Derive the graph's X-axis range from the joint's actual
-              // angular limits so the muscle bell curves are plotted
-              // against the real reachable ROM — no wasted territory and
-              // no clipped peaks.
-              //
-              // Three cases:
-              //
-              //   1. Hinges (Knee / Elbow / Ankle) and twists (IR/ER):
-              //      the limits are stored as action angles in rawAngle
-              //      space. Map them to directionAngle space by applying
-              //      the same actionSign * isPositive flip that
-              //      distributeMuscleLoadForFrame uses at runtime.
-              //
-              //   2. Ball-socket direction actions (Shoulder / Hip
-              //      flex-ext, abd-add, horiz): the limits are per-
-              //      component bounds on the unit direction vector
-              //      (dir.x/y/z). Reconstruct the achievable rawAngle
-              //      range by sampling the formula at the corners of the
-              //      limit box, then flip to directionAngle. The corner
-              //      sampling is a loose upper bound — the real ROM is
-              //      narrower because of the unit-magnitude constraint —
-              //      but it keeps the math cheap and is perfectly safe
-              //      for a display range (no values are clipped off).
-              //
-              //   3. Anything else: fall back to 0–180.
-              const getActionRange = (group: JointGroup, ax: ActionAxis, isPositive: boolean): { min: number; max: number } => {
-                  const isHinge = group === 'Knee' || group === 'Elbow' || group === 'Ankle';
-                  const actionSign = ax.isBoneAxis ? 1 :
-                                     ax.useWorldAxis ? -1 :
-                                     isHinge ? -1 : 1;
-                  const flip = actionSign * (isPositive ? 1 : -1);
-
-                  // Case 1: hinge / twist action limits.
-                  const actionLim = jointLimits[`${group}.action.${ax.positiveAction}`];
-                  if (actionLim && Math.abs(actionLim.max - actionLim.min) >= 30) {
-                      const a = actionLim.min * flip;
-                      const b = actionLim.max * flip;
-                      return { min: Math.min(a, b), max: Math.max(a, b) };
-                  }
-
-                  // Case 2: ball-socket direction actions. Dense-sample the
-                  // in-box subset of the unit sphere and compute each
-                  // sample's directionAngle via the SAME unwrapped formula
-                  // that getActionAngle uses at runtime. Take min/max.
-                  //
-                  // Why sphere sampling instead of pure-path binary search:
-                  // the shoulder/hip limit boxes are NOT convex on the unit
-                  // sphere. The pure sagittal sweep for hip flexion, for
-                  // example, ends at ~64° when z hits zLim.min=-0.9; but
-                  // positions at 120°+ flexion are still reachable via
-                  // combined abduction+rotation paths (they live on a
-                  // disjoint in-box arc that the sagittal sweep can't
-                  // reach without going OUT of box). Sphere sampling sees
-                  // all of these reachable positions.
-                  //
-                  // Why unwrap: past-overhead positions (y<0, z>0 for flex,
-                  // or y<0, x·sideSign<0 for abd) have atan2 wrap to the
-                  // negative side. Without unwrap, a fully-flexed arm past
-                  // overhead reads as "-160°" instead of "+200°", which is
-                  // confusing for the user AND makes evaluateCapacity snap
-                  // to the weakest-capacity side (|θ−peak| caps at 180°).
-                  // Unwrap gives continuous values that match the drag-
-                  // direction semantics.
-                  if ((group === 'Shoulder' || group === 'Hip') && !ax.isBoneAxis) {
-                      const xLim = jointLimits[`${group}.dir.x`];
-                      const yLim = jointLimits[`${group}.dir.y`];
-                      const zLim = jointLimits[`${group}.dir.z`];
-                      if (xLim && yLim && zLim) {
-                          let minAng = Infinity, maxAng = -Infinity;
-                          const N = 50;
-                          for (let i = 0; i <= N; i++) {
-                              for (let j = 0; j <= N; j++) {
-                                  const x = xLim.min + (xLim.max - xLim.min) * (i / N);
-                                  const y = yLim.min + (yLim.max - yLim.min) * (j / N);
-                                  const zsq = 1 - x * x - y * y;
-                                  if (zsq < 0) continue;
-                                  for (const zsign of [-1, 1]) {
-                                      const z = zsign * Math.sqrt(zsq);
-                                      if (z < zLim.min || z > zLim.max) continue;
-                                      // Bilateral normalization: sample with
-                                      // sideSign=+1 (right-side convention).
-                                      // Left side mirrors symmetrically.
-                                      let raw: number;
-                                      if (Math.abs(ax.axis.x) > 0.5) {
-                                          raw = Math.atan2(-z, y) * 180 / Math.PI;
-                                          if (y < 0 && z > 0) raw += 360;
-                                      } else if (Math.abs(ax.axis.z) > 0.5) {
-                                          raw = Math.atan2(x, y) * 180 / Math.PI;
-                                          if (y < 0 && x < 0) raw += 360;
-                                      } else if (ax.useWorldAxis && Math.abs(ax.axis.y) > 0.5) {
-                                          if (x * x + z * z < 1e-4) continue;
-                                          raw = Math.atan2(-z, x) * 180 / Math.PI;
-                                      } else continue;
-                                      const dirAng = raw * flip;
-                                      if (dirAng < minAng) minAng = dirAng;
-                                      if (dirAng > maxAng) maxAng = dirAng;
-                                  }
-                              }
-                          }
-                          if (minAng !== Infinity) {
-                              return { min: minAng, max: maxAng };
-                          }
-                      }
-                  }
-
-                  // Case 3: fallback.
-                  return { min: 0, max: 180 };
-              };
+              // getActionRange is hoisted to component scope (used by the
+              // Capacities tab too, so both tabs render consistent ranges).
 
               return (
                   <div className="flex-1 flex flex-col animate-in fade-in slide-in-from-right-4 duration-300">
