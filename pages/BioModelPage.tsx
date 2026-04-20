@@ -1988,23 +1988,82 @@ const BioModelPage: React.FC = () => {
           const effectiveMag = baseMag * profileMult;
           const scaledForce = mul(forceDir, effectiveMag);
 
-          totalAppliedForce = add(totalAppliedForce, scaledForce);
-          totalAppliedMoment = add(totalAppliedMoment, crossProduct(attachPt, scaledForce));
+          // --- F_∥ extraction ---
+          // If this force's bone has physics-enabled constraints, the
+          // constraints absorb F_perp exactly at the constraint surface
+          // (Newton's 3rd law on a rigid plane). Only F_∥ — the component
+          // along the constraint's free direction — propagates up the chain
+          // as muscle demand. Propagating the full F would leave F_perp-
+          // induced torque at every upstream joint, which is both wrong
+          // physically (the plane absorbed it) and the root cause of the
+          // ratio drift: when F_perp changes but F_∥ stays fixed, tau0
+          // changes and Phase B's cap-lookup (which keys on sign(tau0))
+          // can flip, giving different optima for the same F_∥.
+          //
+          // With F_∥ propagation, tau0 depends only on F_∥, cap lookup is
+          // F-perp-invariant, and Phase B's min-effort redistribution is
+          // genuinely F-direction-invariant for fixed F_∥.
+          let propagatedForce = scaledForce;
+          const consAtBone = activeConstraints?.[f.boneId];
+          if (consAtBone) {
+              const activeCons = consAtBone.filter(c => c.active && c.physicsEnabled !== false);
+              if (activeCons.length > 0) {
+                  const normals: Vector3[] = [];
+                  for (const c of activeCons) {
+                      if (c.type === 'planar') {
+                          const n = normalize(c.normal);
+                          if (magnitude(n) > 0.1) normals.push(n);
+                      } else if (c.type === 'fixed') {
+                          normals.push({ x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 1 });
+                      } else if (c.type === 'arc' && c.axis && c.pivot && c.radius !== undefined) {
+                          const axisN = normalize(c.axis);
+                          if (magnitude(axisN) > 0.1) normals.push(axisN);
+                          const tipPt = getConstraintPoint(f.boneId, c, kin);
+                          if (tipPt) {
+                              const relTip = sub(tipPt, c.pivot);
+                              const axComp = dotProduct(relTip, axisN);
+                              const radial = sub(relTip, mul(axisN, axComp));
+                              const radMag = magnitude(radial);
+                              if (radMag > 0.1) normals.push({ x: radial.x/radMag, y: radial.y/radMag, z: radial.z/radMag });
+                          }
+                      }
+                  }
+                  // Orthonormalize normals (Gram-Schmidt), then project F onto
+                  // each and subtract.
+                  const orthoNormals: Vector3[] = [];
+                  for (const n of normals) {
+                      let v: Vector3 = { x: n.x, y: n.y, z: n.z };
+                      for (const on of orthoNormals) {
+                          const proj = dotProduct(v, on);
+                          v = sub(v, mul(on, proj));
+                      }
+                      const vMag = magnitude(v);
+                      if (vMag > 1e-4) orthoNormals.push({ x: v.x/vMag, y: v.y/vMag, z: v.z/vMag });
+                  }
+                  for (const n of orthoNormals) {
+                      const proj = dotProduct(propagatedForce, n);
+                      propagatedForce = sub(propagatedForce, mul(n, proj));
+                  }
+              }
+          }
+
+          totalAppliedForce = add(totalAppliedForce, propagatedForce);
+          totalAppliedMoment = add(totalAppliedMoment, crossProduct(attachPt, propagatedForce));
 
           for (const bone of chain) {
               const prevJ = jointForces[bone] || { x: 0, y: 0, z: 0 };
-              jointForces[bone] = add(prevJ, scaledForce);
+              jointForces[bone] = add(prevJ, propagatedForce);
 
               if (bone.includes('Clavicle')) {
                   // Scapula: accumulate linear force scaled by effective
                   // magnitude so multi-force relative weighting is correct.
                   const prev = scapulaForces[bone] || { x: 0, y: 0, z: 0 };
-                  scapulaForces[bone] = add(prev, scaledForce);
+                  scapulaForces[bone] = add(prev, propagatedForce);
               } else {
                   const jointCenter = jointTorqueCenter(bone);
                   if (!jointCenter) continue;
                   const momentArm = sub(attachPt, jointCenter);
-                  const torque = crossProduct(momentArm, scaledForce);
+                  const torque = crossProduct(momentArm, propagatedForce);
                   const prev = rawTorques[bone] || { x: 0, y: 0, z: 0 };
                   rawTorques[bone] = add(prev, torque);
               }
@@ -2470,62 +2529,6 @@ const BioModelPage: React.FC = () => {
                   }
                   const B = balanceRows.length;
 
-                  // Direct λ-fixing for force-at-constraint bones.
-                  // For every bone that has BOTH an applied force AND
-                  // constraints on it, compute the λ values that satisfy
-                  // local force balance — Σ_i λ_i n_i = -F_bone (projected
-                  // onto the constraint normals at that bone) — and then
-                  // enforce those specific λ values as hard equalities in
-                  // the KKT. This is Newton's 3rd law at the constraint
-                  // surface: a rigid plane absorbs exactly the perpendicular
-                  // component of the force pressing into it, no more, no
-                  // less. Without this, Phase B's cost minimizer picks λ
-                  // values that trade constraint reaction against muscle
-                  // cost, producing unphysical δR that propagates through
-                  // the chain as joint torques dependent on F direction.
-                  //
-                  // We use identity rows (`λ_i = specific_value`) rather
-                  // than Gram-matrix rows because they are numerically
-                  // better-conditioned when mixed with the AtWA block in
-                  // the KKT. For orthonormal normals they are algebraically
-                  // identical; for non-orthonormal normals we still solve
-                  // the Gram system and fix each λ individually.
-                  const forceByBone = new Map<string, Vector3>();
-                  for (const f of currentForces) {
-                      const dir = getForceDirectionWithKin(f, kin2, currentTwists);
-                      const baseMag = f.magnitude || 1;
-                      const profileMult = evaluateProfile(f.profile, currentT);
-                      const fVec = mul(dir, baseMag * profileMult);
-                      const prev = forceByBone.get(f.boneId) || { x: 0, y: 0, z: 0 };
-                      forceByBone.set(f.boneId, add(prev, fVec));
-                  }
-                  const fixIdxs: number[] = [];
-                  const fixVals: number[] = [];
-                  for (const [bone, fVec] of forceByBone) {
-                      const idxs: number[] = [];
-                      for (let i = 0; i < consRefs.length; i++) {
-                          if (consRefs[i].constrainedBone === bone) idxs.push(i);
-                      }
-                      if (idxs.length === 0) continue;
-                      // Solve Gram system at this bone: G·λ_local = -F·n
-                      const k = idxs.length;
-                      const G: number[][] = Array.from({length: k}, () => new Array(k).fill(0));
-                      const rhs: number[] = new Array(k).fill(0);
-                      for (let j = 0; j < k; j++) {
-                          const nj = consRefs[idxs[j]].n;
-                          for (let i = 0; i < k; i++) {
-                              G[j][i] = dotProduct(consRefs[idxs[i]].n, nj);
-                          }
-                          rhs[j] = -dotProduct(fVec, nj);
-                      }
-                      const lamLocal = solveSmall(G, rhs);
-                      for (let kl = 0; kl < k; kl++) {
-                          fixIdxs.push(idxs[kl]);
-                          fixVals.push(lamLocal[kl]);
-                      }
-                  }
-                  const L = fixIdxs.length;
-
                   // Hinge joints whose sens column is linearly independent
                   // of the others' are structurally-locked. Gram-Schmidt
                   // test: if the residual after projecting sens_k onto the
@@ -2575,7 +2578,7 @@ const BioModelPage: React.FC = () => {
                   }
                   const H = hingeFrozenIdx.length;
 
-                  const dim = N + H + B + L;
+                  const dim = N + H + B;
                   const M: number[][] = Array.from({length: dim}, () => new Array(dim).fill(0));
                   const RHS: number[] = new Array(dim).fill(0);
                   for (let i = 0; i < N; i++) {
@@ -2596,12 +2599,6 @@ const BioModelPage: React.FC = () => {
                           M[N + H + b][i] = balanceRows[b][i];
                       }
                       RHS[N + H + b] = balanceRhs[b];
-                  }
-                  for (let l = 0; l < L; l++) {
-                      // Identity row: λ[fixIdxs[l]] = fixVals[l]
-                      M[fixIdxs[l]][N + H + B + l] = 1;
-                      M[N + H + B + l][fixIdxs[l]] = 1;
-                      RHS[N + H + B + l] = fixVals[l];
                   }
                   const sol = solveSmall(M, RHS);
                   const lam = sol.slice(0, N);
@@ -2639,11 +2636,27 @@ const BioModelPage: React.FC = () => {
                           const r = reactionByBoneDbg.get(bone) || { x: 0, y: 0, z: 0 };
                           fEffByBoneDbg[bone] = add(fVec, r);
                       }
-                      const expectedHandLambdas: Record<number, number> = {};
-                      const actualHandLambdas: Record<number, number> = {};
-                      for (let l = 0; l < fixIdxs.length; l++) {
-                          expectedHandLambdas[fixIdxs[l]] = fixVals[l];
-                          actualHandLambdas[fixIdxs[l]] = lam[fixIdxs[l]];
+                      // Per-joint diagnostic dump: tau0 (Phase A residual on
+                      // the joint axis) and newTau (after Phase B λ
+                      // redistribution), so we can verify ratio invariance
+                      // across F directions for the same pose. If F_eff at
+                      // the constrained bone is invariant to F's free-DOF
+                      // direction, every (boneId, action) pair's newTau
+                      // should also be invariant.
+                      const perJointDbg: Record<string, { tau0: number; newTau: number; cap: number; sensSum: number; }> = {};
+                      for (const c of cols) {
+                          if (!/Forearm|Humerus|Clavicle|spine|Tibia|Femur|Foot/.test(c.boneId)) continue;
+                          let nt = c.tau0;
+                          let ss = 0;
+                          for (let i = 0; i < N; i++) { nt += lam[i] * c.sens[i]; ss += Math.abs(c.sens[i]); }
+                          const key = `${c.boneId}.${c.act.positiveAction}/${c.act.negativeAction}`;
+                          perJointDbg[key] = { tau0: c.tau0, newTau: nt, cap: c.cap, sensSum: ss };
+                      }
+                      // Bone positions for moment-arm verification across tests.
+                      const bonePosDbg: Record<string, { start: Vector3; end: Vector3 }> = {};
+                      for (const b of ['rHumerus','rForearm','lHumerus','lForearm','spine','rFemur','lFemur','rTibia','lTibia']) {
+                          const s = kin2.boneStartPoints[b], e = kin2.boneEndPoints[b];
+                          if (s && e) bonePosDbg[b] = { start: s, end: e };
                       }
                       (window as unknown as Record<string, unknown>).__phaseBDebug = {
                           appliedForces: Object.fromEntries(fByBoneDbg),
@@ -2651,8 +2664,8 @@ const BioModelPage: React.FC = () => {
                           lambdas: lam.slice(),
                           reactionByBone: Object.fromEntries(reactionByBoneDbg),
                           fEffByBone: fEffByBoneDbg,
-                          expectedHandLambdas,
-                          actualHandLambdas,
+                          perJoint: perJointDbg,
+                          bonePositions: bonePosDbg,
                       };
                   }
 
@@ -2672,6 +2685,23 @@ const BioModelPage: React.FC = () => {
                   // newTau ≈ 0 from the KKT constraint; any Phase A entry
                   // there is overwritten with zero magnitude and dropped by
                   // the downstream `> phaseAMax * 0.01` filter.
+                  //
+                  // CAP RECOMPUTATION ON SIGN FLIP: c.cap was looked up
+                  // during column building using the SIGN OF c.tau0 (Phase
+                  // A). Phase B can flip that sign — e.g. when the hand
+                  // λ-fix subtracts a large constraint reaction from tau0
+                  // and pushes it past zero. When the sign flips, the
+                  // CORRECT cap is the one for the FINAL action direction
+                  // (newAction), not c.cap (which is for oldAction). If we
+                  // don't refresh, effort = newMag / c.cap divides by the
+                  // wrong-direction cap (e.g. Cap_Flexion for an Extension
+                  // demand), and joint demand RATIOS drift across F
+                  // directions even though F_eff at the constrained bone
+                  // is invariant. This was the root cause of the
+                  // "ratio shifts when only F's free-DOF component
+                  // changes" bug: shoulder and elbow had different
+                  // Cap_Flex / Cap_Ext ratios, so when both flipped, the
+                  // displayed ratio between them shifted.
                   for (const c of cols) {
                       let newTau = c.tau0;
                       for (let i = 0; i < N; i++) newTau += lam[i] * c.sens[i];
@@ -2683,13 +2713,30 @@ const BioModelPage: React.FC = () => {
                       const newFullName = `${side} ${c.jointGroup} ${newAction}`.trim();
                       const oldFullName = `${side} ${c.jointGroup} ${oldAction}`.trim();
 
+                      let effectiveCap = c.cap;
+                      if (newAction !== oldAction) {
+                          const capLk = capacities[c.jointGroup]?.[capacityKey(newAction)]
+                                     || capacities[c.jointGroup]?.[actionKey(newAction)]
+                                     || capacities[c.jointGroup]?.[newAction]
+                                     || null;
+                          if (capLk) {
+                              const isPos = newAction === c.act.positiveAction;
+                              const availability = sectionAvailabilityModifier(
+                                  c.jointGroup, c.act, isPos, c.boneId, rawTorques, kin2, currentPosture, currentTwists,
+                              );
+                              effectiveCap = c.jointGroup === 'Scapula'
+                                  ? capLk.specific  // scapula caps don't use angle interp
+                                  : evaluateCapacity(capLk, sectionDirectionAngle(c.boneId, c.act, isPos, currentPosture, currentTwists)) * availability;
+                          }
+                      }
+
                       const di = filtered.findIndex(d =>
                           d.boneId === c.boneId &&
                           (d.action === oldFullName || d.action === newFullName));
 
                       if (di >= 0) {
                           filtered[di].torqueMagnitude = newMag;
-                          filtered[di].effort = newMag / c.cap;
+                          filtered[di].effort = newMag / effectiveCap;
                           filtered[di].action = newFullName;
                       } else if (newMag > 0.01) {
                           filtered.push({
@@ -2697,7 +2744,7 @@ const BioModelPage: React.FC = () => {
                               jointGroup: c.jointGroup,
                               action: newFullName,
                               torqueMagnitude: newMag,
-                              effort: newMag / c.cap,
+                              effort: newMag / effectiveCap,
                           });
                       }
                   }
