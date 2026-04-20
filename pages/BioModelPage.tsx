@@ -2470,6 +2470,62 @@ const BioModelPage: React.FC = () => {
                   }
                   const B = balanceRows.length;
 
+                  // Direct λ-fixing for force-at-constraint bones.
+                  // For every bone that has BOTH an applied force AND
+                  // constraints on it, compute the λ values that satisfy
+                  // local force balance — Σ_i λ_i n_i = -F_bone (projected
+                  // onto the constraint normals at that bone) — and then
+                  // enforce those specific λ values as hard equalities in
+                  // the KKT. This is Newton's 3rd law at the constraint
+                  // surface: a rigid plane absorbs exactly the perpendicular
+                  // component of the force pressing into it, no more, no
+                  // less. Without this, Phase B's cost minimizer picks λ
+                  // values that trade constraint reaction against muscle
+                  // cost, producing unphysical δR that propagates through
+                  // the chain as joint torques dependent on F direction.
+                  //
+                  // We use identity rows (`λ_i = specific_value`) rather
+                  // than Gram-matrix rows because they are numerically
+                  // better-conditioned when mixed with the AtWA block in
+                  // the KKT. For orthonormal normals they are algebraically
+                  // identical; for non-orthonormal normals we still solve
+                  // the Gram system and fix each λ individually.
+                  const forceByBone = new Map<string, Vector3>();
+                  for (const f of currentForces) {
+                      const dir = getForceDirectionWithKin(f, kin2, currentTwists);
+                      const baseMag = f.magnitude || 1;
+                      const profileMult = evaluateProfile(f.profile, currentT);
+                      const fVec = mul(dir, baseMag * profileMult);
+                      const prev = forceByBone.get(f.boneId) || { x: 0, y: 0, z: 0 };
+                      forceByBone.set(f.boneId, add(prev, fVec));
+                  }
+                  const fixIdxs: number[] = [];
+                  const fixVals: number[] = [];
+                  for (const [bone, fVec] of forceByBone) {
+                      const idxs: number[] = [];
+                      for (let i = 0; i < consRefs.length; i++) {
+                          if (consRefs[i].constrainedBone === bone) idxs.push(i);
+                      }
+                      if (idxs.length === 0) continue;
+                      // Solve Gram system at this bone: G·λ_local = -F·n
+                      const k = idxs.length;
+                      const G: number[][] = Array.from({length: k}, () => new Array(k).fill(0));
+                      const rhs: number[] = new Array(k).fill(0);
+                      for (let j = 0; j < k; j++) {
+                          const nj = consRefs[idxs[j]].n;
+                          for (let i = 0; i < k; i++) {
+                              G[j][i] = dotProduct(consRefs[idxs[i]].n, nj);
+                          }
+                          rhs[j] = -dotProduct(fVec, nj);
+                      }
+                      const lamLocal = solveSmall(G, rhs);
+                      for (let kl = 0; kl < k; kl++) {
+                          fixIdxs.push(idxs[kl]);
+                          fixVals.push(lamLocal[kl]);
+                      }
+                  }
+                  const L = fixIdxs.length;
+
                   // Hinge joints whose sens column is linearly independent
                   // of the others' are structurally-locked. Gram-Schmidt
                   // test: if the residual after projecting sens_k onto the
@@ -2519,7 +2575,7 @@ const BioModelPage: React.FC = () => {
                   }
                   const H = hingeFrozenIdx.length;
 
-                  const dim = N + H + B;
+                  const dim = N + H + B + L;
                   const M: number[][] = Array.from({length: dim}, () => new Array(dim).fill(0));
                   const RHS: number[] = new Array(dim).fill(0);
                   for (let i = 0; i < N; i++) {
@@ -2541,8 +2597,64 @@ const BioModelPage: React.FC = () => {
                       }
                       RHS[N + H + b] = balanceRhs[b];
                   }
+                  for (let l = 0; l < L; l++) {
+                      // Identity row: λ[fixIdxs[l]] = fixVals[l]
+                      M[fixIdxs[l]][N + H + B + l] = 1;
+                      M[N + H + B + l][fixIdxs[l]] = 1;
+                      RHS[N + H + B + l] = fixVals[l];
+                  }
                   const sol = solveSmall(M, RHS);
                   const lam = sol.slice(0, N);
+
+                  // DEBUG: expose Phase B internals for console inspection.
+                  // In the browser console, type `__phaseBDebug` and hit
+                  // Enter to see: applied force per bone, constraint normals
+                  // per bone, solved λ values, reaction vector per
+                  // constrained bone, and F_eff (F + R) per force bone.
+                  // For a hand on sagittal+transverse with F = (0, 1, -1),
+                  // physics says F_eff at hand should be (0, 0, -1) — the
+                  // Y-component of F_eff.fEffByBone.lForearm.y should be 0.
+                  // If it's nonzero, that's the Y-leak.
+                  if (typeof window !== 'undefined') {
+                      const fByBoneDbg = new Map<string, Vector3>();
+                      for (const f of currentForces) {
+                          const dir = getForceDirectionWithKin(f, kin2, currentTwists);
+                          const mag = (f.magnitude || 1) * evaluateProfile(f.profile, currentT);
+                          const fVec = mul(dir, mag);
+                          const prev = fByBoneDbg.get(f.boneId) || { x: 0, y: 0, z: 0 };
+                          fByBoneDbg.set(f.boneId, add(prev, fVec));
+                      }
+                      const reactionByBoneDbg = new Map<string, Vector3>();
+                      const normalsByBoneDbg = new Map<string, Vector3[]>();
+                      for (let i = 0; i < consRefs.length; i++) {
+                          const bone = consRefs[i].constrainedBone;
+                          const rVec = mul(consRefs[i].n, lam[i]);
+                          const prev = reactionByBoneDbg.get(bone) || { x: 0, y: 0, z: 0 };
+                          reactionByBoneDbg.set(bone, add(prev, rVec));
+                          if (!normalsByBoneDbg.has(bone)) normalsByBoneDbg.set(bone, []);
+                          normalsByBoneDbg.get(bone)!.push(consRefs[i].n);
+                      }
+                      const fEffByBoneDbg: Record<string, Vector3> = {};
+                      for (const [bone, fVec] of fByBoneDbg) {
+                          const r = reactionByBoneDbg.get(bone) || { x: 0, y: 0, z: 0 };
+                          fEffByBoneDbg[bone] = add(fVec, r);
+                      }
+                      const expectedHandLambdas: Record<number, number> = {};
+                      const actualHandLambdas: Record<number, number> = {};
+                      for (let l = 0; l < fixIdxs.length; l++) {
+                          expectedHandLambdas[fixIdxs[l]] = fixVals[l];
+                          actualHandLambdas[fixIdxs[l]] = lam[fixIdxs[l]];
+                      }
+                      (window as unknown as Record<string, unknown>).__phaseBDebug = {
+                          appliedForces: Object.fromEntries(fByBoneDbg),
+                          constraintNormalsByBone: Object.fromEntries(normalsByBoneDbg),
+                          lambdas: lam.slice(),
+                          reactionByBone: Object.fromEntries(reactionByBoneDbg),
+                          fEffByBone: fEffByBoneDbg,
+                          expectedHandLambdas,
+                          actualHandLambdas,
+                      };
+                  }
 
                   // Propagate each reaction into jointForces for arrow viz.
                   for (let i = 0; i < N; i++) {
