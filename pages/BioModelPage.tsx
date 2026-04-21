@@ -1678,6 +1678,14 @@ const BioModelPage: React.FC = () => {
   // inner key is muscle id from MUSCLE_CATALOG, value is the {base, peak, angle}
   // contribution profile evaluated by the same cosine bell as joint capacities.
   const [muscleAssignments, setMuscleAssignments] = useState<MuscleAssignmentMap>(DEFAULT_MUSCLE_ASSIGNMENTS);
+  // Per-section activation scale. Multiplier applied AFTER share distribution
+  // to each muscle's contribution, then the final activation is clamped to
+  // [0, 1]. Lets sections with many co-active muscles read higher (set scale
+  // ≈ number of co-max muscles so each can hit 100% simultaneously) and
+  // sections with fewer / smaller muscles read lower. Default 1.0 preserves
+  // the pre-scale behavior. Keyed by the same `${group}.${actionKey}` that
+  // muscleAssignments uses.
+  const [sectionScales, setSectionScales] = useState<Record<string, number>>({});
   // Cross-joint modifications — user-editable rules that scale capacities or
   // muscle contributions based on another joint's current angle (see the
   // Modifications tab). Example: knee flexion shortens gastroc, which lowers
@@ -4703,6 +4711,7 @@ const BioModelPage: React.FC = () => {
       framePosture: Posture,
       frameTwists: Record<string, number>,
       assignments: MuscleAssignmentMap,
+      scales: Record<string, number> = {},
   ): Record<string, { side: string; muscleId: string; activation: number }> => {
       const acc: Record<string, { side: string; muscleId: string; activation: number }> = {};
 
@@ -4711,6 +4720,13 @@ const BioModelPage: React.FC = () => {
       // for muscles in the opposite-direction section (antagonist rule).
       // angleInDirection is the joint angle measured positive in this
       // section's direction (so each muscle's bell evaluates correctly).
+      //
+      // sectionScale (from `scales[sectionKey]`, default 1) is a user-tunable
+      // per-section multiplier applied AFTER the share distribution. Lets
+      // actions with many co-active muscles read higher (set scale ≈ the
+      // count so each muscle hits 100% simultaneously at 1RM) and actions
+      // with few / smaller muscles read lower. Final activation is clamped
+      // to [−1, 1] below so muscles can't display above MVC.
       const distributeToSection = (
           sectionKey: string,
           angleInDirection: number,
@@ -4721,6 +4737,7 @@ const BioModelPage: React.FC = () => {
           if (!assigned) return;
           const ids = Object.keys(assigned);
           if (ids.length === 0) return;
+          const sectionScale = scales[sectionKey] ?? 1;
           // Parse section key to build modification lookup keys.
           const dotIdx = sectionKey.indexOf('.');
           const sectionJG = dotIdx > 0 ? sectionKey.slice(0, dotIdx) as JointGroup : null;
@@ -4753,7 +4770,7 @@ const BioModelPage: React.FC = () => {
               ) : 1;
               const key = `${side}|${id}`;
               if (!acc[key]) acc[key] = { side, muscleId: id, activation: 0 };
-              acc[key].activation += effortSigned * share * isoMod;
+              acc[key].activation += effortSigned * share * isoMod * sectionScale;
           }
       };
 
@@ -4841,12 +4858,20 @@ const BioModelPage: React.FC = () => {
           const oppositeKey = `${d.jointGroup}.${actionKey(oppositeName)}`;
           distributeToSection(oppositeKey, -directionAngle, side, -d.effort);
       }
+      // Clamp activations to [−1, 1]. Positive clamp at 1 = can't display
+      // above 100% MVC (enforced by section-scale math). Negative clamp at
+      // −1 preserves the existing antagonist-cancellation bookkeeping; the
+      // downstream `> 1e-6` filter drops fully-negative entries.
+      for (const key of Object.keys(acc)) {
+          const a = acc[key].activation;
+          acc[key].activation = a > 1 ? 1 : a < -1 ? -1 : a;
+      }
       return acc;
   };
 
   const muscleActivation = useMemo<MuscleActivation[]>(() => {
       if (!torqueDistribution || torqueDistribution.demands.length === 0) return [];
-      const acc = distributeMuscleLoadForFrame(torqueDistribution.demands, posture, twists, muscleAssignments);
+      const acc = distributeMuscleLoadForFrame(torqueDistribution.demands, posture, twists, muscleAssignments, sectionScales);
       return Object.entries(acc)
           .map(([key, a]) => ({
               key,
@@ -4858,7 +4883,7 @@ const BioModelPage: React.FC = () => {
           .filter(a => a.activation > 1e-6)
           .sort((a, b) => b.activation - a.activation);
       // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [torqueDistribution, muscleAssignments, posture, twists]);
+  }, [torqueDistribution, muscleAssignments, sectionScales, posture, twists]);
 
   // --- JOINT FORCE ARROWS ---
   //
@@ -5110,7 +5135,7 @@ const BioModelPage: React.FC = () => {
           // Distribute this frame's joint demands across assigned muscles
           // using the bell-curve weights at the joint's current angle.
           // Track per-(side, muscle) activation in time series + peak map.
-          const frameMuscle = distributeMuscleLoadForFrame(dist.demands, framePose, frameTw, muscleAssignments);
+          const frameMuscle = distributeMuscleLoadForFrame(dist.demands, framePose, frameTw, muscleAssignments, sectionScales);
           const frameMuscleKeys = new Set<string>();
           for (const [key, m] of Object.entries(frameMuscle)) {
               // Clamp net-negative activation to 0 — antagonist demands can
@@ -5190,23 +5215,23 @@ const BioModelPage: React.FC = () => {
           }
       }
 
-      // --- Muscle peak normalization ---
-      // Find the highest muscle activation peak across the timeline and
-      // scale all muscle data so it reads exactly 1.0. This is a separate
-      // scale from the joint 1RM scale because muscle activation values
-      // are sums-across-multiple-joint-actions and can exceed any single
-      // joint's effort. Display in the UI then multiplies by 100 for %.
-      let muscleMaxRaw = 0;
-      for (const mp of musclePeakMap.values()) {
-          if (mp.peakActivation > muscleMaxRaw) muscleMaxRaw = mp.peakActivation;
-      }
-      if (muscleMaxRaw > 1e-9) {
-          const mScale = 1 / muscleMaxRaw;
-          for (const mp of musclePeakMap.values()) mp.peakActivation *= mScale;
-          for (const ms of muscleSeriesMap.values()) {
-              for (let i = 0; i < ms.activations.length; i++) ms.activations[i] *= mScale;
-          }
-      }
+      // --- Muscle peak normalization (removed) ---
+      // This step previously rescaled all muscles so the top one read
+      // exactly 1.0. It was a workaround for the fact that muscle
+      // activations, being sums across multiple joint-action sections,
+      // could exceed 1.0.
+      //
+      // Now that distributeMuscleLoadForFrame clamps each muscle's final
+      // activation to [−1, 1] per frame, that workaround is actively
+      // harmful: it undoes the user's per-section scale choices. E.g.
+      // setting Knee.extension scale from 0.9 → 0.1 used to drop quad
+      // activations to 10% of their pre-scale values, but then this
+      // rescale stretched them back to 100% — making scale values between
+      // 0.1 and 0.9 indistinguishable in the display.
+      //
+      // Raw activations are now in [0, 1] already (clamped upstream), so
+      // `peakActivation × 100` = literal %MVC. Display multiplies by 100
+      // for the percentage — no further rescale needed.
 
       const musclePeaks: MusclePeak[] = Array.from(musclePeakMap.values())
           // Drop muscles whose timeline peak is essentially zero — happens
@@ -5233,7 +5258,7 @@ const BioModelPage: React.FC = () => {
 
       return { peaks, limitingPeak, framesAnalyzed, framesSkipped, profile, actionSeries, musclePeaks, muscleSeries, limitingMuscle };
       // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, startPosture, endPosture, startTwists, endTwists, forces, constraints, jointCapacities, jointLimits, muscleAssignments, effortExponent]);
+  }, [activeTab, startPosture, endPosture, startTwists, endTwists, forces, constraints, jointCapacities, jointLimits, muscleAssignments, sectionScales, effortExponent]);
 
   const resolveKinematics = (boneId: string, proposedVector: Vector3, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } => {
       const projected = projectDirOntoConstraints(boneId, proposedVector, currentPosture, currentTwists);
@@ -7981,7 +8006,33 @@ const BioModelPage: React.FC = () => {
                                                       </button>
                                                       {sectionExpanded && (
                                                       <div className="px-3 pb-3 pt-1 border-t border-gray-100">
-                                                      <div className="flex items-center justify-end mb-3 pt-2">
+                                                      <div className="flex items-center justify-between gap-3 mb-3 pt-2">
+                                                          {/* Per-section activation scale. Multiplier
+                                                              applied AFTER share distribution — lets this
+                                                              section's muscles read higher (set scale ≈
+                                                              number of co-max muscles so each can hit
+                                                              100% at 1RM) or lower, with a hard clamp
+                                                              at 100% MVC so nothing ever displays
+                                                              above ceiling. Default 1.0. */}
+                                                          <div className="flex items-center gap-1.5 min-w-0">
+                                                              <span className="text-[10px] font-bold uppercase tracking-wide text-gray-500 flex-shrink-0">Scale</span>
+                                                              <input
+                                                                  type="number"
+                                                                  min={0}
+                                                                  step={0.1}
+                                                                  value={sectionScales[sectionKey] ?? 1}
+                                                                  onChange={(e) => {
+                                                                      const v = parseFloat(e.target.value);
+                                                                      setSectionScales(prev => ({
+                                                                          ...prev,
+                                                                          [sectionKey]: isNaN(v) ? 1 : Math.max(0, v),
+                                                                      }));
+                                                                  }}
+                                                                  className="w-14 text-[10px] font-mono font-bold text-center bg-white border border-gray-200 rounded px-1 py-1 outline-none focus:border-teal-500 tabular-nums"
+                                                                  title="Multiplier applied after share distribution. Set ≈ number of co-max muscles (e.g. 3 for 3-headed triceps) so each muscle can hit 100% at 1RM. Values are clamped at 100% MVC."
+                                                              />
+                                                              <span className="text-[9px] text-gray-400 flex-shrink-0">×</span>
+                                                          </div>
                                                           <select
                                                               value=""
                                                               onChange={(e) => {
