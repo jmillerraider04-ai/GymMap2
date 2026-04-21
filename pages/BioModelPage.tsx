@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import BioMan, { Posture, Vector3, VisualForce, VisualPlane } from '../components/BioMan';
-import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, ChevronDown, BrainCircuit, Axis3d, Plus, Trash2, TrendingUp, Activity } from 'lucide-react';
+import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, ChevronDown, BrainCircuit, Axis3d, Plus, Trash2, TrendingUp, Activity, Link2 } from 'lucide-react';
 
 const DEFAULT_POSTURE: Posture = {
   lClavicle: { x: -25, y: 0, z: 0 },
@@ -198,6 +198,110 @@ interface MuscleContribution {
                         // <1 widens it (more gradual transition).
                         // Default is 1 for backward compatibility.
 }
+
+// --- CROSS-JOINT MODIFICATIONS ---
+//
+// A Modification is a named rule that scales either a JOINT-ACTION
+// CAPACITY or a specific MUSCLE'S CONTRIBUTION to an action, based on
+// the current angle of some OTHER joint. The canonical example: when
+// the knee is flexed, gastrocnemius is shortened, so its plantar-flexion
+// contribution drops and the ankle's total plantar-flexion capacity
+// drops. One modification object can apply to multiple targets.
+//
+// Evaluation: for each evaluateCapacity(...) result for a muscle or
+// joint capacity, scan the modifications list, find ones whose target
+// matches the current (kind, joint, action, optional muscle), look up
+// the source joint's current angle on the SAME side as the target,
+// interpolate the modification's curve at that angle, multiply into
+// the result. Multiple modifications on the same target multiply.
+interface ModificationTarget {
+    kind: 'capacity' | 'muscle';
+    jointGroup: JointGroup;
+    // actionKey form: lowercase camelCase direction name
+    // (e.g. 'flexion', 'plantarFlexion').
+    actionKey: string;
+    // Muscle id — required when kind === 'muscle'.
+    muscleId?: string;
+    // Max percent CHANGE for THIS target when the curve reads 100%.
+    // Lives per-target (not per-modification) so a single modification
+    // can drive multiple targets at different magnitudes — e.g. knee-
+    // flex shortening can cut gastroc's plantar-flexion share 80% while
+    // only cutting the ankle's total PF capacity 60% (since soleus still
+    // contributes).
+    maxChange: number;
+    // Reduce the target's value (multiplier < 1) or increase it
+    // (multiplier > 1). Final multiplier at curve Y% is:
+    //   reduce:   1 − (Y/100) × (maxChange/100)
+    //   increase: 1 + (Y/100) × (maxChange/100)
+    direction: 'reduce' | 'increase';
+    // Only for kind === 'muscle'. Determines HOW the modifier is applied:
+    //
+    //   'relative' (default) — scales the muscle's bell WEIGHT before the
+    //     section's share-normalization, so shrinking one muscle
+    //     proportionally redistributes activation to the OTHER muscles in
+    //     the section. Same behaviour as editing the muscle's bell peak
+    //     directly in the Muscles tab.
+    //
+    //   'isolated' — scales the muscle's FINAL activation AFTER share
+    //     distribution. Other muscles in the section are unaffected; only
+    //     this one's bar moves. Use this when you want the muscle to
+    //     "just read lower" without the section's share maths rebalancing.
+    //
+    // Ignored for capacity targets (which have no share concept).
+    muscleMode?: 'isolated' | 'relative';
+}
+
+interface CrossJointModification {
+    id: string;
+    name: string;  // human-readable label shown in the editor
+    // Source: the joint action whose CURRENT angle drives the multiplier.
+    sourceJoint: JointGroup;
+    sourceActionKey: string;
+    // Three control points, matching the minimalist resistance-profile
+    // style. Left/right X auto-pin to the source action's joint-limit
+    // range (min/max); only the middle point's X is user-editable.
+    //
+    // Y values are DIMENSIONLESS 0–100 — the "percent of max effect"
+    // applied at each angle. The actual multiplier comes from combining
+    // this curve value with the target's own maxChange + direction, so
+    // the same curve shape can be reused across targets with different
+    // magnitudes and signs.
+    leftY: number;
+    midX: number;
+    midY: number;
+    rightY: number;
+    targets: ModificationTarget[];
+}
+
+// Interpolate the 3-point curve at a given source angle. Returns the
+// curve's Y value (0–100 scale) — per-target direction + maxChange is
+// applied by the caller.
+const evaluateCurveY = (
+    mod: CrossJointModification,
+    range: { min: number; max: number },
+    sourceAngle: number,
+): number => {
+    const xMin = range.min;
+    const xMax = range.max;
+    const xMid = Math.max(xMin, Math.min(xMax, mod.midX));
+    if (sourceAngle <= xMin) return mod.leftY;
+    if (sourceAngle >= xMax) return mod.rightY;
+    if (sourceAngle <= xMid) {
+        const span = Math.max(1e-9, xMid - xMin);
+        const t = (sourceAngle - xMin) / span;
+        return mod.leftY + t * (mod.midY - mod.leftY);
+    }
+    const span = Math.max(1e-9, xMax - xMid);
+    const t = (sourceAngle - xMid) / span;
+    return mod.midY + t * (mod.rightY - mod.midY);
+};
+
+// Convert a curve Y reading (0–100) into a multiplier for a specific
+// target, applying its direction and maxChange.
+const applyTargetScaling = (curveY: number, target: ModificationTarget): number => {
+    const effect = (curveY / 100) * (target.maxChange / 100);
+    return target.direction === 'reduce' ? 1 - effect : 1 + effect;
+};
 
 // Outer key: `${JointGroup}.${actionKey(directionName)}`, where directionName
 // is either ActionAxis.positiveAction or .negativeAction (each direction is
@@ -482,13 +586,17 @@ const MUSCLE_CATALOG: MuscleDef[] = [
     { id: 'serratus-anterior', name: 'Serratus Anterior',    region: 'Back' },
     { id: 'levator-scapulae',  name: 'Levator Scapulae',     region: 'Back' },
     // Arms
-    { id: 'biceps-long',     name: 'Biceps Brachii (Long Head)',     region: 'Arms' },
-    { id: 'biceps-short',    name: 'Biceps Brachii (Short Head)',    region: 'Arms' },
-    { id: 'brachialis',      name: 'Brachialis',                     region: 'Arms' },
-    { id: 'brachioradialis', name: 'Brachioradialis',                region: 'Arms' },
-    { id: 'triceps-long',    name: 'Triceps Brachii (Long Head)',    region: 'Arms' },
-    { id: 'triceps-lateral', name: 'Triceps Brachii (Lateral Head)', region: 'Arms' },
-    { id: 'triceps-medial',  name: 'Triceps Brachii (Medial Head)',  region: 'Arms' },
+    // Biceps heads and triceps lateral/medial are merged because the two
+    // biceps heads act together functionally (both cross shoulder + elbow
+    // the same way, differ only in relative magnitude of shoulder flexion
+    // contribution), and triceps lateral + medial are both monoarticular
+    // elbow extensors with essentially identical role — only triceps long
+    // gets a separate entry because it's biarticular (crosses shoulder).
+    { id: 'biceps-brachii',         name: 'Biceps Brachii',                          region: 'Arms' },
+    { id: 'brachialis',             name: 'Brachialis',                              region: 'Arms' },
+    { id: 'brachioradialis',        name: 'Brachioradialis',                         region: 'Arms' },
+    { id: 'triceps-long',           name: 'Triceps Brachii (Long Head)',             region: 'Arms' },
+    { id: 'triceps-lateral-medial', name: 'Triceps Brachii (Lateral + Medial Head)', region: 'Arms' },
     // Core
     { id: 'rectus-abdominis',  name: 'Rectus Abdominis',   region: 'Core' },
     { id: 'obliques-external', name: 'External Obliques',  region: 'Core' },
@@ -511,22 +619,30 @@ const MUSCLE_CATALOG: MuscleDef[] = [
     //             the-hole), plus minor adduction and ER contributions. Inserts
     //             on the adductor tubercle of the femur, so monoarticular at
     //             the hip (does NOT cross the knee despite the hamstring moniker).
-    { id: 'adductor-magnus-anterior',  name: 'Adductor Magnus (Anterior)',  region: 'Adductors' },
+    // Classic adductor group collapsed into one entry — adductor longus,
+    // brevis, gracilis, pectineus, and magnus ANTERIOR head all share the
+    // pure-hip-adduction role with only minor timing differences. Adductor
+    // magnus POSTERIOR head stays separate because it's functionally a
+    // hip extensor (ischiocondylar / "hamstring portion"), not an adductor.
+    // Adductor contribution to knee flexion (gracilis) is intentionally
+    // dropped — its knee moment arm is insignificant vs. the actual knee
+    // flexors and shouldn't show up in that graph.
+    { id: 'adductors',                 name: 'Adductors',                   region: 'Adductors' },
     { id: 'adductor-magnus-posterior', name: 'Adductor Magnus (Posterior)', region: 'Adductors' },
-    { id: 'adductor-longus', name: 'Adductor Longus', region: 'Adductors' },
-    { id: 'adductor-brevis', name: 'Adductor Brevis', region: 'Adductors' },
-    { id: 'gracilis',        name: 'Gracilis',        region: 'Adductors' },
-    { id: 'pectineus',       name: 'Pectineus',       region: 'Adductors' },
     // Quads
-    { id: 'rectus-femoris',     name: 'Rectus Femoris',     region: 'Quads' },
-    { id: 'vastus-lateralis',   name: 'Vastus Lateralis',   region: 'Quads' },
-    { id: 'vastus-medialis',    name: 'Vastus Medialis',    region: 'Quads' },
-    { id: 'vastus-intermedius', name: 'Vastus Intermedius', region: 'Quads' },
+    // Three vasti collapsed — they all cross only the knee and all extend
+    // it with essentially identical function. Rectus femoris stays separate
+    // because it's biarticular (hip flexor + knee extensor).
+    { id: 'rectus-femoris', name: 'Rectus Femoris', region: 'Quads' },
+    { id: 'quads-vasti',    name: 'Quads (Vasti)',  region: 'Quads' },
     // Hamstrings
-    { id: 'biceps-femoris-long',  name: 'Biceps Femoris (Long Head)',  region: 'Hamstrings' },
-    { id: 'biceps-femoris-short', name: 'Biceps Femoris (Short Head)', region: 'Hamstrings' },
-    { id: 'semitendinosus',  name: 'Semitendinosus',  region: 'Hamstrings' },
-    { id: 'semimembranosus', name: 'Semimembranosus', region: 'Hamstrings' },
+    // Biarticular hamstrings collapsed — biceps femoris long head,
+    // semitendinosus, and semimembranosus all cross hip + knee with
+    // essentially identical function (hip extend + knee flex). Biceps
+    // femoris SHORT head stays separate because it's monoarticular
+    // (knee flexor only, doesn't cross hip).
+    { id: 'hamstrings-biarticular', name: 'Hamstrings (Biarticular)',    region: 'Hamstrings' },
+    { id: 'biceps-femoris-short',   name: 'Biceps Femoris (Short Head)', region: 'Hamstrings' },
     // Calves
     { id: 'gastrocnemius',     name: 'Gastrocnemius',     region: 'Calves' },
     { id: 'soleus',            name: 'Soleus',            region: 'Calves' },
@@ -589,6 +705,37 @@ const MUSCLE_CATALOG: MuscleDef[] = [
 //   relevant shoulder sections as small contributions peaking near full
 //   elevation (angle = +150).
 const m = (base: number, peak: number, angle: number, steepness: number = 1): MuscleContribution => ({ base, peak, angle, steepness });
+
+// Default cross-joint modifications — user-editable in the Modifications tab.
+// Ships with the classic length-tension example: gastrocnemius shortening at
+// knee flex reduces its plantar-flexion contribution AND the ankle's total
+// plantar-flexion capacity. Soleus stays unaffected (monoarticular), so the
+// capacity drop is gentler than the gastroc-contribution drop.
+const DEFAULT_MODIFICATIONS: CrossJointModification[] = [
+    {
+        id: 'gastroc-shortening-at-knee-flex',
+        name: 'Gastroc shortening at knee flex',
+        sourceJoint: 'Knee',
+        sourceActionKey: 'flexion',
+        // Curve: 0% of max effect at knee-straight, scales up through 69%
+        // at ~90° flex, 100% at full flex. Dimensionless; per-target
+        // maxChange below turns it into a real multiplier.
+        leftY: 0,
+        midX: 90,
+        midY: 69,
+        rightY: 100,
+        targets: [
+            // Gastroc's plantar-flexion share drops hard (up to 80% cut)
+            // as it shortens at the knee. Multiplier at full flex: 0.2.
+            // 'relative' — soleus picks up the slack in the share balance.
+            { kind: 'muscle', jointGroup: 'Ankle', actionKey: 'plantarFlexion', muscleId: 'gastrocnemius', maxChange: 80, direction: 'reduce', muscleMode: 'relative' },
+            // Joint capacity for ankle PF drops more gently (up to 50%)
+            // — soleus is monoarticular and keeps contributing.
+            { kind: 'capacity', jointGroup: 'Ankle', actionKey: 'plantarFlexion', maxChange: 50, direction: 'reduce' },
+        ],
+    },
+];
+
 const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // =========================================================================
     // SHOULDER
@@ -614,8 +761,7 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     'Shoulder.flexion': {
         'delt-front':        m(84, 36, 30, 1.15),
         'pec-clavicular':    m(0, 63, 37, 2),
-        'biceps-long':       m(8, 32, 60, 1.6),
-        'biceps-short':      m(8, 23, 60, 1.6),
+        'biceps-brachii':    m(16, 55, 60, 1.6),  // merged from long + short, bases & peaks summed
         'traps-lower':       m(-5, 32, 140, 2.2),
         'serratus-anterior': m(-5, 28, 140, 2.2),
         'supraspinatus':     m(-2, 18, 15, 2.5),
@@ -635,7 +781,7 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'delt-front':        m(10, 81, 180, 1.9),
         'traps-lower':       m(-3, 41, 130, 3.2),
         'serratus-anterior': m(-3, 40, 130, 3.2),
-        'biceps-long':       m(-2, 15, 120, 2),
+        'biceps-brachii':    m(-2, 15, 120, 2),  // only long head contributes, retained under merged id
     },
     'Shoulder.adduction': {
         'lats':           m(-11, 118, -81, 2.5),
@@ -651,8 +797,7 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'pec-sternal':       m(20, 118, 70, 1.5),
         'pec-clavicular':    m(-5, 70, 40, 2),
         'delt-front':        m(2, 79, 56, 2.6),
-        'biceps-long':       m(-2, 28, 60, 1.8),
-        'biceps-short':      m(0, 33, 60, 1.8),
+        'biceps-brachii':    m(-2, 61, 60, 1.8),  // merged long + short, peaks summed
         'subscapularis':     m(0, 33, 30, 1.8),
         'serratus-anterior': m(0, 28, 60, 1.8),
     },
@@ -672,7 +817,7 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'teres-major':    m(12, 65, 0, 1.3),
         'delt-front':     m(8, 42, 15, 1.4),
         'pec-clavicular': m(5, 30, 0, 1.4),
-        'biceps-short':   m(2, 16, 0, 1.5),
+        'biceps-brachii': m(2, 16, 0, 1.5),  // only short head contributes, retained under merged id
     },
     'Shoulder.externalRotation': {
         'infraspinatus': m(25, 105, 10, 1.5),
@@ -691,15 +836,13 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // at negative = muscle strong when elbow bent (stretched).
 
     'Elbow.flexion': {
-        'biceps-long':     m(20, 105, 40, 1.5),
-        'biceps-short':    m(27, 105, 50, 1.5),
+        'biceps-brachii':  m(47, 210, 45, 1.5),  // merged long + short, peak-weighted angle ≈ 45°
         'brachialis':      m(50, 100, 90, 0.85),
         'brachioradialis': m(5, 95, 120, 0.55),
     },
     'Elbow.extension': {
-        'triceps-long':    m(-5, 169, -100, 1.4),
-        'triceps-lateral': m(48, 99, -60, 0.9),
-        'triceps-medial':  m(67, 85, -45, 0.8),
+        'triceps-long':           m(-5, 169, -100, 1.4),
+        'triceps-lateral-medial': m(115, 184, -53, 0.85),  // merged lateral + medial
     },
 
     // =========================================================================
@@ -715,18 +858,13 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'rectus-femoris':  m(10, 100, 30, 2),
         'tfl':             m(5, 72, 15, 1.7),
         'sartorius':       m(8, 50, 60, 1.4),
-        'pectineus':       m(10, 60, 30, 1.5),
-        'adductor-longus': m(-5, 45, -15, 2.2),
-        'adductor-brevis': m(-3, 32, -15, 2.2),
-        'gracilis':        m(-2, 20, 0, 2),
+        'adductors':       m(0, 157, 4, 1.9),  // merged pectineus + longus + brevis + gracilis; anterior magnus doesn't flex
         'glute-med':       m(0, 18, 15, 1.8),
         'glute-min':       m(0, 13, 15, 1.8),
     },
     'Hip.extension': {
         'glute-max':                 m(55, 150, -15, 3.15),
-        'semitendinosus':            m(10, 100, -54, 0.5),
-        'semimembranosus':           m(10, 100, -54, 0.5),
-        'biceps-femoris-long':       m(10, 100, -55, 0.5),
+        'hamstrings-biarticular':    m(30, 300, -54, 0.5),  // merged BF-long + semiten + semimem
         'adductor-magnus-posterior': m(-16, 132, -100),
         'glute-med':                 m(10, 25, 0),
         'glute-min':                 m(6, 15, 0),
@@ -739,24 +877,15 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'sartorius': m(2, 24, 0, 1.8),
     },
     'Hip.adduction': {
-        'adductor-magnus-anterior':  m(8, 68, -30, 1.4),
+        'adductors':                 m(40, 335, -16, 1.4),  // merged anterior magnus + longus + brevis + gracilis + pectineus
         'adductor-magnus-posterior': m(5, 32, -30, 1.5),
-        'adductor-longus': m(12, 95, -15, 1.4),
-        'adductor-brevis': m(10, 72, -15, 1.4),
-        'gracilis':        m(5, 50, -15, 1.5),
-        'pectineus':       m(5, 50, 0, 1.5),
-        'semimembranosus': m(0, 15, 0, 1.6),
-        'semitendinosus':  m(0, 12, 0, 1.6),
+        'hamstrings-biarticular':    m(0, 27, 0, 1.6),  // merged semitend + semimem
     },
     'Hip.horizontalAdduction': {
-        'adductor-magnus-anterior':  m(10, 82, 45, 1.4),
+        'adductors':                 m(45, 388, 42, 1.4),  // merged anterior magnus + longus + brevis + gracilis + pectineus
         'adductor-magnus-posterior': m(3, 26, 45, 1.5),
-        'adductor-longus': m(12, 100, 45, 1.4),
-        'adductor-brevis': m(10, 78, 45, 1.4),
-        'gracilis':        m(5, 50, 45, 1.5),
-        'pectineus':       m(8, 78, 30, 1.4),
-        'iliopsoas':       m(5, 50, 60, 1.5),
-        'sartorius':       m(0, 18, 45, 1.6),
+        'iliopsoas':                 m(5, 50, 60, 1.5),
+        'sartorius':                 m(0, 18, 45, 1.6),
     },
     'Hip.horizontalAbduction': {
         'glute-med': m(10, 88, 0, 1.4),
@@ -766,22 +895,19 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'sartorius': m(0, 15, 0, 1.7),
     },
     'Hip.internalRotation': {
-        'glute-med':       m(10, 78, 0, 1.4),
-        'glute-min':       m(8, 68, 0, 1.4),
-        'tfl':             m(8, 62, 0, 1.4),
-        'adductor-longus': m(5, 48, 0, 1.5),
-        'adductor-brevis': m(2, 32, 0, 1.5),
-        'pectineus':       m(2, 32, 0, 1.5),
-        'semitendinosus':  m(0, 24, 0, 1.6),
-        'semimembranosus': m(0, 24, 0, 1.6),
+        'glute-med':              m(10, 78, 0, 1.4),
+        'glute-min':              m(8, 68, 0, 1.4),
+        'tfl':                    m(8, 62, 0, 1.4),
+        'adductors':              m(9, 112, 0, 1.5),  // merged longus + brevis + pectineus (anterior magnus doesn't IR)
+        'hamstrings-biarticular': m(0, 48, 0, 1.6),   // merged semitend + semimem
     },
     'Hip.externalRotation': {
-        'glute-max':           m(25, 108, 0, 1.2),
-        'sartorius':           m(8, 50, 0, 1.4),
-        'glute-med':           m(10, 56, 0, 1.4),
-        'glute-min':           m(6, 36, 0, 1.4),
-        'biceps-femoris-long': m(2, 26, 0, 1.5),
-        'iliopsoas':           m(0, 22, 0, 1.7),
+        'glute-max':              m(25, 108, 0, 1.2),
+        'sartorius':              m(8, 50, 0, 1.4),
+        'glute-med':              m(10, 56, 0, 1.4),
+        'glute-min':              m(6, 36, 0, 1.4),
+        'hamstrings-biarticular': m(2, 26, 0, 1.5),  // only BF-long ER'd; retained under merged id
+        'iliopsoas':              m(0, 22, 0, 1.7),
     },
 
     // =========================================================================
@@ -793,21 +919,18 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // Knee.extension: 0=straight, -160=full flex (stretched quads).
 
     'Knee.flexion': {
-        'biceps-femoris-long':  m(8, 72, 71, 1.25),
-        'biceps-femoris-short': m(36, 111, 11, 1.5),
-        'semitendinosus':       m(10, 95, 79, 1.5),
-        'semimembranosus':      m(10, 92, 60, 1.5),
-        'gastrocnemius':        m(2, 56, 15, 4.15),
-        'sartorius':            m(2, 26, 60, 1.6),
-        'gracilis':             m(2, 26, 60, 1.6),
-        'tfl':                  m(0, 14, 30, 2),
+        'hamstrings-biarticular': m(28, 259, 70, 1.4),  // merged BF-long + semiten + semimem
+        'biceps-femoris-short':   m(36, 111, 11, 1.5),
+        'gastrocnemius':          m(2, 56, 15, 4.15),
+        'sartorius':              m(2, 26, 60, 1.6),
+        // Gracilis intentionally omitted: adductor contribution to knee
+        // flexion is insignificant vs. the actual knee flexors.
+        'tfl':                    m(0, 14, 30, 2),
     },
     'Knee.extension': {
-        'vastus-lateralis':   m(20, 125, -120, 0.25),
-        'vastus-medialis':    m(20, 125, -121, 0.25),
-        'vastus-intermedius': m(20, 125, -120, 0.25),
-        'rectus-femoris':     m(20, 123, -180, 0.25),
-        'tfl':                m(0, 14, -120, 0.25),
+        'quads-vasti':    m(60, 375, -120, 0.25),  // merged lateralis + medialis + intermedius
+        'rectus-femoris': m(20, 123, -180, 0.25),
+        'tfl':            m(0, 14, -120, 0.25),
     },
 
     // =========================================================================
@@ -1527,7 +1650,7 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
 ];
 
 const BioModelPage: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'timeline' | 'capacities' | 'constraints' | 'limits' | 'muscles'>('kinematics');
+  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'timeline' | 'capacities' | 'constraints' | 'limits' | 'muscles' | 'modifications'>('kinematics');
   const [poseMode, setPoseMode] = useState<'start' | 'end'>('start');
   const [startPosture, setStartPosture] = useState<Posture>(DEFAULT_POSTURE);
   const [endPosture, setEndPosture] = useState<Posture>(DEFAULT_POSTURE);
@@ -1555,6 +1678,12 @@ const BioModelPage: React.FC = () => {
   // inner key is muscle id from MUSCLE_CATALOG, value is the {base, peak, angle}
   // contribution profile evaluated by the same cosine bell as joint capacities.
   const [muscleAssignments, setMuscleAssignments] = useState<MuscleAssignmentMap>(DEFAULT_MUSCLE_ASSIGNMENTS);
+  // Cross-joint modifications — user-editable rules that scale capacities or
+  // muscle contributions based on another joint's current angle (see the
+  // Modifications tab). Example: knee flexion shortens gastroc, which lowers
+  // both gastroc's plantar-flexion contribution AND the ankle's total
+  // plantar-flexion capacity.
+  const [modifications, setModifications] = useState<CrossJointModification[]>(DEFAULT_MODIFICATIONS);
   // Biarticular-muscle coupling toggle (Capacities tab). When OFF,
   // sectionAvailabilityModifier short-circuits to 1 — capacities are the
   // raw bell values with no cross-joint inhibition. Useful for A/B
@@ -2357,7 +2486,13 @@ const BioModelPage: React.FC = () => {
                           capacities[jointGroup]?.[action] ||
                           null;
               const actionAngle = getActionAngle(bone, act, currentPosture, currentTwists);
-              const capValue = cap ? evaluateCapacity(cap, actionAngle) : 1;
+              const capSide: 'left' | 'right' = bone.startsWith('l') ? 'left' : 'right';
+              const capModMult = getModificationMultiplier(
+                  modifications,
+                  { kind: 'capacity', jointGroup, actionKey: actionKey(action) },
+                  capSide, currentPosture, currentTwists,
+              );
+              const capValue = cap ? evaluateCapacity(cap, actionAngle) * capModMult : 1;
               const effort = torqueMag / capValue;
 
               const side = bone.startsWith('l') ? 'Left' : bone.startsWith('r') ? 'Right' : '';
@@ -2415,7 +2550,13 @@ const BioModelPage: React.FC = () => {
               const cap = capacities[jointGroup]?.[action.toLowerCase().replace(/ /g, '')] ||
                           capacities[jointGroup]?.[action] || null;
               const scapAngle = getActionAngle(bone, act, currentPosture, currentTwists);
-              const capValue = cap ? evaluateCapacity(cap, scapAngle) : 1;
+              const scapModSide: 'left' | 'right' = bone.startsWith('l') ? 'left' : 'right';
+              const scapModMult = getModificationMultiplier(
+                  modifications,
+                  { kind: 'capacity', jointGroup, actionKey: actionKey(action) },
+                  scapModSide, currentPosture, currentTwists,
+              );
+              const capValue = cap ? evaluateCapacity(cap, scapAngle) * scapModMult : 1;
               const effort = forceMag / capValue;
 
               const side = bone.startsWith('l') ? 'Left' : bone.startsWith('r') ? 'Right' : '';
@@ -2553,8 +2694,14 @@ const BioModelPage: React.FC = () => {
                           const availability = sectionAvailabilityModifier(
                               jg, act, isPos, bone, rawTorques, kin2, currentPosture, currentTwists,
                           );
+                          const modSide: 'left' | 'right' = isLeft ? 'left' : 'right';
+                          const modMult = getModificationMultiplier(
+                              modifications,
+                              { kind: 'capacity', jointGroup: jg, actionKey: actionKey(actName) },
+                              modSide, currentPosture, currentTwists,
+                          );
                           const capVal = capLk
-                              ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists)) * availability
+                              ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists)) * availability * modMult
                               : 1;
                           const sens: number[] = [];
                           for (const cref of consRefs) {
@@ -2612,8 +2759,14 @@ const BioModelPage: React.FC = () => {
                       const availability = sectionAvailabilityModifier(
                           jg, act, isPos, bone, rawTorques, kin2, currentPosture, currentTwists,
                       );
+                      const rotModSide: 'left' | 'right' = isLeft ? 'left' : 'right';
+                      const rotModMult = getModificationMultiplier(
+                          modifications,
+                          { kind: 'capacity', jointGroup: jg, actionKey: actionKey(actName) },
+                          rotModSide, currentPosture, currentTwists,
+                      );
                       const capVal = capLk
-                          ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists)) * availability
+                          ? evaluateCapacity(capLk, sectionDirectionAngle(bone, act, isPos, currentPosture, currentTwists)) * availability * rotModMult
                           : 1;
 
                       const sens: number[] = [];
@@ -2946,9 +3099,15 @@ const BioModelPage: React.FC = () => {
                               const availability = sectionAvailabilityModifier(
                                   c.jointGroup, c.act, isPos, c.boneId, rawTorques, kin2, currentPosture, currentTwists,
                               );
+                              const flipModSide: 'left' | 'right' = c.isLeft ? 'left' : 'right';
+                              const flipModMult = getModificationMultiplier(
+                                  modifications,
+                                  { kind: 'capacity', jointGroup: c.jointGroup, actionKey: actionKey(newAction) },
+                                  flipModSide, currentPosture, currentTwists,
+                              );
                               effectiveCap = c.jointGroup === 'Scapula'
-                                  ? capLk.specific  // scapula caps don't use angle interp
-                                  : evaluateCapacity(capLk, sectionDirectionAngle(c.boneId, c.act, isPos, currentPosture, currentTwists)) * availability;
+                                  ? capLk.specific * flipModMult  // scapula caps don't use angle interp
+                                  : evaluateCapacity(capLk, sectionDirectionAngle(c.boneId, c.act, isPos, currentPosture, currentTwists)) * availability * flipModMult;
                           }
                       }
 
@@ -3312,6 +3471,88 @@ const BioModelPage: React.FC = () => {
       return rawAngle * actionSign * (isPositive ? 1 : -1);
   };
 
+  // Reverse lookup: given a (joint, actionKey), find the matching ActionAxis
+  // in JOINT_ACTIONS and whether that key is the axis's positive or negative
+  // direction. Returns null if the joint has no action with that key.
+  const getActionAxisByKey = (
+      group: JointGroup,
+      key: string,
+  ): { axis: ActionAxis; isPositive: boolean } | null => {
+      const acts = JOINT_ACTIONS[group];
+      if (!acts) return null;
+      for (const ax of acts) {
+          if (actionKey(ax.positiveAction) === key) return { axis: ax, isPositive: true };
+          if (actionKey(ax.negativeAction) === key) return { axis: ax, isPositive: false };
+      }
+      return null;
+  };
+
+  // Current source-joint angle (in directionAngle convention) for a
+  // modification, on the requested side. Returns null if the source joint
+  // has no bone on that side (spine) or the action key doesn't resolve.
+  // Callers that can't supply a meaningful side (UI samplers) can pass
+  // 'right' — under symmetry mode both sides match.
+  const getModificationSourceAngle = (
+      mod: CrossJointModification,
+      side: 'left' | 'right',
+      curPosture: Posture,
+      curTwists: Record<string, number>,
+  ): number | null => {
+      const srcBones = GROUP_BONES[mod.sourceJoint];
+      const srcBone = mod.sourceJoint === 'Spine'
+          ? 'spine'
+          : (srcBones ? (side === 'left' ? srcBones.left : srcBones.right) : null);
+      if (!srcBone) return null;
+      const ax = getActionAxisByKey(mod.sourceJoint, mod.sourceActionKey);
+      if (!ax) return null;
+      return sectionDirectionAngle(srcBone, ax.axis, ax.isPositive, curPosture, curTwists);
+  };
+
+  // Combined multiplier from all modifications targeting this capacity or
+  // muscle contribution. 1.0 if no modifications hit. Multiple modifications
+  // on the same target multiply. Target identity: (kind, jointGroup,
+  // actionKey, [muscleId]). Callers supply only those fields — maxChange
+  // and direction live on the stored targets and are applied internally.
+  //
+  // For muscle targets, `muscleModeFilter` selects which mode ('relative'
+  // or 'isolated') to accumulate. Callers applying at the bell-weight
+  // level pass 'relative'; callers applying at the post-distribution
+  // activation level pass 'isolated'. Omit the filter to include all
+  // muscle modes (useful when applying a single multiplier generically,
+  // e.g. in bell-curve visualizations that show post-relative effects).
+  const getModificationMultiplier = (
+      mods: CrossJointModification[],
+      target: { kind: 'capacity' | 'muscle'; jointGroup: JointGroup; actionKey: string; muscleId?: string },
+      side: 'left' | 'right',
+      curPosture: Posture,
+      curTwists: Record<string, number>,
+      muscleModeFilter?: 'isolated' | 'relative',
+  ): number => {
+      let mult = 1;
+      for (const mod of mods) {
+          for (const t of mod.targets) {
+              if (t.kind !== target.kind) continue;
+              if (t.jointGroup !== target.jointGroup) continue;
+              if (t.actionKey !== target.actionKey) continue;
+              if (t.kind === 'muscle' && t.muscleId !== target.muscleId) continue;
+              // Muscle-mode filter: only apply targets matching the requested mode.
+              if (t.kind === 'muscle' && muscleModeFilter) {
+                  const tMode = t.muscleMode || 'relative';
+                  if (tMode !== muscleModeFilter) continue;
+              }
+              const srcAngle = getModificationSourceAngle(mod, side, curPosture, curTwists);
+              if (srcAngle === null) continue;
+              const srcAx = getActionAxisByKey(mod.sourceJoint, mod.sourceActionKey);
+              if (!srcAx) continue;
+              const range = getActionRange(mod.sourceJoint, srcAx.axis, srcAx.isPositive);
+              const curveY = evaluateCurveY(mod, range, srcAngle);
+              mult *= applyTargetScaling(curveY, t);
+              break; // this modification counts once even if it lists the same target twice
+          }
+      }
+      return mult;
+  };
+
   // Compute the graph X-axis range (in directionAngle) for a given joint
   // action section, based on the currently-configured joint limits. Used
   // by the Muscles tab AND the Capacities tab so their tracks match.
@@ -3476,16 +3717,25 @@ const BioModelPage: React.FC = () => {
       if (!muscles) return 1;
 
       const dirAngle = sectionDirectionAngle(bone, ax, isPositive, curPosture, curTwists);
+      const sectionActionKey = actionKey(sectionName);
+      const hereSide: 'left' | 'right' = bone.startsWith('l') ? 'left' : 'right';
 
-      // Compute per-muscle weights at this section.
+      // Compute per-muscle weights at this section. Biarticular coupling
+      // looks at bell-share distribution — use only 'relative' muscle
+      // modifiers here. 'isolated' modifiers don't affect share balance.
       const weights: Record<string, number> = {};
       let totalWeight = 0;
       for (const [mid, m] of Object.entries(muscles)) {
+          const muscleMod = getModificationMultiplier(
+              modifications,
+              { kind: 'muscle', jointGroup: jg, actionKey: sectionActionKey, muscleId: mid },
+              hereSide, curPosture, curTwists, 'relative',
+          );
           const w = Math.max(0, evaluateCapacity(
               { base: m.base, specific: m.peak, angle: m.angle },
               dirAngle,
               m.steepness ?? 1,
-          ));
+          )) * muscleMod;
           weights[mid] = w;
           totalWeight += w;
       }
@@ -3538,14 +3788,22 @@ const BioModelPage: React.FC = () => {
                   // m is in the antagonist section. Compute its share there.
                   const antIsPos = antagonistName === otherAx.positiveAction;
                   const antDirAngle = sectionDirectionAngle(sideBone, otherAx, antIsPos, curPosture, curTwists);
+                  const antActionKey = actionKey(antagonistName);
+                  const antSide: 'left' | 'right' = sideBone.startsWith('l') ? 'left' : 'right';
                   let antMyContrib = 0;
                   let antTotal = 0;
                   for (const [mid, am] of Object.entries(antMuscles)) {
+                      // Share-level analysis: only 'relative' modifiers apply.
+                      const antMuscleMod = getModificationMultiplier(
+                          modifications,
+                          { kind: 'muscle', jointGroup: otherJoint, actionKey: antActionKey, muscleId: mid },
+                          antSide, curPosture, curTwists, 'relative',
+                      );
                       const w = Math.max(0, evaluateCapacity(
                           { base: am.base, specific: am.peak, angle: am.angle },
                           antDirAngle,
                           am.steepness ?? 1,
-                      ));
+                      )) * antMuscleMod;
                       if (mid === muscleId) antMyContrib = w;
                       antTotal += w;
                   }
@@ -4463,20 +4721,39 @@ const BioModelPage: React.FC = () => {
           if (!assigned) return;
           const ids = Object.keys(assigned);
           if (ids.length === 0) return;
+          // Parse section key to build modification lookup keys.
+          const dotIdx = sectionKey.indexOf('.');
+          const sectionJG = dotIdx > 0 ? sectionKey.slice(0, dotIdx) as JointGroup : null;
+          const sectionAct = dotIdx > 0 ? sectionKey.slice(dotIdx + 1) : '';
+          const mSide: 'left' | 'right' = side === 'Left' ? 'left' : 'right';
           let total = 0;
           const weights: { id: string; w: number }[] = [];
           for (const id of ids) {
               const c = assigned[id];
-              const w = evaluateCapacity({ base: c.base, specific: c.peak, angle: c.angle }, angleInDirection, c.steepness ?? 1);
+              // 'relative' modifiers apply at the bell-weight level here,
+              // so shrinking one muscle redistributes share to the rest.
+              const relMod = sectionJG ? getModificationMultiplier(
+                  modifications,
+                  { kind: 'muscle', jointGroup: sectionJG, actionKey: sectionAct, muscleId: id },
+                  mSide, framePosture, frameTwists, 'relative',
+              ) : 1;
+              const w = evaluateCapacity({ base: c.base, specific: c.peak, angle: c.angle }, angleInDirection, c.steepness ?? 1) * relMod;
               weights.push({ id, w });
               total += w;
           }
           if (total < 1e-9) return;
           for (const { id, w } of weights) {
               const share = w / total;
+              // 'isolated' modifiers apply to the final activation AFTER
+              // share distribution, so only this muscle's bar moves.
+              const isoMod = sectionJG ? getModificationMultiplier(
+                  modifications,
+                  { kind: 'muscle', jointGroup: sectionJG, actionKey: sectionAct, muscleId: id },
+                  mSide, framePosture, frameTwists, 'isolated',
+              ) : 1;
               const key = `${side}|${id}`;
               if (!acc[key]) acc[key] = { side, muscleId: id, activation: 0 };
-              acc[key].activation += effortSigned * share;
+              acc[key].activation += effortSigned * share * isoMod;
           }
       };
 
@@ -5959,6 +6236,7 @@ const BioModelPage: React.FC = () => {
             <button onClick={() => setActiveTab('capacities')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'capacities' ? 'bg-white text-purple-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Strength Capacity"><Gauge className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('limits')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'limits' ? 'bg-white text-rose-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Joint Limits"><Lock className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('muscles')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'muscles' ? 'bg-white text-teal-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Muscles"><Activity className="w-5 h-5" /></button>
+            <button onClick={() => setActiveTab('modifications')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'modifications' ? 'bg-white text-amber-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Cross-Joint Modifications"><Link2 className="w-5 h-5" /></button>
           </div>
 
           <div className="flex items-center gap-3 mb-6 shrink-0">
@@ -5970,6 +6248,7 @@ const BioModelPage: React.FC = () => {
             {activeTab === 'capacities' && <Gauge className="w-5 h-5 text-purple-600" />}
             {activeTab === 'limits' && <Lock className="w-5 h-5 text-rose-600" />}
             {activeTab === 'muscles' && <Activity className="w-5 h-5 text-teal-600" />}
+            {activeTab === 'modifications' && <Link2 className="w-5 h-5 text-amber-600" />}
             <h3 className="text-lg font-bold text-gray-900">
                 {activeTab === 'kinematics' ? 'Motion Editor' :
                  activeTab === 'constraints' ? 'Constraints' :
@@ -5977,6 +6256,7 @@ const BioModelPage: React.FC = () => {
                  activeTab === 'capacities' ? 'Joint Capacities' :
                  activeTab === 'limits' ? 'Joint Limits' :
                  activeTab === 'muscles' ? 'Muscles' :
+                 activeTab === 'modifications' ? 'Cross-Joint Modifications' :
                  activeTab === 'timeline' ? 'Timeline Peaks' : 'Joint Analysis'}
             </h3>
           </div>
@@ -7394,9 +7674,19 @@ const BioModelPage: React.FC = () => {
                                        const bellN = 40;
                                        const bellSamples: Array<{ angle: number; val: number }> = [];
                                        const bellCap = { base: config.base, specific: config.specific, angle: config.angle || 0 };
+                                       // Apply cross-joint modifications at the current pose for
+                                       // the right-side bone — the displayed bell reflects the
+                                       // EFFECTIVE capacity after modifications, so as the user
+                                       // moves a source joint (e.g. knee flex) the capacity bell
+                                       // shrinks live.
+                                       const capModMultDisplay = getModificationMultiplier(
+                                           modifications,
+                                           { kind: 'capacity', jointGroup: group as JointGroup, actionKey: action },
+                                           'right', posture, twists,
+                                       );
                                        for (let bi = 0; bi <= bellN; bi++) {
                                            const angle = capTrackMin + (capTrackMax - capTrackMin) * (bi / bellN);
-                                           bellSamples.push({ angle, val: evaluateCapacity(bellCap, angle) });
+                                           bellSamples.push({ angle, val: evaluateCapacity(bellCap, angle) * capModMultDisplay });
                                        }
                                        const bellValMax = Math.max(config.base, config.specific, 1);
                                        const bellValMin = Math.min(0, config.base, config.specific);
@@ -7601,6 +7891,22 @@ const BioModelPage: React.FC = () => {
                                               const lLive = sectionGroupBones ? liveDirAngle(sectionGroupBones.left) : null;
                                               const rLive = sectionGroupBones ? liveDirAngle(sectionGroupBones.right) : null;
 
+                                              // Cross-joint modification multipliers per muscle
+                                              // at the current pose (right-side bone). The
+                                              // stacked-area visualization is a bell-share
+                                              // display, so only 'relative' modifiers apply here
+                                              // — 'isolated' modifiers affect the post-share
+                                              // activation, not the bell weight shown in this graph.
+                                              const sectionActionKeyLocal = actionKey(directionName);
+                                              const muscleModMult: Record<string, number> = {};
+                                              for (const id of assignedIds) {
+                                                  muscleModMult[id] = getModificationMultiplier(
+                                                      modifications,
+                                                      { kind: 'muscle', jointGroup: group, actionKey: sectionActionKeyLocal, muscleId: id },
+                                                      'right', posture, twists, 'relative',
+                                                  );
+                                              }
+
                                               // Sample the bell curves across
                                               // the X range, normalize each
                                               // sample column to sum=1.
@@ -7616,7 +7922,7 @@ const BioModelPage: React.FC = () => {
                                                       // bell as joint capacities
                                                       // so muscle contributions
                                                       // share the curve shape.
-                                                      const v = evaluateCapacity({ base: c.base, specific: c.peak, angle: c.angle }, angle, c.steepness ?? 1);
+                                                      const v = evaluateCapacity({ base: c.base, specific: c.peak, angle: c.angle }, angle, c.steepness ?? 1) * (muscleModMult[id] ?? 1);
                                                       values.push({ id, v });
                                                       total += v;
                                                   }
@@ -7846,6 +8152,417 @@ const BioModelPage: React.FC = () => {
                           })}
                       </div>
                   </div>
+              );
+          })()}
+
+          {activeTab === 'modifications' && (() => {
+              // Pre-build flat (joint, action) option lists. Capacity targets
+              // use the combined joint+action list since there aren't that
+              // many — easier than a two-dropdown dance.
+              const allJointActions: { jointGroup: JointGroup; actionKey: string; label: string }[] = [];
+              for (const jg of Object.keys(JOINT_ACTIONS) as JointGroup[]) {
+                  const acts = JOINT_ACTIONS[jg] || [];
+                  for (const ax of acts) {
+                      allJointActions.push({ jointGroup: jg, actionKey: actionKey(ax.positiveAction), label: `${jg} · ${ax.positiveAction}` });
+                      allJointActions.push({ jointGroup: jg, actionKey: actionKey(ax.negativeAction), label: `${jg} · ${ax.negativeAction}` });
+                  }
+              }
+
+              return (
+              <div className="flex-1 flex flex-col animate-in fade-in slide-in-from-right-4 duration-300">
+                  <div className="bg-amber-50 p-4 rounded-xl border border-amber-100 mb-4">
+                      <p className="text-xs text-amber-900 font-medium leading-relaxed">
+                          Scale a capacity or a specific muscle's contribution based on another joint's current angle. Example: knee flexion shortens gastroc, lowering its plantar-flexion share and the ankle's total plantar-flexion capacity.
+                      </p>
+                      <p className="text-[10px] text-amber-500 font-mono mt-2">
+                          Curve Y = % of max effect (0–100, dimensionless). Three-point curve spans the source action's joint-limit range; endpoints pin to min/max, middle point's X is movable. Each target below picks its own Max % and direction — same curve, different magnitudes/signs per target.
+                      </p>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto pr-2 space-y-3">
+                      {modifications.map((mod, modIdx) => {
+                          // Source action options.
+                          const srcActs = JOINT_ACTIONS[mod.sourceJoint] || [];
+                          const srcActionOptions: { key: string; label: string }[] = [];
+                          for (const ax of srcActs) {
+                              srcActionOptions.push({ key: actionKey(ax.positiveAction), label: ax.positiveAction });
+                              srcActionOptions.push({ key: actionKey(ax.negativeAction), label: ax.negativeAction });
+                          }
+
+                          // X range from the source action's joint limits.
+                          const srcAx = getActionAxisByKey(mod.sourceJoint, mod.sourceActionKey);
+                          const range = srcAx
+                              ? getActionRange(mod.sourceJoint, srcAx.axis, srcAx.isPositive)
+                              : { min: -180, max: 180 };
+                          const clampedMidX = Math.max(range.min, Math.min(range.max, mod.midX));
+                          const srcAngleRight = getModificationSourceAngle(mod, 'right', posture, twists);
+                          const curveYRight = srcAngleRight !== null ? evaluateCurveY(mod, range, srcAngleRight) : 0;
+
+                          const setMod = (patch: Partial<CrossJointModification>) =>
+                              setModifications(mods => mods.map((m, i) => i === modIdx ? { ...m, ...patch } : m));
+
+                          // SVG graph dimensions + point positions. Y axis is
+                          // fixed 0–100 (dimensionless "percent of max effect");
+                          // target direction + maxChange convert that into a
+                          // real multiplier.
+                          const GW = 260, GH = 80, PAD = 8;
+                          const plotW = GW - PAD * 2, plotH = GH - PAD * 2;
+                          const xScale = (a: number) => {
+                              if (range.max === range.min) return PAD + plotW / 2;
+                              return PAD + ((a - range.min) / (range.max - range.min)) * plotW;
+                          };
+                          const yScale = (y: number) => {
+                              return PAD + plotH - (Math.max(0, Math.min(100, y)) / 100) * plotH;
+                          };
+                          const xL = xScale(range.min);
+                          const xM = xScale(clampedMidX);
+                          const xR = xScale(range.max);
+                          const yL = yScale(mod.leftY);
+                          const yMv = yScale(mod.midY);
+                          const yR = yScale(mod.rightY);
+                          const polyPoints = `${xL},${yScale(0)} ${xL},${yL} ${xM},${yMv} ${xR},${yR} ${xR},${yScale(0)}`;
+                          const livePtX = srcAngleRight !== null ? xScale(Math.max(range.min, Math.min(range.max, srcAngleRight))) : null;
+
+                          return (
+                              <div key={mod.id} className="bg-white border border-gray-200 rounded-xl p-3 space-y-3">
+                                  {/* Header */}
+                                  <div className="flex items-center gap-2">
+                                      <input
+                                          type="text"
+                                          value={mod.name}
+                                          onChange={(e) => setMod({ name: e.target.value })}
+                                          className="flex-1 text-xs font-bold bg-gray-50 border border-gray-200 rounded px-2 py-1 outline-none focus:border-amber-500"
+                                          placeholder="Modification name"
+                                      />
+                                      <button
+                                          onClick={() => setModifications(mods => mods.filter((_, i) => i !== modIdx))}
+                                          className="text-gray-400 hover:text-rose-500 flex-shrink-0"
+                                          title="Delete modification"
+                                      >
+                                          <Trash2 className="w-4 h-4" />
+                                      </button>
+                                  </div>
+
+                                  {/* Source joint + action */}
+                                  <div>
+                                      <label className="text-[9px] uppercase tracking-wider font-bold text-gray-400 block mb-1">Source joint angle</label>
+                                      <div className="grid grid-cols-2 gap-2">
+                                          <select
+                                              value={mod.sourceJoint}
+                                              onChange={(e) => {
+                                                  const jg = e.target.value as JointGroup;
+                                                  const firstAx = (JOINT_ACTIONS[jg] || [])[0];
+                                                  const firstKey = firstAx ? actionKey(firstAx.positiveAction) : 'flexion';
+                                                  const newAx = firstAx ? { axis: firstAx, isPositive: true } : null;
+                                                  const newRange = newAx ? getActionRange(jg, newAx.axis, newAx.isPositive) : { min: 0, max: 90 };
+                                                  setMod({
+                                                      sourceJoint: jg,
+                                                      sourceActionKey: firstKey,
+                                                      midX: (newRange.min + newRange.max) / 2,
+                                                  });
+                                              }}
+                                              className="text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 outline-none focus:border-amber-500"
+                                          >
+                                              {(Object.keys(JOINT_ACTIONS) as JointGroup[]).map(jg => (
+                                                  <option key={jg} value={jg}>{jg}</option>
+                                              ))}
+                                          </select>
+                                          <select
+                                              value={mod.sourceActionKey}
+                                              onChange={(e) => {
+                                                  const newAx = getActionAxisByKey(mod.sourceJoint, e.target.value);
+                                                  const newRange = newAx ? getActionRange(mod.sourceJoint, newAx.axis, newAx.isPositive) : { min: 0, max: 90 };
+                                                  setMod({
+                                                      sourceActionKey: e.target.value,
+                                                      midX: (newRange.min + newRange.max) / 2,
+                                                  });
+                                              }}
+                                              className="text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 outline-none focus:border-amber-500"
+                                          >
+                                              {srcActionOptions.map(o => (
+                                                  <option key={o.key} value={o.key}>{o.label}</option>
+                                              ))}
+                                          </select>
+                                      </div>
+                                  </div>
+
+                                  {/* 3-point graph — minimalist resistance-profile style */}
+                                  <div>
+                                      <label className="text-[9px] uppercase tracking-wider font-bold text-gray-400 block mb-1">Curve (% of max effect)</label>
+                                      <svg viewBox={`0 0 ${GW} ${GH + 14}`} className="w-full bg-white rounded-lg border border-gray-100" style={{ display: 'block' }}>
+                                          {/* Baseline (0% of max effect) */}
+                                          <line x1={PAD} x2={PAD + plotW} y1={yScale(0)} y2={yScale(0)} stroke="#e5e7eb" strokeWidth="1" />
+                                          {/* Filled area */}
+                                          <polygon points={polyPoints} fill="#fbbf24" fillOpacity="0.18" />
+                                          {/* Curve */}
+                                          <path d={`M${xL},${yL} L${xM},${yMv} L${xR},${yR}`} stroke="#f59e0b" strokeWidth="1.5" fill="none" strokeLinejoin="round" />
+                                          {/* 3 control points */}
+                                          <circle cx={xL} cy={yL} r="3.5" fill="#f59e0b" stroke="white" strokeWidth="1" />
+                                          <circle cx={xM} cy={yMv} r="3.5" fill="#f59e0b" stroke="white" strokeWidth="1" />
+                                          <circle cx={xR} cy={yR} r="3.5" fill="#f59e0b" stroke="white" strokeWidth="1" />
+                                          {/* Live source-angle marker (right side) */}
+                                          {livePtX !== null && (
+                                              <line x1={livePtX} x2={livePtX} y1={PAD} y2={PAD + plotH} stroke="#ef4444" strokeWidth="1" strokeDasharray="2 2" opacity="0.7" />
+                                          )}
+                                          {/* Axis labels */}
+                                          <text x={PAD} y={GH + 10} fontSize="8" fill="#9ca3af">{Math.round(range.min)}°</text>
+                                          <text x={PAD + plotW} y={GH + 10} textAnchor="end" fontSize="8" fill="#9ca3af">{Math.round(range.max)}°</text>
+                                          <text x={PAD} y={PAD + 7} fontSize="8" fill="#9ca3af">100%</text>
+                                          <text x={PAD} y={yScale(0) - 2} fontSize="8" fill="#9ca3af">0%</text>
+                                      </svg>
+                                      <p className="text-[9px] font-mono text-gray-400 mt-1">
+                                          Current (R): {srcAngleRight !== null ? `${Math.round(srcAngleRight)}°` : '—'} → curve at {curveYRight.toFixed(0)}%
+                                      </p>
+
+                                      {/* Per-point inputs */}
+                                      <div className="mt-2 grid grid-cols-3 gap-2">
+                                          <div>
+                                              <label className="text-[8px] font-bold text-gray-400 uppercase block mb-0.5">Left Y ({Math.round(range.min)}°)</label>
+                                              <input
+                                                  type="number"
+                                                  min="0"
+                                                  max="100"
+                                                  step="1"
+                                                  value={isNaN(mod.leftY) ? 0 : mod.leftY}
+                                                  onChange={(e) => setMod({ leftY: Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)) })}
+                                                  className="w-full text-xs font-mono bg-gray-50 border border-gray-200 rounded px-1 py-0.5 outline-none text-center"
+                                              />
+                                          </div>
+                                          <div>
+                                              <label className="text-[8px] font-bold text-gray-400 uppercase block mb-0.5">Mid X (°)</label>
+                                              <input
+                                                  type="number"
+                                                  min={range.min}
+                                                  max={range.max}
+                                                  step="1"
+                                                  value={Math.round(clampedMidX)}
+                                                  onChange={(e) => setMod({ midX: Math.max(range.min, Math.min(range.max, parseFloat(e.target.value) || 0)) })}
+                                                  className="w-full text-xs font-mono bg-gray-50 border border-gray-200 rounded px-1 py-0.5 outline-none text-center"
+                                              />
+                                          </div>
+                                          <div>
+                                              <label className="text-[8px] font-bold text-gray-400 uppercase block mb-0.5">Right Y ({Math.round(range.max)}°)</label>
+                                              <input
+                                                  type="number"
+                                                  min="0"
+                                                  max="100"
+                                                  step="1"
+                                                  value={isNaN(mod.rightY) ? 0 : mod.rightY}
+                                                  onChange={(e) => setMod({ rightY: Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)) })}
+                                                  className="w-full text-xs font-mono bg-gray-50 border border-gray-200 rounded px-1 py-0.5 outline-none text-center"
+                                              />
+                                          </div>
+                                      </div>
+                                      <div className="mt-1">
+                                          <label className="text-[8px] font-bold text-gray-400 uppercase block mb-0.5">Mid Y</label>
+                                          <input
+                                              type="number"
+                                              min="0"
+                                              max="100"
+                                              step="1"
+                                              value={isNaN(mod.midY) ? 0 : mod.midY}
+                                              onChange={(e) => setMod({ midY: Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)) })}
+                                              className="w-full text-xs font-mono bg-gray-50 border border-gray-200 rounded px-1 py-0.5 outline-none text-center"
+                                          />
+                                      </div>
+                                  </div>
+
+                                  {/* Targets */}
+                                  <div>
+                                      <label className="text-[9px] uppercase tracking-wider font-bold text-gray-400 block mb-1">Targets</label>
+                                      <div className="space-y-1.5">
+                                          {mod.targets.length === 0 && (
+                                              <p className="text-[10px] italic text-gray-400">No targets — this modification has no effect until a capacity or muscle is added.</p>
+                                          )}
+                                          {mod.targets.map((t, tIdx) => {
+                                              const sectionKey = `${t.jointGroup}.${t.actionKey}`;
+                                              const assignedForTarget = muscleAssignments[sectionKey] || {};
+                                              const muscleIdsInSection = Object.keys(assignedForTarget);
+                                              const comboValue = `${t.jointGroup}::${t.actionKey}`;
+                                              // Preview: what multiplier does THIS target produce right now, given the curve + current source angle?
+                                              const previewMult = srcAngleRight !== null
+                                                  ? applyTargetScaling(curveYRight, t)
+                                                  : 1;
+
+                                              const setTarget = (patch: Partial<ModificationTarget>) => setMod({
+                                                  targets: mod.targets.map((tt, ti) => ti === tIdx ? { ...tt, ...patch } : tt),
+                                              });
+
+                                              return (
+                                                  <div key={tIdx} className="bg-gray-50 border border-gray-100 rounded-lg p-2 space-y-1.5">
+                                                      {/* Row 1: kind + target pickers + delete */}
+                                                      <div className="flex items-center gap-1.5">
+                                                          <select
+                                                              value={t.kind}
+                                                              onChange={(e) => {
+                                                                  const newKind = e.target.value as 'capacity' | 'muscle';
+                                                                  const firstMuscle = Object.keys(muscleAssignments[sectionKey] || {})[0] || '';
+                                                                  setTarget({ kind: newKind, muscleId: newKind === 'muscle' ? firstMuscle : undefined });
+                                                              }}
+                                                              className={`text-[10px] font-bold rounded px-1.5 py-0.5 outline-none border ${t.kind === 'capacity' ? 'bg-purple-50 border-purple-200 text-purple-700' : 'bg-teal-50 border-teal-200 text-teal-700'}`}
+                                                          >
+                                                              <option value="capacity">capacity</option>
+                                                              <option value="muscle">muscle</option>
+                                                          </select>
+                                                          {t.kind === 'capacity' ? (
+                                                              <select
+                                                                  value={comboValue}
+                                                                  onChange={(e) => {
+                                                                      const [jg, ak] = e.target.value.split('::');
+                                                                      setTarget({ jointGroup: jg as JointGroup, actionKey: ak });
+                                                                  }}
+                                                                  className="flex-1 min-w-0 text-[10px] bg-white border border-gray-200 rounded px-1.5 py-0.5 outline-none"
+                                                              >
+                                                                  {allJointActions.map(o => (
+                                                                      <option key={`${o.jointGroup}::${o.actionKey}`} value={`${o.jointGroup}::${o.actionKey}`}>
+                                                                          {o.label}
+                                                                      </option>
+                                                                  ))}
+                                                              </select>
+                                                          ) : (
+                                                              <div className="flex-1 min-w-0 grid grid-cols-2 gap-1.5">
+                                                                  <select
+                                                                      value={comboValue}
+                                                                      onChange={(e) => {
+                                                                          const [jg, ak] = e.target.value.split('::');
+                                                                          const newSection = `${jg}.${ak}`;
+                                                                          const firstMuscle = Object.keys(muscleAssignments[newSection] || {})[0] || '';
+                                                                          setTarget({ jointGroup: jg as JointGroup, actionKey: ak, muscleId: firstMuscle });
+                                                                      }}
+                                                                      className="min-w-0 text-[10px] bg-white border border-gray-200 rounded px-1.5 py-0.5 outline-none"
+                                                                  >
+                                                                      {allJointActions.map(o => (
+                                                                          <option key={`${o.jointGroup}::${o.actionKey}`} value={`${o.jointGroup}::${o.actionKey}`}>
+                                                                              {o.label}
+                                                                          </option>
+                                                                      ))}
+                                                                  </select>
+                                                                  <select
+                                                                      value={t.muscleId || ''}
+                                                                      onChange={(e) => setTarget({ muscleId: e.target.value })}
+                                                                      className="min-w-0 text-[10px] bg-white border border-gray-200 rounded px-1.5 py-0.5 outline-none"
+                                                                  >
+                                                                      {muscleIdsInSection.length === 0 && (
+                                                                          <option value="" disabled>— no muscles in this section —</option>
+                                                                      )}
+                                                                      {muscleIdsInSection.map(mid => (
+                                                                          <option key={mid} value={mid}>
+                                                                              {MUSCLE_CATALOG.find(m => m.id === mid)?.name || mid}
+                                                                          </option>
+                                                                      ))}
+                                                                  </select>
+                                                              </div>
+                                                          )}
+                                                          <button
+                                                              onClick={() => setMod({ targets: mod.targets.filter((_, ti) => ti !== tIdx) })}
+                                                              className="text-gray-300 hover:text-rose-400 flex-shrink-0"
+                                                              title="Remove target"
+                                                          >
+                                                              <Trash2 className="w-3 h-3" />
+                                                          </button>
+                                                      </div>
+                                                      {/* Row 2: direction toggle + max change + live preview */}
+                                                      <div className="flex items-center gap-1.5">
+                                                          <div className="flex rounded overflow-hidden border border-gray-200">
+                                                              <button
+                                                                  onClick={() => setTarget({ direction: 'reduce' })}
+                                                                  className={`text-[10px] font-bold px-2 py-0.5 transition-colors ${t.direction === 'reduce' ? 'bg-rose-100 text-rose-700' : 'bg-white text-gray-400 hover:bg-gray-50'}`}
+                                                                  title="Reduce the target"
+                                                              >
+                                                                  ↓ Reduce
+                                                              </button>
+                                                              <button
+                                                                  onClick={() => setTarget({ direction: 'increase' })}
+                                                                  className={`text-[10px] font-bold px-2 py-0.5 transition-colors ${t.direction === 'increase' ? 'bg-emerald-100 text-emerald-700' : 'bg-white text-gray-400 hover:bg-gray-50'}`}
+                                                                  title="Increase the target"
+                                                              >
+                                                                  ↑ Increase
+                                                              </button>
+                                                          </div>
+                                                          <div className="flex items-center gap-1">
+                                                              <label className="text-[9px] font-bold text-gray-400">Max %</label>
+                                                              <input
+                                                                  type="number"
+                                                                  min="0"
+                                                                  step="1"
+                                                                  value={isNaN(t.maxChange) ? 0 : t.maxChange}
+                                                                  onChange={(e) => setTarget({ maxChange: Math.max(0, parseFloat(e.target.value) || 0) })}
+                                                                  className="w-14 text-[10px] font-mono bg-white border border-gray-200 rounded px-1 py-0.5 outline-none text-center"
+                                                              />
+                                                          </div>
+                                                          <span className="ml-auto text-[9px] font-mono text-gray-400">
+                                                              × {previewMult.toFixed(2)}
+                                                          </span>
+                                                      </div>
+                                                      {/* Row 3 (muscle only): isolated / relative mode. */}
+                                                      {t.kind === 'muscle' && (
+                                                          <div className="flex items-center gap-1.5">
+                                                              <span className="text-[9px] font-bold text-gray-400">Mode</span>
+                                                              <div className="flex rounded overflow-hidden border border-gray-200">
+                                                                  <button
+                                                                      onClick={() => setTarget({ muscleMode: 'relative' })}
+                                                                      className={`text-[10px] font-bold px-2 py-0.5 transition-colors ${(t.muscleMode ?? 'relative') === 'relative' ? 'bg-teal-100 text-teal-700' : 'bg-white text-gray-400 hover:bg-gray-50'}`}
+                                                                      title="Relative: shrinking this muscle raises the others' shares proportionally (same as editing the bell in the Muscles tab)."
+                                                                  >
+                                                                      Relative
+                                                                  </button>
+                                                                  <button
+                                                                      onClick={() => setTarget({ muscleMode: 'isolated' })}
+                                                                      className={`text-[10px] font-bold px-2 py-0.5 transition-colors ${t.muscleMode === 'isolated' ? 'bg-indigo-100 text-indigo-700' : 'bg-white text-gray-400 hover:bg-gray-50'}`}
+                                                                      title="Isolated: changes only this muscle's activation; others stay exactly as they are."
+                                                                  >
+                                                                      Isolated
+                                                                  </button>
+                                                              </div>
+                                                          </div>
+                                                      )}
+                                                  </div>
+                                              );
+                                          })}
+                                          <button
+                                              onClick={() => {
+                                                  const defaultJg: JointGroup = 'Ankle';
+                                                  const firstAx = (JOINT_ACTIONS[defaultJg] || [])[0];
+                                                  const defaultKey = firstAx ? actionKey(firstAx.positiveAction) : 'plantarFlexion';
+                                                  setMod({
+                                                      targets: [...mod.targets, { kind: 'capacity', jointGroup: defaultJg, actionKey: defaultKey, maxChange: 20, direction: 'reduce' }],
+                                                  });
+                                              }}
+                                              className="text-[10px] font-bold text-amber-600 hover:text-amber-700 flex items-center gap-1 mt-1"
+                                          >
+                                              <Plus className="w-3 h-3" /> Add target
+                                          </button>
+                                      </div>
+                                  </div>
+                              </div>
+                          );
+                      })}
+
+                      <button
+                          onClick={() => {
+                              const defaultJg: JointGroup = 'Knee';
+                              const firstAx = (JOINT_ACTIONS[defaultJg] || [])[0];
+                              const defaultKey = firstAx ? actionKey(firstAx.negativeAction) : 'flexion';
+                              const ax = firstAx ? { axis: firstAx, isPositive: false } : null;
+                              const newRange = ax ? getActionRange(defaultJg, ax.axis, ax.isPositive) : { min: 0, max: 90 };
+                              setModifications(mods => [...mods, {
+                                  id: `mod-${Date.now()}`,
+                                  name: 'New modification',
+                                  sourceJoint: defaultJg,
+                                  sourceActionKey: defaultKey,
+                                  leftY: 0,
+                                  midX: (newRange.min + newRange.max) / 2,
+                                  midY: 50,
+                                  rightY: 100,
+                                  targets: [],
+                              }]);
+                          }}
+                          className="w-full bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-700 font-bold text-xs py-2 rounded-lg flex items-center justify-center gap-2"
+                      >
+                          <Plus className="w-4 h-4" /> New Modification
+                      </button>
+                  </div>
+              </div>
               );
           })()}
 
