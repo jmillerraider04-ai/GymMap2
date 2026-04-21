@@ -1401,6 +1401,131 @@ const mirrorTwists = (twists: Record<string, number>, sourceBoneId: string): Rec
     return next;
 };
 
+// --- EXERCISE PRESETS ---
+//
+// Starting-point scenes for common gym exercises. Each preset bundles
+// posture (start + end keyframes), twists, forces, and constraints into a
+// single object the user can apply from the header dropdown. The numbers
+// here are approximations — arm/leg angles, constraint orientations, force
+// directions — not finely tuned anatomy. They're meant to save setup time,
+// not be the final ground truth.
+//
+// Coordinate system recap (matches the rest of the file):
+//   +X = subject's right   |  +Y = DOWN   |  -Z = anterior/forward
+//
+// Bone direction conventions:
+//   - Ball-socket (Humerus, Femur): the posture vector is the bone's world
+//     direction. (root frame is identity.) Unit length.
+//   - Hinge (Forearm, Tibia, Foot): the posture vector is a LOCAL direction
+//     in the parent frame. Use `hingeLocal(bone, flexDeg)` below.
+//   - Scapula (Clavicle): offset vector from neck to shoulder. Default
+//     magnitude 25 along ±X for the relaxed shoulder position.
+//
+// For hinges we store the angle-to-dir result directly. This matches the
+// slider convention: deg = 0 → along parent (extended), deg > 0 → flexed.
+const hingeLocal = (bone: string, flexDeg: number): Vector3 => {
+    const t = flexDeg * Math.PI / 180;
+    if (bone.includes('Foot')) return { x: 0, y: Math.sin(t), z: -Math.cos(t) };
+    return { x: 0, y: Math.cos(t), z: Math.sin(t) };
+};
+// Utility: build a Posture by overlaying a partial override onto the default.
+const mkPosture = (overrides: Partial<Posture>): Posture => ({
+    ...DEFAULT_POSTURE,
+    ...overrides,
+});
+
+interface ExercisePreset {
+    id: string;
+    name: string;
+    category: 'Push' | 'Pull' | 'Legs' | 'Isolation';
+    startPosture: Posture;
+    endPosture: Posture;
+    startTwists?: Record<string, number>;
+    endTwists?: Record<string, number>;
+    forces: Array<Omit<ForceConfig, 'id'>>;
+    constraints: Record<string, Array<Omit<BoneConstraint, 'id'>>>;
+}
+
+// Exercise presets are captured from real, user-built scenes via the
+// window.__scene console export. Each entry is pure data: poses, twists,
+// forces, and constraints — IDs are assigned at apply time, so stripped
+// from the captured data.
+const EXERCISE_PRESETS: ExercisePreset[] = [
+    {
+        id: 'bb_bench_press',
+        name: 'BB BENCH PRESS',
+        category: 'Push',
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            lHumerus: { x: -0.9641968488023334, y: -0.00013583342144805159, z: 0.2651875153715423 },
+            lForearm: { x: 0, y: -0.05233595624294362, z: 0.9986295347545738 },
+            rHumerus: { x: 0.9641968488023333, y: -0.00013583342144947848, z: 0.26518751537154234 },
+            rForearm: { x: 0, y: -0.05233595624294362, z: 0.9986295347545738 },
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 1, z: 0 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 1, z: 0 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            lHumerus: { x: -0.6116498627494875, y: 0.00023225097999554688, z: -0.7911285555824763 },
+            lForearm: { x: 0, y: 1, z: 0 },
+            rHumerus: { x: 0.6116498627494875, y: 0.00023225097999554894, z: -0.7911285555824763 },
+            rForearm: { x: 0, y: 1, z: 0 },
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 1, z: 0 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 1, z: 0 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            lHumerus: 15.366188376336272,
+            rHumerus: -15.366188376336321,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            lHumerus: -49.26251676279056,
+            rHumerus: 49.26251676279058,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            { name: 'Force', boneId: 'rForearm', position: 1, x: 0, y: 0, z: 1, magnitude: 10 },
+            { name: 'Force', boneId: 'lForearm', position: 1, x: 0, y: 0, z: 1, magnitude: 10 },
+        ],
+        constraints: {
+            rForearm: [
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 75.77227892901028, y: -30, z: -38.40750236747612 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 75.77227892901028, y: -30, z: -38.40750236747612 } },
+            ],
+            rHumerus: [
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 69, y: -30, z: 0 }, physicsEnabled: false },
+            ],
+            lForearm: [
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -75.77227892901028, y: -30, z: -38.40750236747612 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -75.77227892901028, y: -30, z: -38.40750236747612 } },
+            ],
+            lHumerus: [
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -69, y: -30, z: 0 }, physicsEnabled: false },
+            ],
+            spine: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 30, z: 0 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: -30, z: 0 } },
+            ],
+        },
+    },
+];
+
 const BioModelPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'timeline' | 'capacities' | 'constraints' | 'limits' | 'muscles'>('kinematics');
   const [poseMode, setPoseMode] = useState<'start' | 'end'>('start');
@@ -1436,6 +1561,13 @@ const BioModelPage: React.FC = () => {
   // testing: flip this off, note the effort distribution, flip it back
   // on, compare.
   const [biarticularCouplingEnabled, setBiarticularCouplingEnabled] = useState(true);
+  // Exponent p for the Phase B effort cost min Σ (τ/cap)^p. p = 2 is the
+  // classical quadratic norm (linear response to mechanical advantage); p < 2
+  // sharpens the concentration toward high-leverage joints (matches observed
+  // 1RM recruitment where the prime mover approaches 100% but synergists
+  // don't). Solved via IRLS around the existing quadratic KKT. p = 2 collapses
+  // to a single iteration and matches the pre-IRLS behavior exactly.
+  const [effortExponent, setEffortExponent] = useState(1.5);
   // Joint Analysis tab display mode:
   //   '1rm-local' — normalize so the hardest action at the current pose reads
   //                 100%. Interprets the pose as "loaded to 1RM right now."
@@ -1479,6 +1611,38 @@ const BioModelPage: React.FC = () => {
   const [neuralCosts, setNeuralCosts] = useState<Record<string, number>>({});
 
   const [constraints, setConstraints] = useState<Record<string, BoneConstraint[]>>({});
+
+  // Exercise preset picker dropdown. Open/closed state + outside-click
+  // dismissal via the ref. Presets are purely declarative data (see
+  // EXERCISE_PRESETS above); applyPreset wires them into state.
+  const [presetMenuOpen, setPresetMenuOpen] = useState(false);
+  const presetMenuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!presetMenuOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+        if (presetMenuRef.current && !presetMenuRef.current.contains(e.target as Node)) {
+            setPresetMenuOpen(false);
+        }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [presetMenuOpen]);
+
+  // Scene state exposure for preset capture. In the browser console, run:
+  //     copy(JSON.stringify(window.__scene, null, 2))
+  // to copy the current scene to your clipboard, then paste it into
+  // chat to save it as a preset.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    (window as unknown as Record<string, unknown>).__scene = {
+        startPosture,
+        endPosture,
+        startTwists,
+        endTwists,
+        forces,
+        constraints,
+    };
+  }, [startPosture, endPosture, startTwists, endTwists, forces, constraints]);
 
   const calculateKinematics = (currentPosture: Posture, currentTwists: Record<string, number>) => {
     const locations: Record<string, Vector3> = {};
@@ -1906,7 +2070,13 @@ const BioModelPage: React.FC = () => {
       activeConstraints?: Record<string, BoneConstraint[]>,
       // Current ROM position [0, 1] for resistance profile evaluation.
       // Defaults to 0 (start pose) when not provided.
-      currentT: number = 0
+      currentT: number = 0,
+      // Effort-cost exponent for Phase B min Σ (τ/cap)^p. p = 2 is the
+      // classical quadratic norm; p < 2 concentrates demand on
+      // mechanically-advantaged joints. Defaults to 2 (quadratic) for callers
+      // that don't thread the knob in; the live scene uses whatever the
+      // component state is.
+      effortExponent: number = 2,
   ): TorqueDistributionResult => {
       const kin = calculateKinematics(currentPosture, currentTwists);
 
@@ -1958,15 +2128,29 @@ const BioModelPage: React.FC = () => {
       // reflect them.
       const jointForces: Record<string, Vector3> = {};
 
-      // Total applied force and its moment about the world origin. Used by
-      // Phase B to impose whole-body equilibrium: Σ F_applied + Σ λ_i n_i = 0
-      // and Σ r × F_applied + Σ r_pin × (λ_i n_i) = 0. Without those, the
-      // solver silently lets an "invisible root mount" absorb any unbalanced
-      // load, so e.g. an arm-side force never translates into leg-pin
-      // reactions and the hip/torso muscles that would really hold the
-      // pelvis read zero.
+      // PHYSICS MODEL:
+      //
+      // Strict rigid-body statics. The figure is treated as a set of
+      // rigid bones connected by pin joints. Muscles at every joint are
+      // assumed to hold the joint angles against the applied forces
+      // (that's what "muscle demand" means). Forces propagate up each
+      // chain as moments at each ancestor; constraint reactions balance
+      // them via Phase B's whole-body force + moment equilibrium.
+      //
+      // No phantom gravity. No implicit anchors. Only user-defined
+      // forces and constraints contribute. If no constraints are present
+      // and forces are applied, the whole-body balance becomes
+      // infeasible — the solver falls back gracefully (λ = 0) and
+      // Phase A's up-the-chain propagation dominates.
+
+      // Track total applied force (after F_∥ extraction at force bones
+      // that are constrained). Phase B's constraint-subspace force balance
+      // uses this as the RHS:
+      //    for each consRef i:  Σ_j (n_i · n_j) λ_j = -(F_total · n_i)
+      // Moment balance isn't enforced — point constraints can't absorb
+      // moments, so the figure is treated as kinematically pinned and any
+      // residual moment is absorbed by an implicit world anchor.
       let totalAppliedForce: Vector3 = { x: 0, y: 0, z: 0 };
-      let totalAppliedMoment: Vector3 = { x: 0, y: 0, z: 0 };
 
       for (const f of currentForces) {
           const seg = kin.boneStartPoints[f.boneId];
@@ -1977,32 +2161,18 @@ const BioModelPage: React.FC = () => {
           const forceDir = getForceDirectionWithKin(f, kin, currentTwists);
           const chain = getChainToRoot(f.boneId);
 
-          // Effective magnitude: base magnitude × resistance profile at the
-          // current ROM position. This is the "weight you feel" at this frame,
-          // and it scales EVERYTHING: torque, scapula force, joint force.
-          // Under the 1RM model, individual magnitudes are in arbitrary units
-          // but RELATIVE magnitudes between forces matter when there are
-          // multiple forces contributing to different joints.
           const baseMag = f.magnitude || 1;
           const profileMult = evaluateProfile(f.profile, currentT);
           const effectiveMag = baseMag * profileMult;
           const scaledForce = mul(forceDir, effectiveMag);
 
-          // --- F_∥ extraction ---
-          // If this force's bone has physics-enabled constraints, the
-          // constraints absorb F_perp exactly at the constraint surface
-          // (Newton's 3rd law on a rigid plane). Only F_∥ — the component
-          // along the constraint's free direction — propagates up the chain
-          // as muscle demand. Propagating the full F would leave F_perp-
-          // induced torque at every upstream joint, which is both wrong
-          // physically (the plane absorbed it) and the root cause of the
-          // ratio drift: when F_perp changes but F_∥ stays fixed, tau0
-          // changes and Phase B's cap-lookup (which keys on sign(tau0))
-          // can flip, giving different optima for the same F_∥.
-          //
-          // With F_∥ propagation, tau0 depends only on F_∥, cap lookup is
-          // F-perp-invariant, and Phase B's min-effort redistribution is
-          // genuinely F-direction-invariant for fixed F_∥.
+          // F_∥ extraction: if this force's bone has physics-enabled
+          // constraints, the constraint absorbs F_perp exactly at the
+          // constraint surface (Newton's 3rd law on a rigid plane). Only
+          // F_∥ — the component along the constraint's free direction —
+          // propagates up the chain as muscle demand. Without this,
+          // F_perp would leave spurious upstream torque and the demand
+          // ratios would drift with F direction.
           let propagatedForce = scaledForce;
           const consAtBone = activeConstraints?.[f.boneId];
           if (consAtBone) {
@@ -2028,8 +2198,8 @@ const BioModelPage: React.FC = () => {
                           }
                       }
                   }
-                  // Orthonormalize normals (Gram-Schmidt), then project F onto
-                  // each and subtract.
+                  // Orthonormalize normals (Gram-Schmidt), then project F
+                  // onto each and subtract.
                   const orthoNormals: Vector3[] = [];
                   for (const n of normals) {
                       let v: Vector3 = { x: n.x, y: n.y, z: n.z };
@@ -2048,15 +2218,12 @@ const BioModelPage: React.FC = () => {
           }
 
           totalAppliedForce = add(totalAppliedForce, propagatedForce);
-          totalAppliedMoment = add(totalAppliedMoment, crossProduct(attachPt, propagatedForce));
 
           for (const bone of chain) {
               const prevJ = jointForces[bone] || { x: 0, y: 0, z: 0 };
               jointForces[bone] = add(prevJ, propagatedForce);
 
               if (bone.includes('Clavicle')) {
-                  // Scapula: accumulate linear force scaled by effective
-                  // magnitude so multi-force relative weighting is correct.
                   const prev = scapulaForces[bone] || { x: 0, y: 0, z: 0 };
                   scapulaForces[bone] = add(prev, propagatedForce);
               } else {
@@ -2471,21 +2638,9 @@ const BioModelPage: React.FC = () => {
                   const N = consRefs.length;
 
                   // Minimize Σ ((tau0 + λ·sens)/cap)² — muscle neural drive —
-                  // subject to two classes of hard equality constraints:
+                  // subject to two classes of hard equality constraint:
                   //
-                  //   (a) Whole-body equilibrium: Σ F + Σ λ n = 0 and
-                  //       Σ r × F + Σ r_pin × λ n = 0. These plug the
-                  //       "invisible root mount" hole. Without them, min-
-                  //       effort picks λ = 0 whenever the force's subtree
-                  //       is disjoint from the constraint subtree, silently
-                  //       assigning the unbalanced load to an imaginary
-                  //       pelvis fixity and leaving hip/spine muscles at
-                  //       zero even though physically they must hold the
-                  //       pelvis against the pinned legs. Making real pins
-                  //       carry the load surfaces those reactions through
-                  //       sens as correct hip/spine demand.
-                  //
-                  //   (b) Structural-absorption of locked hinge joints:
+                  //   1. Structural-absorption of locked hinge joints:
                   //       τ = 0 at any hinge col (elbow / knee / ankle)
                   //       whose single muscle-actuated axis is kinematically
                   //       killed by the constraint set — detected as the
@@ -2495,39 +2650,47 @@ const BioModelPage: React.FC = () => {
                   //       inside one limb subtree), so when the limb is
                   //       rigidized at both ends the bending moment is
                   //       absorbed structurally by the bone/ligament, not
-                  //       by the muscle. Multi-axis pelvis-adjacent joints
-                  //       (hip, shoulder, spine, scapula) are not subject
-                  //       to this rule — their muscles are what hold the
-                  //       root against the pinned limbs.
+                  //       by the muscle.
                   //
-                  //   [AtWA     A_H      A_bal^T] [λ]   [AtWb  ]
-                  //   [A_H^T    0        0      ] [μ] = [-b_H  ]
-                  //   [A_bal    0        0      ] [ν]   [b_bal ]
-                  const AtWA: number[][] = Array.from({length: N}, () => new Array(N).fill(0));
-                  const AtWb: number[] = new Array(N).fill(0);
-                  for (let i = 0; i < N; i++) {
-                      for (let j = 0; j < N; j++) {
-                          let s = 0;
-                          for (const c of cols) s += c.sens[i] * c.sens[j] / (c.cap * c.cap);
-                          AtWA[i][j] = s;
-                      }
-                      let r = 0;
-                      for (const c of cols) r += c.sens[i] * c.tau0 / (c.cap * c.cap);
-                      AtWb[i] = -r;
-                  }
-                  for (let i = 0; i < N; i++) AtWA[i][i] += 1e-8;
-
-                  const balanceRows: number[][] = [];
-                  const balanceRhs: number[] = [];
-                  for (const axis of ['x', 'y', 'z'] as const) {
-                      balanceRows.push(consRefs.map(c => c.n[axis]));
-                      balanceRhs.push(-totalAppliedForce[axis]);
-                  }
-                  for (const axis of ['x', 'y', 'z'] as const) {
-                      balanceRows.push(consRefs.map(c => crossProduct(c.tip, c.n)[axis]));
-                      balanceRhs.push(-totalAppliedMoment[axis]);
-                  }
-                  const B = balanceRows.length;
+                  //   2. Force balance projected into the constraint subspace:
+                  //       For each consRef i: dot(Σ λ_j n_j, n_i) = -dot(F_total, n_i).
+                  //       This is rigid-body force equilibrium — but only in
+                  //       the directions the constraint set can actually react.
+                  //       For a fixed constraint (3 orthogonal normals),
+                  //       this collapses to Σ λn = -F (constraint fully
+                  //       absorbs F). For a planar constraint with normal n,
+                  //       only the n-component is enforced; the free
+                  //       directions propagate up the chain via Phase A.
+                  //       For an arc (axial + radial directions), both get
+                  //       enforced; the tangential direction is free.
+                  //
+                  //       This is what makes the chain of demand from force
+                  //       to root constant in magnitude above a full
+                  //       constraint — every joint whose sub-tree contains
+                  //       the constraint sees the same (r_force − r_cons) × F
+                  //       after Phase B reconciles the reaction with the
+                  //       moment arms.
+                  //
+                  // Moment balance (Σ r × F + Σ r_tip × λn = 0) is NOT
+                  // enforced. Point constraints can't resist moments about
+                  // themselves, so whole-body moment balance is generally
+                  // infeasible — the figure would rotate freely under any
+                  // off-axis force. The assumption here is the standard
+                  // biomechanics one: treat the figure as kinematically
+                  // pinned in space, so any residual moment is absorbed
+                  // by an implicit world anchor. Joint demands are what
+                  // muscles produce to hold the pose under this assumption.
+                  //
+                  //   [AtWA     A_H     A_F   ] [λ  ]   [AtWb ]
+                  //   [A_H^T    0       0    ] [μ_H] = [-b_H ]
+                  //   [A_F^T    0       0    ] [μ_F]   [-b_F ]
+                  //
+                  // For p ≠ 2 (user-tunable effort exponent), the AtWA /
+                  // AtWb construction is wrapped in an IRLS loop below:
+                  // min Σ w_c · (τ_c/cap_c)² with w_c updated each
+                  // iteration to |τ_c/cap_c|^(p-2). Converges to the
+                  // min Σ (τ_c/cap_c)^p fixed point. For p = 2, w_c = 1
+                  // always and one iteration matches the original solve.
 
                   // Hinge joints whose sens column is linearly independent
                   // of the others' are structurally-locked. Gram-Schmidt
@@ -2536,6 +2699,7 @@ const BioModelPage: React.FC = () => {
                   // virtual δq ∈ null(J_c) has a nonzero k-th component).
                   // If the residual survives, k is frozen — and if the col
                   // is a hinge, muscle at k is zero by structural absorption.
+                  // Weight-independent → computed once outside the IRLS loop.
                   const hingeGroups = new Set<JointGroup>(['Elbow', 'Knee', 'Ankle']);
                   const hingeFrozenIdx: number[] = [];
                   for (let k = 0; k < cols.length; k++) {
@@ -2577,31 +2741,89 @@ const BioModelPage: React.FC = () => {
                       if (Math.sqrt(resSq) > 1e-6 * vNorm) hingeFrozenIdx.push(k);
                   }
                   const H = hingeFrozenIdx.length;
-
+                  const B = N;
                   const dim = N + H + B;
-                  const M: number[][] = Array.from({length: dim}, () => new Array(dim).fill(0));
-                  const RHS: number[] = new Array(dim).fill(0);
-                  for (let i = 0; i < N; i++) {
-                      for (let j = 0; j < N; j++) M[i][j] = AtWA[i][j];
-                      RHS[i] = AtWb[i];
-                  }
-                  for (let k = 0; k < H; k++) {
-                      const c = cols[hingeFrozenIdx[k]];
+
+                  // IRLS parameters. EPS_EFFORT floors |u_c| so columns that
+                  // are near-zero in the current iterate don't get infinite
+                  // weight (which would explode the solve for p < 2).
+                  const EPS_EFFORT = 0.01;
+                  const isQuadratic = Math.abs(effortExponent - 2) < 1e-6;
+                  const IRLS_ITERS = isQuadratic ? 1 : 5;
+                  const colWeights: number[] = new Array(cols.length).fill(1);
+                  let lam: number[] = new Array(N).fill(0);
+
+                  for (let iter = 0; iter < IRLS_ITERS; iter++) {
+                      // Build weighted AtWA, AtWb.
+                      const AtWA: number[][] = Array.from({length: N}, () => new Array(N).fill(0));
+                      const AtWb: number[] = new Array(N).fill(0);
                       for (let i = 0; i < N; i++) {
-                          M[i][N + k] = c.sens[i];
-                          M[N + k][i] = c.sens[i];
+                          for (let j = 0; j < N; j++) {
+                              let s = 0;
+                              for (let ci = 0; ci < cols.length; ci++) {
+                                  const c = cols[ci];
+                                  s += colWeights[ci] * c.sens[i] * c.sens[j] / (c.cap * c.cap);
+                              }
+                              AtWA[i][j] = s;
+                          }
+                          let r = 0;
+                          for (let ci = 0; ci < cols.length; ci++) {
+                              const c = cols[ci];
+                              r += colWeights[ci] * c.sens[i] * c.tau0 / (c.cap * c.cap);
+                          }
+                          AtWb[i] = -r;
                       }
-                      RHS[N + k] = -c.tau0;
-                  }
-                  for (let b = 0; b < B; b++) {
+                      for (let i = 0; i < N; i++) AtWA[i][i] += 1e-8;
+
+                      // Force-balance rows (class 2 equality above). One
+                      // row per consRef i:
+                      //   row i:  Σ_j (n_i · n_j) λ_j = -(F_total · n_i)
+                      // These are weight-independent; rebuilt each iter
+                      // only because we're rebuilding the KKT matrix M.
+                      const Mm: number[][] = Array.from({length: dim}, () => new Array(dim).fill(0));
+                      const RHS: number[] = new Array(dim).fill(0);
                       for (let i = 0; i < N; i++) {
-                          M[i][N + H + b] = balanceRows[b][i];
-                          M[N + H + b][i] = balanceRows[b][i];
+                          for (let j = 0; j < N; j++) Mm[i][j] = AtWA[i][j];
+                          RHS[i] = AtWb[i];
                       }
-                      RHS[N + H + b] = balanceRhs[b];
+                      for (let k = 0; k < H; k++) {
+                          const c = cols[hingeFrozenIdx[k]];
+                          for (let i = 0; i < N; i++) {
+                              Mm[i][N + k] = c.sens[i];
+                              Mm[N + k][i] = c.sens[i];
+                          }
+                          RHS[N + k] = -c.tau0;
+                      }
+                      for (let i = 0; i < B; i++) {
+                          const ni = consRefs[i].n;
+                          for (let j = 0; j < N; j++) {
+                              const dotIJ = dotProduct(ni, consRefs[j].n);
+                              Mm[j][N + H + i] = dotIJ;
+                              Mm[N + H + i][j] = dotIJ;
+                          }
+                          RHS[N + H + i] = -dotProduct(totalAppliedForce, ni);
+                      }
+                      for (let k = 0; k < B; k++) Mm[N + H + k][N + H + k] += 1e-10;
+
+                      const sol = solveSmall(Mm, RHS);
+                      lam = sol.slice(0, N);
+
+                      if (iter === IRLS_ITERS - 1) break;
+
+                      // Update weights from current τ estimates. w_c =
+                      // max(|u_c|, eps)^(p-2). For p < 2 this is > 1 at
+                      // small u (punishes the near-zero columns less) and
+                      // < 1 at large u (relaxes them). The converged fixed
+                      // point is the minimizer of Σ (τ/cap)^p.
+                      for (let ci = 0; ci < cols.length; ci++) {
+                          const c = cols[ci];
+                          let newTau = c.tau0;
+                          for (let i = 0; i < N; i++) newTau += lam[i] * c.sens[i];
+                          const u = Math.abs(newTau / c.cap);
+                          const uSafe = Math.max(u, EPS_EFFORT);
+                          colWeights[ci] = Math.pow(uSafe, effortExponent - 2);
+                      }
                   }
-                  const sol = solveSmall(M, RHS);
-                  const lam = sol.slice(0, N);
 
                   // DEBUG: expose Phase B internals for console inspection.
                   // In the browser console, type `__phaseBDebug` and hit
@@ -2770,8 +2992,6 @@ const BioModelPage: React.FC = () => {
       const forceBones = new Set(currentForces.map(f => f.boneId));
       const constraintBones = new Set<string>();
       if (activeConstraints) {
-          // Only physics-enabled constraints contribute to the path-validity
-          // set; kinematic guides don't generate demand flow.
           for (const [bid, list] of Object.entries(activeConstraints) as [string, BoneConstraint[]][]) {
               if (list.some(c => c.active && c.physicsEnabled !== false)) constraintBones.add(bid);
           }
@@ -4192,9 +4412,9 @@ const BioModelPage: React.FC = () => {
   // has any forces configured. Tab-gate was removed for this reason.
   const torqueDistribution = useMemo<TorqueDistributionResult | null>(() => {
       if (forces.length === 0) return null;
-      return calculateTorqueDistribution(posture, twists, forces, jointCapacities, constraints, currentRomT);
+      return calculateTorqueDistribution(posture, twists, forces, jointCapacities, constraints, currentRomT, effortExponent);
       // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [posture, twists, forces, jointCapacities, constraints, jointLimits, currentRomT]);
+  }, [posture, twists, forces, jointCapacities, constraints, jointLimits, currentRomT, effortExponent]);
 
   // --- Muscle activation distribution ---
   //
@@ -4548,7 +4768,7 @@ const BioModelPage: React.FC = () => {
           else framesSkipped++;
 
           const dist = calculateTorqueDistribution(
-              framePose, frameTw, forces, jointCapacities, constraints, t
+              framePose, frameTw, forces, jointCapacities, constraints, t, effortExponent
           );
 
           // Per-frame profile: sum of torques (resistance, mechanical work)
@@ -4736,7 +4956,7 @@ const BioModelPage: React.FC = () => {
 
       return { peaks, limitingPeak, framesAnalyzed, framesSkipped, profile, actionSeries, musclePeaks, muscleSeries, limitingMuscle };
       // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, startPosture, endPosture, startTwists, endTwists, forces, constraints, jointCapacities, jointLimits, muscleAssignments]);
+  }, [activeTab, startPosture, endPosture, startTwists, endTwists, forces, constraints, jointCapacities, jointLimits, muscleAssignments, effortExponent]);
 
   const resolveKinematics = (boneId: string, proposedVector: Vector3, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } => {
       const projected = projectDirOntoConstraints(boneId, proposedVector, currentPosture, currentTwists);
@@ -5301,6 +5521,47 @@ const BioModelPage: React.FC = () => {
     setConstraints({});
   };
 
+  // Apply an exercise preset. Replaces the scene with the preset's poses,
+  // forces, and constraints — IDs are assigned here since presets are
+  // authored as pure data. The display pose is set to the start keyframe
+  // and the timeline cursor is rewound to 0 so the user sees the start
+  // position first. Symmetry mode is left as-is.
+  const applyPreset = (preset: ExercisePreset) => {
+    const sTwists = preset.startTwists || DEFAULT_TWISTS;
+    const eTwists = preset.endTwists || DEFAULT_TWISTS;
+    setStartPosture(preset.startPosture);
+    setEndPosture(preset.endPosture);
+    setStartTwists(sTwists);
+    setEndTwists(eTwists);
+    setPosture(preset.startPosture);
+    setTwists(sTwists);
+    setPoseMode('start');
+    setCurrentRomT(0);
+    setSelectedBone(null);
+    setTargetPos(null);
+    setTargetReferenceBone(null);
+    setIsPlaying(false);
+
+    const baseId = Date.now().toString();
+    const newForces: ForceConfig[] = preset.forces.map((f, i) => ({
+        ...f,
+        id: `${baseId}-f${i}`,
+    }));
+    setForces(newForces);
+
+    const newConstraints: Record<string, BoneConstraint[]> = {};
+    let cidx = 0;
+    for (const [bid, list] of Object.entries(preset.constraints)) {
+        newConstraints[bid] = list.map(c => ({
+            ...c,
+            id: `${baseId}-c${cidx++}`,
+            physicsEnabled: c.physicsEnabled !== false,
+        }));
+    }
+    setConstraints(newConstraints);
+    setEditingForceId(null);
+  };
+
   const handleBoneSelect = (boneId: string) => {
     if (selectedBone === boneId) {
         setSelectedBone(null);
@@ -5608,6 +5869,48 @@ const BioModelPage: React.FC = () => {
           <p className="text-gray-400 text-sm font-medium">Interactive Model</p>
         </div>
         <div className="flex gap-2">
+            {/* Exercise preset picker. Dropdown of common gym exercises —
+                each sets pose keyframes, forces, and constraints in one
+                click. Grouped by category (Push / Pull / Legs /
+                Isolation) for quick scanning. */}
+            <div className="relative" ref={presetMenuRef}>
+                <button
+                    onClick={() => setPresetMenuOpen(v => !v)}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors border shadow-sm ${presetMenuOpen ? 'bg-gray-100 border-gray-300' : 'bg-white border-gray-200 hover:bg-gray-50'} text-gray-600`}
+                    title="Load Exercise Preset"
+                >
+                    <Zap className="w-4 h-4" />
+                    <span className="text-xs font-bold uppercase tracking-wide hidden sm:inline">Presets</span>
+                    <ChevronDown className={`w-3 h-3 transition-transform ${presetMenuOpen ? 'rotate-180' : ''}`} />
+                </button>
+                {presetMenuOpen && (
+                    <div className="absolute right-0 top-full mt-1 w-80 bg-white border border-gray-200 rounded-xl shadow-lg z-20 max-h-[70vh] overflow-y-auto">
+                        {EXERCISE_PRESETS.length === 0 && (
+                            <div className="p-4 text-xs text-gray-400 text-center">
+                                No presets yet.
+                            </div>
+                        )}
+                        {(['Push', 'Pull', 'Legs', 'Isolation'] as const).map(category => {
+                            const inCat = EXERCISE_PRESETS.filter(p => p.category === category);
+                            if (inCat.length === 0) return null;
+                            return (
+                                <div key={category} className="p-2 border-b border-gray-100 last:border-b-0">
+                                    <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 px-2 pb-1">{category}</div>
+                                    {inCat.map(p => (
+                                        <button
+                                            key={p.id}
+                                            onClick={() => { applyPreset(p); setPresetMenuOpen(false); }}
+                                            className="w-full text-left px-2 py-2 rounded-lg hover:bg-indigo-50 transition-colors group"
+                                        >
+                                            <div className="text-sm font-bold text-gray-800 group-hover:text-indigo-700">{p.name}</div>
+                                        </button>
+                                    ))}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
             <button onClick={toggleSymmetry} className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors border shadow-sm ${symmetryMode ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`} title="Toggle Universal Mirroring">
                 <Split className="w-4 h-4" />
                 <span className="text-xs font-bold uppercase tracking-wide hidden sm:inline">Symmetry</span>
@@ -6574,15 +6877,24 @@ const BioModelPage: React.FC = () => {
                                                           <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                                                               <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
                                                           </div>
-                                                          {/* Per-action sparkline: proportion of joint's total force */}
-                                                          {series && series.torques.length > 1 && (
-                                                              <div className="mt-1 rounded overflow-hidden">
-                                                                  {renderSparkline(
-                                                                      series.torques.map((t, i) => jointTotalTorque[i] > 1e-9 ? t / jointTotalTorque[i] : 0),
-                                                                      lineColor, fillColor, 16
-                                                                  )}
-                                                              </div>
-                                                          )}
+                                                          {/* Per-action sparkline: normalized to the
+                                                              action's OWN peak across the ROM. Absolute
+                                                              magnitude + relative-to-other-actions info
+                                                              already lives in the header bar above; this
+                                                              graph is just for seeing WHERE each action
+                                                              peaks within the ROM. Normalizing to its own
+                                                              peak lets even small-magnitude actions fill
+                                                              the Y axis so the shape is readable. */}
+                                                          {series && series.torques.length > 1 && (() => {
+                                                              const proportions = series.torques.map((t, i) => jointTotalTorque[i] > 1e-9 ? t / jointTotalTorque[i] : 0);
+                                                              const peak = Math.max(...proportions, 1e-9);
+                                                              const normalized = proportions.map(v => v / peak);
+                                                              return (
+                                                                  <div className="mt-1 rounded overflow-hidden">
+                                                                      {renderSparkline(normalized, lineColor, fillColor, 16)}
+                                                                  </div>
+                                                              );
+                                                          })()}
                                                       </div>
                                                   );
                                               })}
@@ -6699,12 +7011,23 @@ const BioModelPage: React.FC = () => {
                                                           <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                                                               <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
                                                           </div>
-                                                          {/* Per-muscle activation sparkline across the timeline. */}
-                                                          {series && series.activations.length > 1 && (
-                                                              <div className="mt-1 rounded overflow-hidden">
-                                                                  {renderSparkline(series.activations, lineColor, fillColor, 16)}
-                                                              </div>
-                                                          )}
+                                                          {/* Per-muscle activation sparkline, normalized
+                                                              to the muscle's OWN peak across the ROM.
+                                                              Absolute peak + relative-to-other-muscles
+                                                              info already lives in the header bar above;
+                                                              this graph is just for seeing WHERE each
+                                                              muscle peaks within the ROM. Normalizing lets
+                                                              even lightly-recruited muscles fill the Y
+                                                              axis so the shape is readable. */}
+                                                          {series && series.activations.length > 1 && (() => {
+                                                              const peak = Math.max(...series.activations, 1e-9);
+                                                              const normalized = series.activations.map(v => v / peak);
+                                                              return (
+                                                                  <div className="mt-1 rounded overflow-hidden">
+                                                                      {renderSparkline(normalized, lineColor, fillColor, 16)}
+                                                                  </div>
+                                                              );
+                                                          })()}
                                                       </div>
                                                   );
                                               })}
@@ -6954,7 +7277,7 @@ const BioModelPage: React.FC = () => {
                        reduces the capacity of its agonist actions at the
                        OTHER joint (bounded by 15% per action). Flip off to
                        A/B-test effort distribution. */}
-                   <div className={`flex items-center justify-between px-4 py-3 rounded-xl border mb-6 ${biarticularCouplingEnabled ? 'bg-emerald-50 border-emerald-200' : 'bg-gray-50 border-gray-200'}`}>
+                   <div className={`flex items-center justify-between px-4 py-3 rounded-xl border mb-4 ${biarticularCouplingEnabled ? 'bg-emerald-50 border-emerald-200' : 'bg-gray-50 border-gray-200'}`}>
                        <div className="flex flex-col gap-0.5 min-w-0 mr-3">
                            <span className="text-xs font-bold uppercase tracking-wide text-gray-700">
                                Biarticular Coupling
@@ -6972,6 +7295,40 @@ const BioModelPage: React.FC = () => {
                        >
                            <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${biarticularCouplingEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
                        </button>
+                   </div>
+                   {/* Effort-exponent slider. p = 2 is the quadratic min-
+                       neural-drive norm (linear response to mechanical
+                       advantage); p < 2 concentrates demand on high-leverage
+                       joints so low-leverage synergists drop proportionally.
+                       p = 1 would be fully sparse (only the limiting joint
+                       loaded) but is unstable near F = 0, so the UI floor
+                       is 1.1. IRLS under the hood, ~5 iterations per solve. */}
+                   <div className="px-4 py-3 rounded-xl border bg-amber-50 border-amber-200 mb-6">
+                       <div className="flex items-center justify-between mb-2">
+                           <span className="text-xs font-bold uppercase tracking-wide text-gray-700">
+                               Effort Exponent (p)
+                           </span>
+                           <span className="text-xs font-mono font-bold text-amber-800 tabular-nums">
+                               {effortExponent.toFixed(2)}
+                           </span>
+                       </div>
+                       <input
+                           type="range"
+                           min={1.1}
+                           max={3.0}
+                           step={0.05}
+                           value={effortExponent}
+                           onChange={(e) => setEffortExponent(parseFloat(e.target.value))}
+                           className="w-full accent-amber-500"
+                       />
+                       <div className="flex items-center justify-between text-[10px] text-gray-500 mt-1 font-mono">
+                           <span>1.1 concentrated</span>
+                           <span>2.0 quadratic</span>
+                           <span>3.0 balanced</span>
+                       </div>
+                       <p className="text-[10px] text-amber-900/70 mt-2 leading-snug">
+                           Lower p punishes mechanically-disadvantaged joints harder — at 1RM the limiting joint still reads 100% but synergists drop faster. 1.5 is the default; try 1.25 for stronger differentiation.
+                       </p>
                    </div>
                    <div className="flex-1 overflow-y-auto pr-2 space-y-3">
                        {Object.entries(jointCapacities).map(([group, actions]) => {
