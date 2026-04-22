@@ -4,6 +4,9 @@ import BioMan, { Posture, Vector3, VisualForce, VisualPlane } from '../component
 import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, ChevronDown, BrainCircuit, Axis3d, Plus, Trash2, TrendingUp, Activity, Link2 } from 'lucide-react';
 
 const DEFAULT_POSTURE: Posture = {
+  // Spine is a unit direction from pelvis base to neck base. Default
+  // (0, -1, 0) = straight up (Y is down in world space).
+  spine: { x: 0, y: -1, z: 0 },
   lClavicle: { x: -25, y: 0, z: 0 },
   rClavicle: { x: 25, y: 0, z: 0 },
   lHumerus: { x: 0, y: 1, z: 0 },
@@ -54,6 +57,7 @@ const BONE_NAMES: Record<string, string> = {
 };
 
 const BONE_LENGTHS: Record<string, number> = {
+  spine: 60,  // matches CONFIG.TORSO_LEN in BioMan
   lClavicle: 25, rClavicle: 25,
   lHumerus: 44, lForearm: 39,
   rHumerus: 44, rForearm: 39,
@@ -1784,17 +1788,44 @@ const BioModelPage: React.FC = () => {
     const jointFrames: Record<string, Frame> = {};
 
     const pelvisPos = { x: 0, y: CONFIG.TORSO_LEN / 2, z: 0 };
-    const neckBase = { x: 0, y: -CONFIG.TORSO_LEN / 2, z: 0 };
+    // Spine is a user-editable direction. Neck base sits at
+    // pelvis + spine_direction × spine_length.
+    const spineDirRaw = currentPosture['spine'] || { x: 0, y: -1, z: 0 };
+    const spineMag = Math.sqrt(spineDirRaw.x * spineDirRaw.x + spineDirRaw.y * spineDirRaw.y + spineDirRaw.z * spineDirRaw.z) || 1;
+    const spineDir = { x: spineDirRaw.x / spineMag, y: spineDirRaw.y / spineMag, z: spineDirRaw.z / spineMag };
+    const neckBase = {
+        x: pelvisPos.x + spineDir.x * CONFIG.TORSO_LEN,
+        y: pelvisPos.y + spineDir.y * CONFIG.TORSO_LEN,
+        z: pelvisPos.z + spineDir.z * CONFIG.TORSO_LEN,
+    };
     locations['Spine'] = pelvisPos;
 
     boneStartPoints['spine'] = pelvisPos;
     boneEndPoints['spine'] = neckBase;
 
+    const rootFrame = createRootFrame({x: 0, y: 1, z: 0});
+    // Spine frame — torso-down direction, used as the parent frame for
+    // the whole upper body (clavicles, arms). Legs continue to parent
+    // off rootFrame (hanging off the fixed pelvis).
+    const spineFrame = createRootFrame({ x: -spineDir.x, y: -spineDir.y, z: -spineDir.z });
+
+    // Clavicle offsets are stored in TORSO-LOCAL coordinates; transform
+    // through spineFrame to get world-space shoulder positions.
     const lClavOffset = currentPosture['lClavicle'] || { x: -25, y: 0, z: 0 };
     const rClavOffset = currentPosture['rClavicle'] || { x: 25, y: 0, z: 0 };
+    const lClavOffsetWorld = {
+        x: lClavOffset.x * spineFrame.x.x + lClavOffset.y * spineFrame.y.x + lClavOffset.z * spineFrame.z.x,
+        y: lClavOffset.x * spineFrame.x.y + lClavOffset.y * spineFrame.y.y + lClavOffset.z * spineFrame.z.y,
+        z: lClavOffset.x * spineFrame.x.z + lClavOffset.y * spineFrame.y.z + lClavOffset.z * spineFrame.z.z,
+    };
+    const rClavOffsetWorld = {
+        x: rClavOffset.x * spineFrame.x.x + rClavOffset.y * spineFrame.y.x + rClavOffset.z * spineFrame.z.x,
+        y: rClavOffset.x * spineFrame.x.y + rClavOffset.y * spineFrame.y.y + rClavOffset.z * spineFrame.z.y,
+        z: rClavOffset.x * spineFrame.x.z + rClavOffset.y * spineFrame.y.z + rClavOffset.z * spineFrame.z.z,
+    };
 
-    locations['lShoulder'] = { x: neckBase.x + lClavOffset.x, y: neckBase.y + lClavOffset.y, z: neckBase.z + lClavOffset.z };
-    locations['rShoulder'] = { x: neckBase.x + rClavOffset.x, y: neckBase.y + rClavOffset.y, z: neckBase.z + rClavOffset.z };
+    locations['lShoulder'] = { x: neckBase.x + lClavOffsetWorld.x, y: neckBase.y + lClavOffsetWorld.y, z: neckBase.z + lClavOffsetWorld.z };
+    locations['rShoulder'] = { x: neckBase.x + rClavOffsetWorld.x, y: neckBase.y + rClavOffsetWorld.y, z: neckBase.z + rClavOffsetWorld.z };
 
     boneStartPoints['lClavicle'] = neckBase;
     boneStartPoints['rClavicle'] = neckBase;
@@ -1804,12 +1835,11 @@ const BioModelPage: React.FC = () => {
     locations['lHip'] = { x: -CONFIG.HIP_WIDTH, y: pelvisPos.y, z: 0 };
     locations['rHip'] = { x: CONFIG.HIP_WIDTH, y: pelvisPos.y, z: 0 };
 
-    const rootFrame = createRootFrame({x: 0, y: 1, z: 0});
     jointFrames['spine'] = rootFrame;
-    jointFrames['lClavicle'] = rootFrame;
-    jointFrames['rClavicle'] = rootFrame;
-    jointFrames['lShoulder'] = rootFrame;
-    jointFrames['rShoulder'] = rootFrame;
+    jointFrames['lClavicle'] = spineFrame;
+    jointFrames['rClavicle'] = spineFrame;
+    jointFrames['lShoulder'] = spineFrame;
+    jointFrames['rShoulder'] = spineFrame;
     jointFrames['lHip'] = rootFrame;
     jointFrames['rHip'] = rootFrame;
 
@@ -1863,8 +1893,8 @@ const BioModelPage: React.FC = () => {
 
     calculateChain('lFemur', 'lTibia', 'lFoot', locations['lHip'], rootFrame, BONE_LENGTHS.lFemur, BONE_LENGTHS.lTibia, BONE_LENGTHS.lFoot);
     calculateChain('rFemur', 'rTibia', 'rFoot', locations['rHip'], rootFrame, BONE_LENGTHS.rFemur, BONE_LENGTHS.rTibia, BONE_LENGTHS.rFoot);
-    calculateChain('lHumerus', 'lForearm', '', locations['lShoulder'], rootFrame, BONE_LENGTHS.lHumerus, BONE_LENGTHS.lForearm, 0);
-    calculateChain('rHumerus', 'rForearm', '', locations['rShoulder'], rootFrame, BONE_LENGTHS.rHumerus, BONE_LENGTHS.rForearm, 0);
+    calculateChain('lHumerus', 'lForearm', '', locations['lShoulder'], spineFrame, BONE_LENGTHS.lHumerus, BONE_LENGTHS.lForearm, 0);
+    calculateChain('rHumerus', 'rForearm', '', locations['rShoulder'], spineFrame, BONE_LENGTHS.rHumerus, BONE_LENGTHS.rForearm, 0);
 
     return { locations, boneEndPoints, boneStartPoints, jointFrames };
   };
@@ -6344,13 +6374,7 @@ const BioModelPage: React.FC = () => {
                     <div className="flex-1 space-y-8 overflow-y-auto pr-1">
                         <div className="flex items-center justify-between"><span className="font-bold text-gray-900 text-sm">{BONE_NAMES[selectedBone]}</span><span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{poseMode === 'start' ? 'Start' : 'End'} Editing</span></div>
 
-                        {selectedBone === 'spine' ? (
-                            <div className="flex flex-col items-center justify-center border-2 border-dashed border-gray-100 rounded-xl py-8 px-4">
-                                <ArrowDownUp className="w-8 h-8 text-gray-300 mb-2" />
-                                <p className="text-xs font-bold text-gray-400 text-center uppercase tracking-wide">Passive Spine</p>
-                                <p className="text-[10px] text-gray-300 text-center mt-1 leading-relaxed">No direct controls. Torque demands at the spine are detected from forces in the chain.</p>
-                            </div>
-                        ) : isHinge ? (
+                        {isHinge ? (
                             <div>
                                 {(() => {
                                     const cfg = getHingeConfig(selectedBone);

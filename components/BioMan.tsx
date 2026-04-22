@@ -284,7 +284,7 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
         }
       });
       
-      if (isSelected && !targetPos && id !== 'spine') {
+      if (isSelected && !targetPos) {
          items.push({
             type: 'circle',
             id: `${id}-end`,
@@ -350,9 +350,20 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
     };
 
     // --- KINEMATICS GENERATION ---
-    const neckBase = { x: 0, y: -CONFIG.TORSO_LEN / 2, z: 0 };
+    // Pelvis is anchored (kinematic root). The spine is a unit-direction
+    // bone pivoting at the pelvis and pointing toward the neck — default
+    // {x:0, y:-1, z:0} (straight up, since Y is down in world). Drawing
+    // the spine from pelvis to neck means the selected-bone dot lands at
+    // the NECK (the end of the line), which is the user-draggable target.
     const pelvisBase = { x: 0, y: CONFIG.TORSO_LEN / 2, z: 0 };
-    addLine('spine', neckBase, pelvisBase, 12);
+    const spineDirRaw = posture['spine'] || { x: 0, y: -1, z: 0 };
+    const spineDir = normalize(spineDirRaw);
+    const neckBase = {
+        x: pelvisBase.x + spineDir.x * CONFIG.TORSO_LEN,
+        y: pelvisBase.y + spineDir.y * CONFIG.TORSO_LEN,
+        z: pelvisBase.z + spineDir.z * CONFIG.TORSO_LEN,
+    };
+    addLine('spine', pelvisBase, neckBase, 12);
 
     const lHipBase = { x: -20, y: pelvisBase.y, z: 0 };
     const rHipBase = { x: 20, y: pelvisBase.y, z: 0 };
@@ -404,19 +415,39 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
 
     const rootFrame = createRootFrame({x:0, y:1, z:0});
 
-    // Dynamic Clavicles
+    // Spine-aligned frame for the upper body. The spine direction points
+    // from pelvis to neck, so the torso's "down" direction (what a bone
+    // with local-y = 1 hangs along) is the NEGATED spine direction. When
+    // the spine is straight up (default), spineFrame == rootFrame.
+    // When the spine tilts, the clavicles + arms rotate together with
+    // the torso, keeping their same relative angle to the spine.
+    const spineFrame = createRootFrame({ x: -spineDir.x, y: -spineDir.y, z: -spineDir.z });
+
+    // Dynamic Clavicles — offsets are stored in TORSO-LOCAL space and
+    // transformed through spineFrame so they tilt with the torso.
     const lClavOffset = posture['lClavicle'] || { x: -25, y: 0, z: 0 };
     const rClavOffset = posture['rClavicle'] || { x: 25, y: 0, z: 0 };
+    const lClavOffsetWorld = {
+        x: lClavOffset.x * spineFrame.x.x + lClavOffset.y * spineFrame.y.x + lClavOffset.z * spineFrame.z.x,
+        y: lClavOffset.x * spineFrame.x.y + lClavOffset.y * spineFrame.y.y + lClavOffset.z * spineFrame.z.y,
+        z: lClavOffset.x * spineFrame.x.z + lClavOffset.y * spineFrame.y.z + lClavOffset.z * spineFrame.z.z,
+    };
+    const rClavOffsetWorld = {
+        x: rClavOffset.x * spineFrame.x.x + rClavOffset.y * spineFrame.y.x + rClavOffset.z * spineFrame.z.x,
+        y: rClavOffset.x * spineFrame.x.y + rClavOffset.y * spineFrame.y.y + rClavOffset.z * spineFrame.z.y,
+        z: rClavOffset.x * spineFrame.x.z + rClavOffset.y * spineFrame.y.z + rClavOffset.z * spineFrame.z.z,
+    };
 
-    const lShoulderPos = { x: neckBase.x + lClavOffset.x, y: neckBase.y + lClavOffset.y, z: neckBase.z + lClavOffset.z };
-    const rShoulderPos = { x: neckBase.x + rClavOffset.x, y: neckBase.y + rClavOffset.y, z: neckBase.z + rClavOffset.z };
+    const lShoulderPos = { x: neckBase.x + lClavOffsetWorld.x, y: neckBase.y + lClavOffsetWorld.y, z: neckBase.z + lClavOffsetWorld.z };
+    const rShoulderPos = { x: neckBase.x + rClavOffsetWorld.x, y: neckBase.y + rClavOffsetWorld.y, z: neckBase.z + rClavOffsetWorld.z };
 
     addLine('lClavicle', neckBase, lShoulderPos);
     addLine('rClavicle', neckBase, rShoulderPos);
 
-    // Dynamic Limbs
-    const lArm = buildLimb('lHumerus', 'lForearm', '', lShoulderPos, rootFrame, CONFIG.HUMERUS_LEN, CONFIG.FOREARM_LEN, 0);
-    const rArm = buildLimb('rHumerus', 'rForearm', '', rShoulderPos, rootFrame, CONFIG.HUMERUS_LEN, CONFIG.FOREARM_LEN, 0);
+    // Dynamic Limbs — arms parent off spineFrame (tilt with torso),
+    // legs parent off rootFrame (hang off fixed pelvis).
+    const lArm = buildLimb('lHumerus', 'lForearm', '', lShoulderPos, spineFrame, CONFIG.HUMERUS_LEN, CONFIG.FOREARM_LEN, 0);
+    const rArm = buildLimb('rHumerus', 'rForearm', '', rShoulderPos, spineFrame, CONFIG.HUMERUS_LEN, CONFIG.FOREARM_LEN, 0);
     const lLeg = buildLimb('lFemur', 'lTibia', 'lFoot', lHipBase, rootFrame, CONFIG.FEMUR_LEN, CONFIG.TIBIA_LEN, CONFIG.FOOT_LEN);
     const rLeg = buildLimb('rFemur', 'rTibia', 'rFoot', rHipBase, rootFrame, CONFIG.FEMUR_LEN, CONFIG.TIBIA_LEN, CONFIG.FOOT_LEN);
 
@@ -595,17 +626,18 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
         });
     };
 
+    if (selectedBone === 'spine') addControls('spine', rootFrame);
     if (lLeg.frame1 && selectedBone === 'lFemur') addControls('lFemur', rootFrame);
     if (lLeg.frame1 && selectedBone === 'lTibia') addControls('lTibia', lLeg.frame1);
     if (lLeg.frame2 && selectedBone === 'lFoot') addControls('lFoot', lLeg.frame2);
     if (rLeg.frame1 && selectedBone === 'rFemur') addControls('rFemur', rootFrame);
     if (rLeg.frame1 && selectedBone === 'rTibia') addControls('rTibia', rLeg.frame1);
     if (rLeg.frame2 && selectedBone === 'rFoot') addControls('rFoot', rLeg.frame2);
-    if (selectedBone === 'lClavicle') addControls('lClavicle', rootFrame);
-    if (selectedBone === 'rClavicle') addControls('rClavicle', rootFrame);
-    if (lArm.frame1 && selectedBone === 'lHumerus') addControls('lHumerus', rootFrame);
+    if (selectedBone === 'lClavicle') addControls('lClavicle', spineFrame);
+    if (selectedBone === 'rClavicle') addControls('rClavicle', spineFrame);
+    if (lArm.frame1 && selectedBone === 'lHumerus') addControls('lHumerus', spineFrame);
     if (lArm.frame1 && selectedBone === 'lForearm') addControls('lForearm', lArm.frame1);
-    if (rArm.frame1 && selectedBone === 'rHumerus') addControls('rHumerus', rootFrame);
+    if (rArm.frame1 && selectedBone === 'rHumerus') addControls('rHumerus', spineFrame);
     if (rArm.frame1 && selectedBone === 'rForearm') addControls('rForearm', rArm.frame1);
 
     return items.sort((a, b) => {
