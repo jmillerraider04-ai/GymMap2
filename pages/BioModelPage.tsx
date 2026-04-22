@@ -759,71 +759,76 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // in the app and re-capture.
 
     'Shoulder.flexion': {
-        'delt-front':        m(84, 36, 30, 1.15),
-        'pec-clavicular':    m(0, 63, 37, 2),
-        'biceps-brachii':    m(16, 55, 60, 1.6),  // merged from long + short, bases & peaks summed
-        'traps-lower':       m(-5, 32, 140, 2.2),
-        'serratus-anterior': m(-5, 28, 140, 2.2),
-        'supraspinatus':     m(-2, 18, 15, 2.5),
-        'pec-sternal':       m(0, 19, -65, 5),
+        // Calibration range: -60° to 180° (flexion frame).
+        'delt-front':        m(1.024, 0.439, 30, 1.15),   // inverted bell preserved; effective max ≈ 1.0 at +180°
+        'pec-clavicular':    m(0, 1.0, 37, 2),
+        'delt-side':         m(0.12, 0.6, 120, 2),
+        'traps-lower':       m(-0.094, 0.6, 140, 2.2),
+        'serratus-anterior': m(-0.107, 0.6, 140, 2.2),
+        'biceps-brachii':    m(0.117, 0.4, 60, 1.6),
+        'traps-upper':       m(0.08, 0.4, 150, 2),
     },
     'Shoulder.extension': {
-        'lats':           m(-87, 105, -67, 1.05),
-        'teres-major':    m(-15, 68, -60, 1.7),
-        'pec-sternal':    m(-12, 87, -169, 3.35),
-        'delt-rear':      m(27, 42, -20, 2.95),
-        'triceps-long':   m(-5, 72, -86, 2.6),
-        'rhomboids':      m(8, 18, -60),
+        // Calibration range: -180° to 60° (flexion frame negated).
+        'lats':           m(-0.83, 1.0, -67, 1.05),
+        'teres-major':    m(-0.221, 1.0, -60, 1.7),
+        'delt-rear':      m(0.643, 1.0, -20, 2.95),
+        'pec-sternal':    m(-0.138, 1.0, -169, 3.35),
+        'triceps-long':   m(-0.056, 0.8, -86, 2.6),
+        'rhomboids':      m(0.222, 0.5, -60, 1),
     },
     'Shoulder.abduction': {
-        'delt-side':         m(31, 79, 72, 2.75),
-        'supraspinatus':     m(15, 70, 15, 2.2),
-        'delt-front':        m(10, 81, 180, 1.9),
-        'traps-lower':       m(-3, 41, 130, 3.2),
-        'serratus-anterior': m(-3, 40, 130, 3.2),
-        'biceps-brachii':    m(-2, 15, 120, 2),  // only long head contributes, retained under merged id
+        // Calibration range: 0° to 180° (abduction frame).
+        'delt-side':         m(0.392, 1.0, 72, 2.75),
+        'supraspinatus':     m(0.214, 1.0, 15, 2.2),
+        'traps-lower':       m(-0.044, 0.6, 130, 3.2),
+        'serratus-anterior': m(-0.045, 0.6, 130, 3.2),
+        'delt-front':        m(0.074, 0.6, 180, 1.9),
+        'traps-upper':       m(0.04, 0.4, 150, 2),
+        'biceps-brachii':    m(-0.040, 0.3, 120, 2),
     },
     'Shoulder.adduction': {
-        'lats':           m(-11, 118, -81, 2.5),
-        'teres-major':    m(-5, 80, -80, 1.6),
-        'pec-sternal':    m(36, 23, -35, 5),
-        'pec-clavicular': m(-8, 13, 16, 2.5),
-        'subscapularis':  m(-2, 34, -82, 2.55),
-        'triceps-long':   m(1, 42, -107, 2.2),
-        'delt-rear':      m(2, 19, -120, 1.8),
-        'rhomboids':      m(9, 26, -75, 1.45),
+        // Calibration range: -180° to 0° (abduction frame negated).
+        'lats':           m(-0.093, 1.0, -81, 2.5),
+        'teres-major':    m(-0.0625, 1.0, -80, 1.6),
+        'triceps-long':   m(0.019, 0.8, -107, 2.2),
+        'pec-sternal':    m(0.8, 0.511, -35, 5),          // inverted bell preserved
+        'delt-rear':      m(0.063, 0.6, -120, 1.8),
+        'rhomboids':      m(0.138, 0.4, -75, 1.45),
     },
     'Shoulder.horizontalAdduction': {
-        'pec-sternal':       m(20, 118, 70, 1.5),
-        'pec-clavicular':    m(-5, 70, 40, 2),
-        'delt-front':        m(2, 79, 56, 2.6),
-        'biceps-brachii':    m(-2, 61, 60, 1.8),  // merged long + short, peaks summed
-        'subscapularis':     m(0, 33, 30, 1.8),
-        'serratus-anterior': m(0, 28, 60, 1.8),
+        // Calibration range: -45° to 135° (hAdd frame; neg = behind body).
+        'pec-sternal':       m(0.169, 1.0, 70, 1.5),
+        'delt-front':        m(0.023, 0.9, 56, 2.6),
+        'pec-clavicular':    m(-0.050, 0.7, 40, 2),
+        'serratus-anterior': m(0, 0.5, 60, 1.8),
+        'pec-minor':         m(0.1, 0.5, 60, 2),
+        'biceps-brachii':    m(-0.01, 0.3, 60, 1.8),
     },
     'Shoulder.horizontalAbduction': {
-        'delt-rear':     m(5, 120, 15, 1.8),
-        'infraspinatus': m(-5, 82, 0, 2),
-        'teres-minor':   m(-5, 70, 0, 2),
-        'teres-major':   m(0, 22, 15, 1.8),
-        'lats':          m(-2, 20, 30, 2),
-        'triceps-long':  m(-5, 52, 25, 2.2),
-        'rhomboids':     m(13, 36, 25, 2.5),
+        // Calibration range: -135° to 45° (hAdd frame negated).
+        'delt-rear':     m(0.042, 1.0, 15, 1.8),
+        'infraspinatus': m(-0.061, 1.0, 0, 2),
+        'teres-minor':   m(-0.071, 1.0, 0, 2),
+        'rhomboids':     m(0.181, 0.5, 25, 2.5),
+        'lats':          m(-0.05, 0.5, 30, 2),
     },
     'Shoulder.internalRotation': {
-        'subscapularis':  m(30, 105, 15, 1.5),
-        'lats':           m(15, 80, -5, 1.3),
-        'pec-sternal':    m(12, 70, 0, 1.3),
-        'teres-major':    m(12, 65, 0, 1.3),
-        'delt-front':     m(8, 42, 15, 1.4),
-        'pec-clavicular': m(5, 30, 0, 1.4),
-        'biceps-brachii': m(2, 16, 0, 1.5),  // only short head contributes, retained under merged id
+        // Calibration range: -90° to 70° (ER frame negated).
+        'subscapularis':  m(0.286, 1.0, 15, 1.5),
+        'pec-sternal':    m(0.171, 1.0, 0, 1.3),
+        'lats':           m(0.188, 1.0, -5, 1.3),
+        'teres-major':    m(0.185, 1.0, 0, 1.3),
+        'delt-front':     m(0.152, 0.8, 15, 1.4),
+        'pec-clavicular': m(0.133, 0.8, 0, 1.4),
+        'biceps-brachii': m(0.0625, 0.5, 0, 1.5),
     },
     'Shoulder.externalRotation': {
-        'infraspinatus': m(25, 105, 10, 1.5),
-        'teres-minor':   m(18, 92, 10, 1.5),
-        'delt-rear':     m(10, 58, 0, 1.4),
-        'supraspinatus': m(2, 20, 0, 1.6),
+        // Calibration range: -70° to 90° (ER frame).
+        'infraspinatus': m(0.238, 1.0, 10, 1.5),
+        'teres-minor':   m(0.196, 1.0, 10, 1.5),
+        'delt-rear':     m(0.103, 0.6, 0, 1.4),
+        'supraspinatus': m(0.04, 0.4, 0, 1.6),
     },
 
     // =========================================================================
@@ -836,13 +841,15 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // at negative = muscle strong when elbow bent (stretched).
 
     'Elbow.flexion': {
-        'biceps-brachii':  m(47, 210, 45, 1.5),  // merged long + short, peak-weighted angle ≈ 45°
-        'brachialis':      m(50, 100, 90, 0.85),
-        'brachioradialis': m(5, 95, 120, 0.55),
+        // Calibration range: 0° to 145°.
+        'biceps-brachii':  m(0.224, 1.0, 45, 1.5),
+        'brachialis':      m(0.5, 1.0, 90, 0.85),
+        'brachioradialis': m(0.053, 1.0, 120, 0.55),
     },
     'Elbow.extension': {
-        'triceps-long':           m(-5, 169, -100, 1.4),
-        'triceps-lateral-medial': m(115, 184, -53, 0.85),  // merged lateral + medial
+        // Calibration range: -145° to 0°.
+        'triceps-long':           m(-0.030, 1.0, -100, 1.4),
+        'triceps-lateral-medial': m(0.625, 1.0, -53, 0.85),
     },
 
     // =========================================================================
@@ -854,60 +861,60 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // Adduction: 0=standing, -30-ish=leg abducted.
 
     'Hip.flexion': {
-        'iliopsoas':       m(15, 120, 100, 2.2),
-        'rectus-femoris':  m(10, 100, 30, 2),
-        'tfl':             m(5, 72, 15, 1.7),
-        'sartorius':       m(8, 50, 60, 1.4),
-        'adductors':       m(0, 157, 4, 1.9),  // merged pectineus + longus + brevis + gracilis; anterior magnus doesn't flex
-        'glute-med':       m(0, 18, 15, 1.8),
-        'glute-min':       m(0, 13, 15, 1.8),
+        // Calibration range: -20° to 120° (flexion frame).
+        'iliopsoas':       m(0.125, 1.0, 100, 2.2),
+        'rectus-femoris':  m(0.1, 1.0, 30, 2),
+        'tfl':             m(0.056, 0.8, 15, 1.7),
+        'sartorius':       m(0.128, 0.8, 60, 1.4),
     },
     'Hip.extension': {
-        'glute-max':                 m(55, 150, -15, 3.15),
-        'hamstrings-biarticular':    m(30, 300, -54, 0.5),  // merged BF-long + semiten + semimem
-        'adductor-magnus-posterior': m(-16, 132, -100),
-        'glute-med':                 m(10, 25, 0),
-        'glute-min':                 m(6, 15, 0),
+        // Calibration range: -120° to 20° (flexion frame negated).
+        'glute-max':                 m(0.367, 1.0, -15, 3.15),
+        'hamstrings-biarticular':    m(0.1, 1.0, -54, 0.5),
+        'adductor-magnus-posterior': m(-0.121, 1.0, -100, 1),
+        'glute-med':                 m(0.16, 0.4, 0, 1),
+        'glute-min':                 m(0.12, 0.3, 0, 1),
     },
     'Hip.abduction': {
-        'glute-med': m(20, 125, 30, 1.5),
-        'glute-min': m(15, 88, 30, 1.5),
-        'tfl':       m(12, 72, 15, 1.6),
-        'glute-max': m(7, 41, 30, 1.8),
-        'sartorius': m(2, 24, 0, 1.8),
+        // Calibration range: -30° to 45° (abduction frame).
+        'glute-med': m(0.16, 1.0, 30, 1.5),
+        'glute-min': m(0.17, 1.0, 30, 1.5),
+        'tfl':       m(0.133, 0.8, 15, 1.6),
+        'sartorius': m(0.042, 0.5, 0, 1.8),
     },
     'Hip.adduction': {
-        'adductors':                 m(40, 335, -16, 1.4),  // merged anterior magnus + longus + brevis + gracilis + pectineus
-        'adductor-magnus-posterior': m(5, 32, -30, 1.5),
-        'hamstrings-biarticular':    m(0, 27, 0, 1.6),  // merged semitend + semimem
-    },
-    'Hip.horizontalAdduction': {
-        'adductors':                 m(45, 388, 42, 1.4),  // merged anterior magnus + longus + brevis + gracilis + pectineus
-        'adductor-magnus-posterior': m(3, 26, 45, 1.5),
-        'iliopsoas':                 m(5, 50, 60, 1.5),
-        'sartorius':                 m(0, 18, 45, 1.6),
+        // Calibration range: -45° to 30° (abduction frame negated).
+        'adductors':                 m(0.119, 1.0, -16, 1.4),
+        'adductor-magnus-posterior': m(0.156, 1.0, -30, 1.5),
     },
     'Hip.horizontalAbduction': {
-        'glute-med': m(10, 88, 0, 1.4),
-        'tfl':       m(8, 62, 0, 1.4),
-        'glute-min': m(6, 56, 0, 1.5),
-        'glute-max': m(3, 56, 0, 1.6),
-        'sartorius': m(0, 15, 0, 1.7),
+        // Calibration range: -30° to 45° (hAbd frame; neg = cross-body).
+        'glute-med': m(0.114, 1.0, 0, 1.4),
+        'glute-min': m(0.107, 1.0, 0, 1.5),
+        'glute-max': m(0.038, 0.7, 0, 1.6),
+        'tfl':       m(0.052, 0.4, 0, 1.4),
     },
-    'Hip.internalRotation': {
-        'glute-med':              m(10, 78, 0, 1.4),
-        'glute-min':              m(8, 68, 0, 1.4),
-        'tfl':                    m(8, 62, 0, 1.4),
-        'adductors':              m(9, 112, 0, 1.5),  // merged longus + brevis + pectineus (anterior magnus doesn't IR)
-        'hamstrings-biarticular': m(0, 48, 0, 1.6),   // merged semitend + semimem
+    'Hip.horizontalAdduction': {
+        // Calibration range: -45° to 30° (hAbd frame negated).
+        'adductors':                 m(0.117, 1.013, 42, 1.4),   // peak OUTSIDE range; effective max at edge
+        'adductor-magnus-posterior': m(0.095, 0.819, 45, 1.5),   // peak OUTSIDE range
     },
     'Hip.externalRotation': {
-        'glute-max':              m(25, 108, 0, 1.2),
-        'sartorius':              m(8, 50, 0, 1.4),
-        'glute-med':              m(10, 56, 0, 1.4),
-        'glute-min':              m(6, 36, 0, 1.4),
-        'hamstrings-biarticular': m(2, 26, 0, 1.5),  // only BF-long ER'd; retained under merged id
-        'iliopsoas':              m(0, 22, 0, 1.7),
+        // Calibration range: -35° to 45° (ER frame).
+        'glute-max':                 m(0.231, 1.0, 0, 1.2),
+        'glute-med':                 m(0.179, 1.0, 0, 1.4),
+        'sartorius':                 m(0.128, 0.8, 0, 1.4),
+        'adductor-magnus-posterior': m(0.15, 0.8, 0, 1.5),       // NEW — stretch-position ER assist
+        'biceps-femoris-short':      m(0.1, 0.6, 0, 1.5),        // NEW — per user spec
+        'glute-min':                 m(0.1, 0.6, 0, 1.4),
+    },
+    'Hip.internalRotation': {
+        // Calibration range: -45° to 35° (ER frame negated).
+        'tfl':                    m(0.129, 1.0, 0, 1.4),
+        'glute-min':              m(0.118, 1.0, 0, 1.4),
+        'glute-med':              m(0.128, 1.0, 0, 1.4),
+        'adductors':              m(0.048, 0.6, 0, 1.5),
+        'hamstrings-biarticular': m(0, 0.4, 0, 1.6),
     },
 
     // =========================================================================
@@ -919,18 +926,16 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // Knee.extension: 0=straight, -160=full flex (stretched quads).
 
     'Knee.flexion': {
-        'hamstrings-biarticular': m(28, 259, 70, 1.4),  // merged BF-long + semiten + semimem
-        'biceps-femoris-short':   m(36, 111, 11, 1.5),
-        'gastrocnemius':          m(2, 56, 15, 4.15),
-        'sartorius':              m(2, 26, 60, 1.6),
-        // Gracilis intentionally omitted: adductor contribution to knee
-        // flexion is insignificant vs. the actual knee flexors.
-        'tfl':                    m(0, 14, 30, 2),
+        // Calibration range: 0° to 140°.
+        'hamstrings-biarticular': m(0.108, 1.0, 70, 1.4),
+        'biceps-femoris-short':   m(0.324, 1.0, 11, 1.5),
+        'gastrocnemius':          m(0.025, 0.7, 15, 4.15),
+        'sartorius':              m(0.038, 0.5, 60, 1.6),
     },
     'Knee.extension': {
-        'quads-vasti':    m(60, 375, -120, 0.25),  // merged lateralis + medialis + intermedius
-        'rectus-femoris': m(20, 123, -180, 0.25),
-        'tfl':            m(0, 14, -120, 0.25),
+        // Calibration range: -140° to 0°.
+        'quads-vasti':    m(0.16, 1.0, -120, 0.25),
+        'rectus-femoris': m(0.167, 1.026, -180, 0.25),   // peak OUTSIDE range; declared peak inflated
     },
 
     // =========================================================================
@@ -938,15 +943,13 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // =========================================================================
 
     'Ankle.dorsiFlexion': {
-        'tibialis-anterior': m(40, 105, 10),
-        // EHL, EDL, peroneus tertius (not in catalog) assist.
+        // Calibration range: -50° to 20° (DF frame).
+        'tibialis-anterior': m(0.381, 1.0, 10, 1),
     },
     'Ankle.plantarFlexion': {
-        // Tight bells (steepness 5) so each muscle owns its zone sharply:
-        // gastroc dominates the PF side, soleus the DF side.
-        'gastrocnemius': m(0, 151, -30, 5),
-        'soleus':        m(25, 140, 8, 5),
-        // Tibialis posterior + peroneals (not in catalog) contribute.
+        // Calibration range: -20° to 50° (PF frame; neg = DF-stretched).
+        'gastrocnemius': m(0, 1.04, -30, 5),     // peak OUTSIDE range; slightly inflated
+        'soleus':        m(0.179, 1.0, 8, 5),
     },
 
     // =========================================================================
@@ -956,54 +959,53 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // passive), so peak angle = 0 gives full weight and ratios matter.
 
     'Spine.flexion': {
-        'rectus-abdominis':  m(40, 115, 0),
-        'obliques-external': m(25, 75, 0),
-        'obliques-internal': m(25, 75, 0),
-        // Psoas pulls the lumbar spine forward when the femurs are fixed.
-        'iliopsoas':         m(10, 25, 0),
+        // Calibration range: -30° to 80°.
+        'rectus-abdominis':  m(0.348, 1.0, 0, 1),
+        'obliques-external': m(0.267, 0.8, 0, 1),
+        'obliques-internal': m(0.267, 0.8, 0, 1),
+        'iliopsoas':         m(0.2, 0.5, 0, 1),
     },
     'Spine.extension': {
-        'erector-spinae':     m(50, 135, 0),
-        'quadratus-lumborum': m(20, 50, 0),
-        // Lats assist trunk extension via thoracolumbar fascia.
-        'lats':               m(8, 20, 0),
-        // Glute max indirectly via anterior pelvic tilt counter-action; small.
-        'glute-max':          m(4, 10, 0),
+        // Calibration range: -80° to 30°.
+        'erector-spinae':     m(0.37, 1.0, 0, 1),
+        'quadratus-lumborum': m(0.28, 0.7, 0, 1),
+        'traps-mid':          m(0.2, 0.7, 0, 1),     // NEW — thoracic extension assist
+        'traps-lower':        m(0.2, 0.7, 0, 1),     // NEW — thoracic extension assist
+        'glute-max':          m(0.2, 0.5, 0, 1),
     },
     'Spine.lateralFlexionL': {
-        'obliques-external':  m(30, 85, 0),
-        'obliques-internal':  m(30, 85, 0),
-        'quadratus-lumborum': m(30, 85, 0),
-        'erector-spinae':     m(25, 65, 0),
-        'lats':               m(10, 22, 0),
-        'iliopsoas':          m(8, 18, 0),
-        // Rectus abdominis contributes to lateral flexion too (flexes +
-        // laterally flexes).
-        'rectus-abdominis':   m(8, 20, 0),
+        // Calibration range: -35° to 35°.
+        'obliques-external':  m(0.353, 1.0, 0, 1),
+        'obliques-internal':  m(0.353, 1.0, 0, 1),
+        'quadratus-lumborum': m(0.353, 1.0, 0, 1),
+        'erector-spinae':     m(0.269, 0.7, 0, 1),
+        'rectus-abdominis':   m(0.2, 0.5, 0, 1),
+        'lats':               m(0.227, 0.5, 0, 1),
     },
     'Spine.lateralFlexionR': {
-        'obliques-external':  m(30, 85, 0),
-        'obliques-internal':  m(30, 85, 0),
-        'quadratus-lumborum': m(30, 85, 0),
-        'erector-spinae':     m(25, 65, 0),
-        'lats':               m(10, 22, 0),
-        'iliopsoas':          m(8, 18, 0),
-        'rectus-abdominis':   m(8, 20, 0),
+        // Calibration range: -35° to 35°.
+        'obliques-external':  m(0.353, 1.0, 0, 1),
+        'obliques-internal':  m(0.353, 1.0, 0, 1),
+        'quadratus-lumborum': m(0.353, 1.0, 0, 1),
+        'erector-spinae':     m(0.269, 0.7, 0, 1),
+        'rectus-abdominis':   m(0.2, 0.5, 0, 1),
+        'lats':               m(0.227, 0.5, 0, 1),
     },
     'Spine.rotationL': {
-        'obliques-external': m(35, 105, 0),  // contralateral rotates trunk
-        'obliques-internal': m(30, 85, 0),   // ipsilateral rotates trunk
-        'erector-spinae':    m(15, 45, 0),
-        'lats':              m(6, 18, 0),
-        // Rectus abdominis assists rotation mildly.
-        'rectus-abdominis':  m(5, 12, 0),
+        // Calibration range: -45° to 45°.
+        'obliques-external': m(0.333, 1.0, 0, 1),  // contralateral rotates trunk
+        'obliques-internal': m(0.353, 1.0, 0, 1),  // ipsilateral rotates trunk
+        'erector-spinae':    m(0.2, 0.6, 0, 1),
+        'traps-mid':         m(0.2, 0.6, 0, 1),    // NEW — thoracic rotation assist
+        'lats':              m(0.133, 0.4, 0, 1),
     },
     'Spine.rotationR': {
-        'obliques-external': m(35, 105, 0),
-        'obliques-internal': m(30, 85, 0),
-        'erector-spinae':    m(15, 45, 0),
-        'lats':              m(6, 18, 0),
-        'rectus-abdominis':  m(5, 12, 0),
+        // Calibration range: -45° to 45°.
+        'obliques-external': m(0.333, 1.0, 0, 1),
+        'obliques-internal': m(0.353, 1.0, 0, 1),
+        'erector-spinae':    m(0.2, 0.6, 0, 1),
+        'traps-mid':         m(0.2, 0.6, 0, 1),
+        'lats':              m(0.133, 0.4, 0, 1),
     },
 
     // =========================================================================
@@ -1013,36 +1015,30 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // contributions.
 
     'Scapula.elevation': {
-        'traps-upper':      m(55, 125, 0),
-        'levator-scapulae': m(40, 95, 0),
-        'rhomboids':        m(25, 60, 0),
-        'traps-mid':        m(20, 42, 0),
+        // Scapula angles ≈ 0 structurally; effective peak = declared peak.
+        'traps-upper':      m(0.44, 1.0, 0, 1),
+        'levator-scapulae': m(0.42, 1.0, 0, 1),
+        'rhomboids':        m(0.29, 0.7, 0, 1),
+        'traps-mid':        m(0.19, 0.4, 0, 1),
     },
     'Scapula.depression': {
-        'traps-lower':       m(45, 115, 0),
-        'pec-minor':         m(25, 65, 0),
-        'lats':              m(20, 55, 0),
-        // Serratus anterior lower fibers depress the scapula along the
-        // ribcage.
-        'serratus-anterior': m(12, 28, 0),
-        // Pec major (both heads) pulls the shoulder girdle down via the
-        // humerus when pulling from overhead.
-        'pec-sternal':       m(6, 15, 0),
+        'traps-lower':       m(0.39, 1.0, 0, 1),
+        'pec-minor':         m(0.38, 1.0, 0, 1),
+        'lats':              m(0.25, 0.7, 0, 1),
+        'pec-sternal':       m(0.2, 0.5, 0, 1),
+        'serratus-anterior': m(0.13, 0.3, 0, 1),
     },
     'Scapula.protraction': {
-        'serratus-anterior': m(55, 135, 0),
-        'pec-minor':         m(25, 65, 0),
-        // Sternal pec protracts the scapula via the humerus when pulling arm
-        // across body. Clavicular pec removed — its fiber orientation is
-        // more vertical and doesn't contribute meaningful protraction.
-        'pec-sternal':       m(8, 20, 0),
+        'serratus-anterior': m(0.41, 1.0, 0, 1),
+        'pec-minor':         m(0.31, 0.8, 0, 1),
+        'pec-sternal':       m(0.2, 0.5, 0, 1),
+        'pec-clavicular':    m(0.2, 0.5, 0, 1),      // NEW — per user spec
     },
     'Scapula.retraction': {
-        'traps-mid':   m(45, 115, 0),
-        'rhomboids':   m(40, 110, 0),
-        'traps-lower': m(20, 50, 0),
-        'traps-upper': m(8, 20, 0),
-        'lats':        m(6, 18, 0),
+        'traps-mid':   m(0.39, 1.0, 0, 1),
+        'rhomboids':   m(0.36, 1.0, 0, 1),
+        'traps-lower': m(0.32, 0.8, 0, 1),
+        'traps-upper': m(0.2, 0.5, 0, 1),
     },
 };
 
@@ -3589,6 +3585,12 @@ const BioModelPage: React.FC = () => {
       }
 
       // Case 2: ball-socket direction actions via dense sphere sampling.
+      // Naive min/max of dirAngs over reachable (x,y,z). Gives bounding-box
+      // ranges on the angle circle (can be up to full 360° when the arc
+      // crosses ±180°). Simpler and consistent across all direction axes —
+      // the calibration logic that consumes these ranges accounts for
+      // effective-peak-within-reachable rather than relying on the range
+      // being narrow.
       if ((group === 'Shoulder' || group === 'Hip') && !ax.isBoneAxis) {
           const xLim = jointLimits[`${group}.dir.x`];
           const yLim = jointLimits[`${group}.dir.y`];
@@ -5180,25 +5182,68 @@ const BioModelPage: React.FC = () => {
           if (!limitingPeak || p.peakEffort > limitingPeak.peakEffort) limitingPeak = p;
       }
 
-      // --- 1RM GLOBAL NORMALIZATION ---
+      // --- 1RM GLOBAL NORMALIZATION (joint-level) ---
       //
-      // The system treats force magnitudes as an arbitrary unit — the user
-      // only defines relative magnitudes between forces, not absolute Newtons.
-      // To make the numbers meaningful we choose a single global scale factor
-      // such that the highest effort anywhere across the ROM equals exactly
-      // 1.0 (the 1RM sticking point). Everything else then reads as a
-      // fraction of that limiting effort:
-      //   100% = the one action at the one frame that gates the lift
-      //   40%  = this action is at 40% of the limiting action's capacity usage
+      // 1RM is detected at the JOINT level, not the joint-action level.
+      // A joint (e.g., "Right Shoulder") can be doing several actions
+      // simultaneously (flex + hAdd + IR for a bench press); each action
+      // draws on shared muscles, so the joint's actual load is the SUM
+      // of its action efforts. When that sum reaches 1.0, the joint is
+      // fully loaded and the scene is at 1RM.
       //
-      // Shape is invariant under this scaling (it multiplies every value by
-      // the same constant), but the absolute numbers become comparable and
-      // semantically meaningful. All displayed efforts, peak bars, difficulty
-      // profile values, and resistance profile values share this scale.
-      const globalMaxEffort = limitingPeak ? limitingPeak.peakEffort : 0;
+      // Math for "50% flex + 50% hAdd simultaneously":
+      //   joint_effort = 0.5 + 0.5 = 1.0  → joint is at 1RM
+      //   individual action efforts display proportionally after the
+      //   1RM scale is applied back to them
+      //
+      // Scale factor = 1 / max_joint_effort_across_ROM. Applied
+      // uniformly to action peaks / profile / action time series, and
+      // also to muscle peaks / series (so the limiting joint's muscles
+      // reach 100% too). Muscle values are clamped at 1.0 after
+      // scaling — if a muscle is already saturated pre-scale (from
+      // biarticular stacking) it stays at 1.0; otherwise it gets
+      // rescaled in step with its joint.
       const actionSeries = Array.from(seriesMap.values());
-      if (globalMaxEffort > 1e-9) {
-          const scale = 1 / globalMaxEffort;
+      const frameCount = profile.length;
+
+      // Joint key: (jointGroup, side, sub-joint). Side derived from boneId.
+      // Sub-joint splits rotations from translations at shoulder/hip, and
+      // splits scapula into vertical (elev/dep) vs. horizontal (prot/ret) —
+      // these sub-joints use anatomically distinct muscle pools, so they
+      // shouldn't share the same "joint effort" budget in the 1RM math.
+      const subJointSuffix = (jointGroup: string, actionName: string): string => {
+          if (jointGroup === 'Shoulder' || jointGroup === 'Hip') {
+              if (/\bRotation\b/.test(actionName)) return 'rot';
+          }
+          if (jointGroup === 'Scapula') {
+              if (/Elevation|Depression/.test(actionName)) return 'vert';
+              if (/Protraction|Retraction/.test(actionName)) return 'horiz';
+          }
+          return '';
+      };
+      const jointKeyOf = (s: { boneId: string; jointGroup: string; action: string }): string => {
+          if (s.boneId === 'spine') return 'spine';
+          const side = s.boneId.startsWith('l') ? 'L'
+                     : s.boneId.startsWith('r') ? 'R' : 'C';
+          const sub = subJointSuffix(s.jointGroup, s.action);
+          return sub ? `${s.jointGroup}-${side}-${sub}` : `${s.jointGroup}-${side}`;
+      };
+      // For each frame, sum action efforts grouped by joint. Take the
+      // max joint effort across that frame, then max over all frames.
+      let globalMaxJointEffort = 0;
+      for (let i = 0; i < frameCount; i++) {
+          const jointEfforts = new Map<string, number>();
+          for (const s of actionSeries) {
+              const k = jointKeyOf(s);
+              jointEfforts.set(k, (jointEfforts.get(k) || 0) + s.efforts[i]);
+          }
+          for (const je of jointEfforts.values()) {
+              if (je > globalMaxJointEffort) globalMaxJointEffort = je;
+          }
+      }
+
+      if (globalMaxJointEffort > 1e-9) {
+          const scale = 1 / globalMaxJointEffort;
           for (const p of peaks) {
               p.peakEffort *= scale;
               p.peakTorque *= scale;
@@ -5207,31 +5252,23 @@ const BioModelPage: React.FC = () => {
               pt.difficulty *= scale;
               pt.resistance *= scale;
           }
-          // Scale every entry in every action time series by the same factor.
           for (const s of actionSeries) {
               for (let i = 0; i < s.efforts.length; i++) {
                   s.efforts[i] *= scale;
               }
           }
+          // Apply same scale to muscle activations, then clamp at 1.0.
+          // Muscles already saturated pre-scale stay at 1.0; others
+          // scale up in step with the joint-level 1RM factor.
+          for (const mp of musclePeakMap.values()) {
+              mp.peakActivation = Math.min(1, mp.peakActivation * scale);
+          }
+          for (const ms of muscleSeriesMap.values()) {
+              for (let i = 0; i < ms.activations.length; i++) {
+                  ms.activations[i] = Math.min(1, ms.activations[i] * scale);
+              }
+          }
       }
-
-      // --- Muscle peak normalization (removed) ---
-      // This step previously rescaled all muscles so the top one read
-      // exactly 1.0. It was a workaround for the fact that muscle
-      // activations, being sums across multiple joint-action sections,
-      // could exceed 1.0.
-      //
-      // Now that distributeMuscleLoadForFrame clamps each muscle's final
-      // activation to [−1, 1] per frame, that workaround is actively
-      // harmful: it undoes the user's per-section scale choices. E.g.
-      // setting Knee.extension scale from 0.9 → 0.1 used to drop quad
-      // activations to 10% of their pre-scale values, but then this
-      // rescale stretched them back to 100% — making scale values between
-      // 0.1 and 0.9 indistinguishable in the display.
-      //
-      // Raw activations are now in [0, 1] already (clamped upstream), so
-      // `peakActivation × 100` = literal %MVC. Display multiplies by 100
-      // for the percentage — no further rescale needed.
 
       const musclePeaks: MusclePeak[] = Array.from(musclePeakMap.values())
           // Drop muscles whose timeline peak is essentially zero — happens
@@ -6805,15 +6842,39 @@ const BioModelPage: React.FC = () => {
                            </div>
                            {(() => {
                                // Compute the global normalization scale for this frame.
-                               // 1rm-local: scale so the hardest action here reads 100%.
+                               // 1rm-local: scale so the hardest (sub-)joint reaches
+                               //   100%. Sub-joints split the shoulder/hip into
+                               //   translation vs. rotation, and the scapula into
+                               //   vertical vs. horizontal — each uses a distinct
+                               //   muscle pool and has its own capacity ceiling.
                                // raw: no scaling (multiplier = 1, showing raw effort × 100).
+                               const subJointSuffix = (jg: string, action: string): string => {
+                                   if (jg === 'Shoulder' || jg === 'Hip') {
+                                       if (/\bRotation\b/.test(action)) return 'rot';
+                                   }
+                                   if (jg === 'Scapula') {
+                                       if (/Elevation|Depression/.test(action)) return 'vert';
+                                       if (/Protraction|Retraction/.test(action)) return 'horiz';
+                                   }
+                                   return '';
+                               };
                                let scale = 1;
                                if (torqueDisplayMode === '1rm-local') {
-                                   let maxEffort = 0;
+                                   const jointEfforts: Record<string, number> = {};
                                    for (const d of torqueDistribution.demands) {
-                                       if (d.effort > maxEffort) maxEffort = d.effort;
+                                       const side = d.boneId === 'spine' ? '' :
+                                                    d.boneId.startsWith('l') ? 'L' :
+                                                    d.boneId.startsWith('r') ? 'R' : 'C';
+                                       const sub = subJointSuffix(d.jointGroup, d.action);
+                                       const k = d.boneId === 'spine' ? 'spine'
+                                                : sub ? `${d.jointGroup}-${side}-${sub}` : `${d.jointGroup}-${side}`;
+                                       jointEfforts[k] = (jointEfforts[k] || 0) + d.effort;
                                    }
-                                   scale = maxEffort > 1e-9 ? 1 / maxEffort : 1;
+                                   let maxJointEffort = 0;
+                                   for (const je of Object.values(jointEfforts)) {
+                                       if (je > maxJointEffort) maxJointEffort = je;
+                                   }
+                                   scale = maxJointEffort > 1e-9 ? 1 / maxJointEffort : 1;
                                }
                                // Build the limiting factor display using the highest raw
                                // effort (which is invariant under uniform scaling).
@@ -6821,11 +6882,24 @@ const BioModelPage: React.FC = () => {
                                for (const d of torqueDistribution.demands) {
                                    if (!limiting || d.effort > limiting.effort) limiting = d;
                                }
-                               // Group by joint/side for the bar display.
+                               // Group by (side, jointGroup, sub-joint) for display.
+                               // Sub-joint suffix separates rotation from translation
+                               // at shoulder/hip, and splits scapula by axis.
+                               const subJointLabel = (jg: string, action: string): string => {
+                                   if (jg === 'Shoulder' || jg === 'Hip') {
+                                       if (/\bRotation\b/.test(action)) return 'Rotation';
+                                   }
+                                   if (jg === 'Scapula') {
+                                       if (/Elevation|Depression/.test(action)) return 'Elev/Dep';
+                                       if (/Protraction|Retraction/.test(action)) return 'Prot/Ret';
+                                   }
+                                   return '';
+                               };
                                const groups: Record<string, JointActionDemand[]> = {};
                                for (const d of torqueDistribution.demands) {
                                    const side = d.boneId.startsWith('l') ? 'Left' : d.boneId.startsWith('r') ? 'Right' : '';
-                                   const key = `${side} ${d.jointGroup}`.trim();
+                                   const subLabel = subJointLabel(d.jointGroup, d.action);
+                                   const key = [side, d.jointGroup, subLabel].filter(Boolean).join(' ');
                                    if (!groups[key]) groups[key] = [];
                                    groups[key].push(d);
                                }
@@ -6889,21 +6963,34 @@ const BioModelPage: React.FC = () => {
                                        })()}
                                        {analysisView === 'joint' && Object.entries(groups).map(([groupName, groupDemands]) => {
                                            const sorted = [...groupDemands].sort((a, b) => b.effort - a.effort);
+                                           // Joint-level summary: sum of action efforts at this joint
+                                           // is the joint's combined load; the 1RM scale makes the
+                                           // hardest joint read 100%. Each action's bar underneath
+                                           // reads as its proportion of the joint's capacity usage.
+                                           const jointEffortRaw = groupDemands.reduce((s, d) => s + d.effort, 0);
+                                           const jointPct = jointEffortRaw * scale * 100;
+                                           const jointBarColor = jointPct > 80 ? 'bg-red-500' : jointPct > 50 ? 'bg-amber-500' : 'bg-indigo-500';
                                            return (
                                                <div key={groupName} className="bg-white border border-gray-100 rounded-2xl p-4">
-                                                   <h4 className="font-bold text-gray-900 text-sm mb-3">{groupName}</h4>
-                                                   <div className="space-y-2">
+                                                   <div className="flex items-baseline justify-between mb-1">
+                                                       <h4 className="font-bold text-gray-900 text-sm">{groupName}</h4>
+                                                       <span className="font-mono text-sm font-bold text-gray-700 tabular-nums">{jointPct.toFixed(0)}%</span>
+                                                   </div>
+                                                   <div className="h-2.5 bg-gray-100 rounded-full overflow-hidden mb-3">
+                                                       <div className={`h-full rounded-full ${jointBarColor} transition-all duration-300`} style={{ width: `${Math.min(jointPct, 100)}%` }} />
+                                                   </div>
+                                                   <div className="space-y-1.5 pl-3 border-l-2 border-gray-100">
                                                        {sorted.map((d, i) => {
                                                            const actionName = d.action.replace(/^(Left|Right)\s+\w+\s+/, '');
                                                            const pct = d.effort * scale * 100;
                                                            const barColor = d.effort > 0.8 ? 'bg-red-400' : d.effort > 0.5 ? 'bg-amber-400' : 'bg-indigo-400';
                                                            return (
                                                                <div key={`${d.boneId}-${d.action}-${i}`}>
-                                                                   <div className="flex justify-between items-center mb-1">
-                                                                       <span className="font-bold text-gray-700 text-xs">{actionName}</span>
-                                                                       <span className="font-mono text-xs font-bold text-gray-500">{pct.toFixed(0)}%</span>
+                                                                   <div className="flex justify-between items-center mb-0.5">
+                                                                       <span className="font-bold text-gray-600 text-[11px]">{actionName}</span>
+                                                                       <span className="font-mono text-[10px] font-bold text-gray-400 tabular-nums">{pct.toFixed(0)}%</span>
                                                                    </div>
-                                                                   <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                                   <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
                                                                        <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${Math.min(pct, 100)}%` }} />
                                                                    </div>
                                                                </div>
@@ -7087,11 +7174,24 @@ const BioModelPage: React.FC = () => {
                               );
                           })()}
                           {timelineView === 'joint' && (() => {
-                              // Group peaks by "Side JointGroup" like the Joint Analysis tab.
+                              // Group peaks by (side, jointGroup, sub-joint), matching
+                              // the Joint Analysis tab. Sub-joint splits rotation from
+                              // translation (shoulder/hip) and separates scapula by axis.
+                              const subJointLabel = (jg: string, action: string): string => {
+                                  if (jg === 'Shoulder' || jg === 'Hip') {
+                                      if (/\bRotation\b/.test(action)) return 'Rotation';
+                                  }
+                                  if (jg === 'Scapula') {
+                                      if (/Elevation|Depression/.test(action)) return 'Elev/Dep';
+                                      if (/Protraction|Retraction/.test(action)) return 'Prot/Ret';
+                                  }
+                                  return '';
+                              };
                               const groups: Record<string, TimelinePeak[]> = {};
                               for (const p of timelineAnalysis.peaks) {
                                   const side = p.boneId.startsWith('l') ? 'Left' : p.boneId.startsWith('r') ? 'Right' : '';
-                                  const key = `${side} ${p.jointGroup}`.trim();
+                                  const subLabel = subJointLabel(p.jointGroup, p.action);
+                                  const key = [side, p.jointGroup, subLabel].filter(Boolean).join(' ');
                                   if (!groups[key]) groups[key] = [];
                                   groups[key].push(p);
                               }
@@ -7134,8 +7234,11 @@ const BioModelPage: React.FC = () => {
                               return Object.entries(groups).map(([groupName, groupPeaks]) => {
                                   const sorted = [...groupPeaks].sort((a, b) => b.peakEffort - a.peakEffort);
 
-                                  // Per-joint aggregate sparkline: max effort across all
-                                  // actions in this group at each frame index.
+                                  // Per-joint aggregate: SUM of action efforts across all
+                                  // actions in this group at each frame index. Under the
+                                  // joint-level 1RM model, a joint's effort is the sum of
+                                  // its action efforts (simultaneous actions stack toward
+                                  // the joint's ceiling).
                                   const nFrames = timelineAnalysis.profile.length;
                                   const jointEfforts = new Array(nFrames).fill(0);
                                   // Per-joint total torque at each frame (for computing
@@ -7145,17 +7248,40 @@ const BioModelPage: React.FC = () => {
                                       const series = seriesLookup.get(`${p.boneId}::${p.action}`);
                                       if (!series) continue;
                                       for (let i = 0; i < Math.min(nFrames, series.efforts.length); i++) {
-                                          if (series.efforts[i] > jointEfforts[i]) jointEfforts[i] = series.efforts[i];
+                                          jointEfforts[i] += series.efforts[i];
                                       }
                                       for (let i = 0; i < Math.min(nFrames, series.torques.length); i++) {
                                           jointTotalTorque[i] += series.torques[i];
                                       }
                                   }
+                                  // Peak joint effort + when it occurs.
+                                  let jointPeakEffort = 0;
+                                  let jointPeakFrame = 0;
+                                  for (let i = 0; i < jointEfforts.length; i++) {
+                                      if (jointEfforts[i] > jointPeakEffort) {
+                                          jointPeakEffort = jointEfforts[i];
+                                          jointPeakFrame = i;
+                                      }
+                                  }
+                                  const jointPeakPct = jointPeakEffort * 100;
+                                  const jointPeakFramePct = nFrames > 1 ? (jointPeakFrame / (nFrames - 1)) * 100 : 0;
+                                  const jointBarColor = jointPeakPct > 80 ? 'bg-red-500' : jointPeakPct > 50 ? 'bg-amber-500' : 'bg-indigo-500';
 
                                   return (
                                       <div key={groupName} className="bg-white border border-gray-100 rounded-2xl p-4">
-                                          <h4 className="font-bold text-gray-900 text-sm mb-1">{groupName}</h4>
-                                          {/* Per-joint aggregate sparkline */}
+                                          {/* Joint-level peak header: single value for the
+                                              joint's combined peak effort across the ROM. */}
+                                          <div className="flex items-baseline justify-between mb-1">
+                                              <h4 className="font-bold text-gray-900 text-sm">{groupName}</h4>
+                                              <div className="flex items-center gap-2">
+                                                  <span className="text-[9px] font-mono font-bold text-gray-400">@{jointPeakFramePct.toFixed(0)}%</span>
+                                                  <span className="font-mono text-sm font-bold text-gray-700 tabular-nums">{jointPeakPct.toFixed(0)}%</span>
+                                              </div>
+                                          </div>
+                                          <div className="h-2 bg-gray-100 rounded-full overflow-hidden mb-2">
+                                              <div className={`h-full rounded-full ${jointBarColor} transition-all duration-300`} style={{ width: `${Math.min(jointPeakPct, 100)}%` }} />
+                                          </div>
+                                          {/* Per-joint aggregate sparkline: sum-of-actions over ROM */}
                                           <div className="mb-3 rounded overflow-hidden">
                                               {renderSparkline(jointEfforts, '#6b7280', 'rgba(107, 114, 128, 0.1)', 20)}
                                           </div>
