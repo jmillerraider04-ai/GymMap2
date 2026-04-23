@@ -2112,20 +2112,28 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             },
         ],
         constraints: {
-            // Each foot pinned with TWO fixed constraints — one at the
-            // ankle (position 0, proximal end) and one at the toe (position
-            // 1, distal end). Two point-pins on the same bone fully lock
-            // that bone's orientation and position, which is what we want:
-            // the foot doesn't tilt and doesn't slide as the body hinges.
+            // SINGLE fixed constraint per foot at the MIDPOINT (position 0.5).
+            // This represents the center of pressure (CoP) of the
+            // foot-ground contact, which is what a real foot-on-ground
+            // reaction behaves like: a single net force at one point on the
+            // foot, not two independent reactions at ankle and toe. See
+            // CLAUDE.md "Multi-pin constraint trap" section.
+            //
+            // Midpoint at z=-10 (halfway between ankle z=0 and toe z=-20).
             // Ankle Y=133 is standing-height (pelvisY=30 + femur 54 + tibia
-            // 49 = 133). Toes 20 forward of ankles.
+            // 49 = 133); the foot is horizontal so midpoint shares that Y.
+            //
+            // Consequence: the reaction at midfoot has a non-zero moment arm
+            // at the hip, so Phase B's force-balance at the feet correctly
+            // propagates to non-zero hip extension demand. An earlier
+            // ankle+toe two-pin model let Phase B concentrate all Y
+            // reaction at the ankle pin (moment arm zero at hip) and
+            // silently zero out hip demand.
             lFoot: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 133, z: -20 } },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 133, z: -10 }, position: 0.5 },
             ],
             rFoot: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 133, z: -20 } },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 133, z: -10 }, position: 0.5 },
             ],
         },
     },
