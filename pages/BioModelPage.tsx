@@ -1995,6 +1995,140 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             ],
         },
     },
+    // ========================================================================
+    // STIFF-LEG DEADLIFT
+    // ========================================================================
+    // Hip-hinge pattern with knees straight throughout. User stands with
+    // bar, hinges forward at the hip, bar travels down in front of the
+    // thighs to mid-thigh / knee level, then returns to upright.
+    //
+    // Key geometric facts encoded here:
+    //   - Legs are "stiff" = fully straight both at start (bottom) and end
+    //     (lockout). lFemur/lTibia both (0, 1, 0) throughout. No knee flex.
+    //   - Arms hang STRAIGHT DOWN IN WORLD at every ROM fraction — the
+    //     bar is held by gravity. Since humerus is stored in spineFrame-
+    //     local and the spine tilts forward, the stored humerus direction
+    //     has to COMPENSATE for the tilt. At start (60° spine tilt),
+    //     spineFrame × (0, 0.5, -0.866) = (0, 1, 0) world = down. At end
+    //     (upright spine), humerus is just (0, 1, 0) directly.
+    //   - Feet pinned at ankle AND toe so foot orientation is locked,
+    //     not just position. Ankles directly under hips (x = ±20, y = 133),
+    //     toes 20 forward.
+    //   - Pelvis does not need to translate (pelvisTx/Ty/Tz = 0 at both
+    //     ends) because the feet are placed at the straight-leg reach
+    //     distance from the default pelvis position. Spine tilts, legs
+    //     stay vertical, hip angle changes in pelvisFrame as the pelvis
+    //     pitches forward with the spine.
+    //   - No spine constraint — the spine is the DOF the user drives via
+    //     the hip hinge. Solver accommodates by keeping feet pinned.
+    //   - Force is gravity on each hand — world direction (0, 1, 0) with
+    //     y-down world convention. NOT localFrame; gravity does not rotate
+    //     with the arm. No profile (constant).
+    //
+    // Expected muscle activation: glute-max, hamstrings-biarticular,
+    // adductor-magnus-posterior as primaries (hip extensors resisting
+    // forward-flexion moment). Spine erectors secondary (resisting torso
+    // flexion). Grip/forearm tertiary (holding the bar).
+    //
+    // Convention chosen: START = bottom (bar at mid-thigh, torso flexed
+    // 60° forward). END = top (lockout, standing upright). This matches
+    // "lift the weight" as the progression t=0 → 1.
+    {
+        id: 'sldl',
+        name: 'STIFF-LEG DEADLIFT',
+        category: 'Pull',
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // Spine tilted 60° forward from vertical. (0, -cos 60°, -sin 60°).
+            spine: { x: 0, y: -0.5, z: -0.866 },
+            // Humerus hanging straight down in WORLD — (0, 1, 0). Stored
+            // in spineFrame-local, so we pre-apply the inverse tilt:
+            // worldToLocal(spineFrame, (0,1,0)) = (0, 0.5, -0.866).
+            lHumerus: { x: 0, y: 0.5, z: -0.866 },
+            rHumerus: { x: 0, y: 0.5, z: -0.866 },
+            // Straight elbows — forearm aligned with humerus axis.
+            lForearm: { x: 0, y: 1, z: 0 },
+            rForearm: { x: 0, y: 1, z: 0 },
+            // Stiff legs — femur and tibia both straight down in world.
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 1, z: 0 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 1, z: 0 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // Spine upright at lockout.
+            spine: { x: 0, y: -1, z: 0 },
+            // Upright spine → spineFrame is identity, so stored humerus
+            // direction IS its world direction. Straight down.
+            lHumerus: { x: 0, y: 1, z: 0 },
+            rHumerus: { x: 0, y: 1, z: 0 },
+            lForearm: { x: 0, y: 1, z: 0 },
+            rForearm: { x: 0, y: 1, z: 0 },
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 1, z: 0 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 1, z: 0 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            {
+                name: 'Barbell weight (right hand)',
+                boneId: 'rForearm',
+                position: 1,
+                // +y = down in our Y-down world. Gravity pulls bar down.
+                // World-frame, not localFrame — gravity direction doesn't
+                // change as the arm or torso rotates.
+                x: 0, y: 1, z: 0,
+                magnitude: 10,
+            },
+            {
+                name: 'Barbell weight (left hand)',
+                boneId: 'lForearm',
+                position: 1,
+                x: 0, y: 1, z: 0,
+                magnitude: 10,
+            },
+        ],
+        constraints: {
+            // Each foot pinned with TWO fixed constraints — one at the
+            // ankle (position 0, proximal end) and one at the toe (position
+            // 1, distal end). Two point-pins on the same bone fully lock
+            // that bone's orientation and position, which is what we want:
+            // the foot doesn't tilt and doesn't slide as the body hinges.
+            // Ankle Y=133 is standing-height (pelvisY=30 + femur 54 + tibia
+            // 49 = 133). Toes 20 forward of ankles.
+            lFoot: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 133, z: -20 } },
+            ],
+            rFoot: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 133, z: -20 } },
+            ],
+        },
+    },
 ];
 
 const BioModelPage: React.FC = () => {
