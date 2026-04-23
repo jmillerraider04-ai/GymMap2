@@ -355,7 +355,16 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
     // {x:0, y:-1, z:0} (straight up, since Y is down in world). Drawing
     // the spine from pelvis to neck means the selected-bone dot lands at
     // the NECK (the end of the line), which is the user-draggable target.
-    const pelvisBase = { x: 0, y: CONFIG.TORSO_LEN / 2, z: 0 };
+    // Pelvis base — default (0, TORSO_LEN/2, 0) but translated by the
+    // pelvisTx/Ty/Tz solver DOFs. When the solver moves the pelvis to
+    // accommodate distal constraints (e.g. feet pinned + knee flex drop
+    // the pelvis Y), this picks up the displacement so the renderer
+    // matches the physics.
+    const pelvisBase = {
+        x: 0 + (twists?.['pelvisTx'] || 0),
+        y: CONFIG.TORSO_LEN / 2 + (twists?.['pelvisTy'] || 0),
+        z: 0 + (twists?.['pelvisTz'] || 0),
+    };
     const spineDirRaw = posture['spine'] || { x: 0, y: -1, z: 0 };
     const spineDir = normalize(spineDirRaw);
 

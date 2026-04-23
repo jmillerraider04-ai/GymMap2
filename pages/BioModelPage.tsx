@@ -37,6 +37,16 @@ const DEFAULT_TWISTS: Record<string, number> = {
   // World-space shoulder rotation = pelvisYaw + spineTwist.
   // World-space pelvis/leg rotation = pelvisYaw.
   pelvis: 0,
+  // Pelvis translation — INTERNAL solver DOFs storing world-space
+  // displacement of the pelvis from its default position (0, TORSO_LEN/2,
+  // 0). These let the solver move the whole body in space to satisfy
+  // distal constraints: feet pinned + knee flex → pelvis drops Y (squat);
+  // hands + feet pinned in a deadlift → pelvis shifts Y and Z together;
+  // hands on pull-up bar → pelvis hangs in Y. Not user-facing; when no
+  // constraints are active the solver leaves these alone.
+  pelvisTx: 0,
+  pelvisTy: 0,
+  pelvisTz: 0,
   lHumerus: 0, rHumerus: 0,
   lFemur: 0, rFemur: 0,
   lForearm: 0, rForearm: 0,
@@ -65,6 +75,19 @@ const ROTATION_LIMITS: Record<string, { min: number, max: number }> = {
   // in either direction. In practice the spine limit (±45°) + the
   // constraint geometry will keep pelvis in a sensible range.
   pelvis: { min: -90, max: 90 }
+};
+
+// Pelvis TRANSLATION limits, in world units (not degrees). Like
+// ROTATION_LIMITS above, these are used by the solver's Armijo step to
+// clamp candidate values during gradient descent — they're not user-
+// facing limits. Generous: the solver only moves pelvis when a constraint
+// actually demands it, and real-exercise displacements are usually small
+// (20-40 world units) relative to these bounds. Scale reference: torso is
+// CONFIG.TORSO_LEN = 60 world units tall.
+const POSITION_LIMITS: Record<string, { min: number, max: number }> = {
+  pelvisTx: { min: -100, max: 100 },
+  pelvisTy: { min: -100, max: 100 },
+  pelvisTz: { min: -100, max: 100 },
 };
 
 const BONE_NAMES: Record<string, string> = {
@@ -1979,7 +2002,16 @@ const BioModelPage: React.FC = () => {
     const boneStartPoints: Record<string, Vector3> = {};
     const jointFrames: Record<string, Frame> = {};
 
-    const pelvisPos = { x: 0, y: CONFIG.TORSO_LEN / 2, z: 0 };
+    // Pelvis position — default is anchored at (0, TORSO_LEN/2, 0), but
+    // the solver can translate it via the pelvisTx/Ty/Tz DOFs to satisfy
+    // distal constraints (feet pinned + knee flex ⇒ pelvis drops Y).
+    // All downstream positions (hip sockets, neck base, shoulder sockets,
+    // and therefore arm and leg starting points) hang off this point.
+    const pelvisPos = {
+        x: 0 + (currentTwists['pelvisTx'] || 0),
+        y: CONFIG.TORSO_LEN / 2 + (currentTwists['pelvisTy'] || 0),
+        z: 0 + (currentTwists['pelvisTz'] || 0),
+    };
     // Spine is a user-editable direction. Neck base sits at
     // pelvis + spine_direction × spine_length.
     const spineDirRaw = currentPosture['spine'] || { x: 0, y: -1, z: 0 };
@@ -4777,16 +4809,20 @@ const BioModelPage: React.FC = () => {
               cur = BONE_PARENTS[cur];
           }
       }
-      // Pelvis yaw is a GLOBAL rotation DOF — when it's free, adjusting
-      // it simultaneously rotates the legs (via rootFrame) and the
-      // shoulders/arms (via spineFrame). So when pelvis is a solver DOF
-      // AND the user is driving spine or any bone in the upper body,
-      // leg constraints become relevant (and vice versa). Include the
-      // entire skeleton in the influence chain whenever pelvis is free
-      // and there is any input — the solver must check all constraints
-      // because the pelvis maneuver affects every branch.
-      const pelvisIsFree = !lockedBoneIds.has('pelvis') && !lockedTwistIds.has('pelvis');
-      if (pelvisIsFree && inputBones.size > 0) {
+      // Pelvis yaw AND pelvis translation are GLOBAL DOFs — when any of
+      // them is free, adjusting them moves every bone in world space
+      // (pelvisYaw rotates legs via rootFrame and arms via spineFrame;
+      // pelvisTx/Ty/Tz bodily translates the whole skeleton). So when
+      // any pelvis DOF is free AND the user is driving any bone, every
+      // constraint becomes relevant: the solver's pelvis maneuver can
+      // violate a constraint on a far branch. Include the entire skeleton
+      // in the influence chain whenever pelvis has any free DOF and
+      // there is user input.
+      const pelvisYawFree = !lockedBoneIds.has('pelvis') && !lockedTwistIds.has('pelvis');
+      const pelvisTransFree = ['pelvisTx', 'pelvisTy', 'pelvisTz'].some(
+          k => !lockedBoneIds.has(k) && !lockedTwistIds.has(k)
+      );
+      if ((pelvisYawFree || pelvisTransFree) && inputBones.size > 0) {
           for (const b of Object.keys(BONE_PARENTS)) influenceChain.add(b);
       }
 
@@ -4857,16 +4893,16 @@ const BioModelPage: React.FC = () => {
           };
       }
 
-      // Twist DOFs the solver can adjust:
+      // Angular-twist DOFs the solver can adjust (all measured in degrees):
       //   - humerus/femur twists (per-bone axial rotation)
       //   - spine twist (anatomical shoulder-to-pelvis relative rotation)
       //   - pelvis yaw (world-frame rotation of the lower body)
       //
-      // Spine and pelvis together handle axial rotation of the torso:
+      // Spine and pelvis-yaw together handle axial rotation of the torso:
       // the user sets spine; the solver freely adjusts pelvis (and other
       // bones) to satisfy constraints. If the upper body is pinned, the
       // solver drives pelvis opposite to spine so the shoulders stay
-      // fixed in world while the legs rotate. Pelvis is not a posture
+      // fixed in world while the legs rotate. Pelvis-yaw is not a posture
       // bone — it's a scalar DOF tracked only in `twists`.
       const isTwistBone = (b: string) => /Humerus|Femur/.test(b) || b === 'spine' || b === 'pelvis';
       const freeBonesTwistFromPosture = Object.keys(posture).filter(
@@ -4881,7 +4917,21 @@ const BioModelPage: React.FC = () => {
       const twistMap: Record<string, number> = {};
       for (const bid of freeBonesTwist) twistMap[bid] = solvedTwists[bid] || 0;
 
-      if (freeBones2D.length === 0 && freeBones1D.length === 0 && freeBonesHinge.length === 0 && freeBonesTwist.length === 0) return null;
+      // Pelvis TRANSLATION DOFs — move the whole skeleton root in world
+      // space so the solver can satisfy distal constraints that would
+      // otherwise over-constrain the kinematic chain. Classic case:
+      // feet pinned + knee flex requires the pelvis to drop (squat); an
+      // armbar-pinned hand moving requires the pelvis to shift. Measured
+      // in WORLD UNITS, not degrees, so these need their own EPS_POS and
+      // Armijo step handling distinct from the angular twists above.
+      const PELVIS_TRANS_DOFS = ['pelvisTx', 'pelvisTy', 'pelvisTz'];
+      const freeBonesPosTrans = PELVIS_TRANS_DOFS.filter(
+          b => !lockedBoneIds.has(b) && !lockedTwistIds.has(b),
+      );
+      const posTransMap: Record<string, number> = {};
+      for (const bid of freeBonesPosTrans) posTransMap[bid] = solvedTwists[bid] || 0;
+
+      if (freeBones2D.length === 0 && freeBones1D.length === 0 && freeBonesHinge.length === 0 && freeBonesTwist.length === 0 && freeBonesPosTrans.length === 0) return null;
 
       const MAX_ITERS = 150;
       const EPS = 0.0015;          // tangent-coord finite-difference step
@@ -4961,6 +5011,24 @@ const BioModelPage: React.FC = () => {
               gradSqNorm += g * g;
           }
 
+          // Pelvis translation gradient: perturbation is in world UNITS, not
+          // radians. EPS_POS is chosen so a 1-unit translation produces a
+          // gradient magnitude on the same rough scale as a 1-radian rotation
+          // at typical arm length (~50 units), making all DOFs compete fairly
+          // in gradient descent. The exact factor isn't critical — Armijo
+          // line search adapts alpha per iteration.
+          const EPS_POS = 0.3;
+          const gradsPosTrans: Record<string, number> = {};
+          for (const bid of freeBonesPosTrans) {
+              const tw = posTransMap[bid];
+              const tPlus  = { ...solvedTwists, [bid]: tw + EPS_POS };
+              const tMinus = { ...solvedTwists, [bid]: tw - EPS_POS };
+              const g = (computeConstraintCost(posture, tPlus,  relevantCons).cost
+                       - computeConstraintCost(posture, tMinus, relevantCons).cost) / (2 * EPS_POS);
+              gradsPosTrans[bid] = g; // cost/world-unit
+              gradSqNorm += g * g;
+          }
+
           if (gradSqNorm < 1e-10) {
               // Stationary point — either solved (handled above) or stuck.
               break;
@@ -5012,6 +5080,19 @@ const BioModelPage: React.FC = () => {
                   candidateTwists[bid] = newTw;
                   trialTwists[bid] = newTw;
               }
+              // Pelvis translation candidate step. gradsPosTrans is in world
+              // units directly (not radians → degrees like angular twists), so
+              // no unit conversion. Clamped against POSITION_LIMITS so the
+              // solver can't translate the pelvis arbitrarily far away.
+              const trialPosTrans: Record<string, number> = {};
+              for (const bid of freeBonesPosTrans) {
+                  const stepUnits = alpha * gradsPosTrans[bid];
+                  let newTw = posTransMap[bid] - stepUnits;
+                  const lim = POSITION_LIMITS[bid];
+                  if (lim) newTw = Math.max(lim.min, Math.min(lim.max, newTw));
+                  candidateTwists[bid] = newTw;
+                  trialPosTrans[bid] = newTw;
+              }
               const candCost = computeConstraintCost(candidate, candidateTwists, relevantCons);
               // Sufficient-descent condition: cost decreases by at least
               // c1 * alpha * ||grad||^2.
@@ -5029,6 +5110,9 @@ const BioModelPage: React.FC = () => {
                   }
                   for (const bid of freeBonesTwist) {
                       twistMap[bid] = trialTwists[bid];
+                  }
+                  for (const bid of freeBonesPosTrans) {
+                      posTransMap[bid] = trialPosTrans[bid];
                   }
                   accepted = true;
                   break;
