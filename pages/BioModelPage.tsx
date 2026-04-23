@@ -1864,6 +1864,137 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             ],
         },
     },
+    // ========================================================================
+    // HAMMER STRENGTH ISO-LATERAL CHEST PRESS (MTS)
+    // ========================================================================
+    // Plate-loaded lever chest press with independent arms. Each lever
+    // pivots at the rear of the frame; handles extend forward to the user.
+    // When pushing, each handle sweeps forward on a shallow arc — shallow
+    // enough over typical ROM (~20-25°) that a LINEAR (two planar
+    // constraints) approximation is accurate to within a couple degrees
+    // and much simpler to author. Resistance profile is slightly peaked —
+    // the mechanical advantage at lockout drops relative to mid-ROM.
+    //
+    // Body posture: seated upright, feet on the footrest (not mechanically
+    // coupled to the lift). Spine pinned at pelvis AND neck to represent
+    // back pad + seat (same pattern as BB bench press — the user doesn't
+    // translate). Legs posed in seated position with moderate knee flex so
+    // the Timeline Peaks readouts don't show spurious leg involvement.
+    //
+    // Starting position: elbows bent ~105°, hands at chest height ~30 cm
+    // forward of the body. Ending position: arms extended forward to near
+    // lockout.
+    {
+        id: 'hs_iso_chest_press',
+        name: 'HAMMER STRENGTH ISO-LATERAL CHEST PRESS',
+        category: 'Push',
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // Shoulder ~20° abducted, humerus tilted slightly back (elbow at
+            // chest level ≈ shoulder level since chest press is horizontal).
+            lHumerus: { x: -0.3, y: 0.55, z: -0.78 },
+            // Elbow flexed ~95° — forearm points forward-and-slightly-down.
+            lForearm: { x: 0, y: 0.1, z: -0.995 },
+            rHumerus: { x: 0.3, y: 0.55, z: -0.78 },
+            rForearm: { x: 0, y: 0.1, z: -0.995 },
+            // Legs: seated. Thighs forward-and-slightly-down (~17° hip flex
+            // below horizontal), knee flexed ~30° (shins roughly vertical).
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // End: arms extended forward (~90° shoulder flex with mild abduction)
+            lHumerus: { x: -0.15, y: 0.1, z: -0.984 },
+            // End: elbow nearly straight (~15° flex)
+            lForearm: { x: 0, y: 0.966, z: -0.259 },
+            rHumerus: { x: 0.15, y: 0.1, z: -0.984 },
+            rForearm: { x: 0, y: 0.966, z: -0.259 },
+            // Legs unchanged (not mechanically involved)
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            {
+                name: 'Lever resistance',
+                boneId: 'rForearm',
+                position: 1,
+                // +z = backward in world; resistance opposes the forward push
+                x: 0, y: 0, z: 1,
+                magnitude: 10,
+                // Slightly peaked: Hammer levers feel strongest mid-push, soften
+                // at both ends.
+                profile: {
+                    points: [
+                        { t: 0,   multiplier: 0.9 },
+                        { t: 0.5, multiplier: 1.05 },
+                        { t: 1,   multiplier: 0.9 },
+                    ],
+                },
+            },
+            {
+                name: 'Lever resistance',
+                boneId: 'lForearm',
+                position: 1,
+                x: 0, y: 0, z: 1,
+                magnitude: 10,
+                profile: {
+                    points: [
+                        { t: 0,   multiplier: 0.9 },
+                        { t: 0.5, multiplier: 1.05 },
+                        { t: 1,   multiplier: 0.9 },
+                    ],
+                },
+            },
+        ],
+        constraints: {
+            // Each hand sweeps along a forward-backward line (z axis). Two
+            // planar constraints per hand: Y (no vertical motion) and X
+            // (no lateral drift — iso-lateral means each arm has its own
+            // lane). Center at start-hand world position.
+            rForearm: [
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 25, y: -30, z: -42 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 25, y: -30, z: -42 } },
+            ],
+            lForearm: [
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -25, y: -30, z: -42 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -25, y: -30, z: -42 } },
+            ],
+            // Back pad + seat → pin pelvis and neck in world. Same fixity
+            // pattern as BB bench press; prevents the pelvis-translation
+            // DOFs from drifting since the body is externally supported.
+            spine: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 30, z: 0 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: -30, z: 0 } },
+            ],
+        },
+    },
 ];
 
 const BioModelPage: React.FC = () => {
