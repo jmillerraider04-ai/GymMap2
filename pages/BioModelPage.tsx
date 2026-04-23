@@ -5012,20 +5012,34 @@ const BioModelPage: React.FC = () => {
           }
 
           // Pelvis translation gradient: perturbation is in world UNITS, not
-          // radians. EPS_POS is chosen so a 1-unit translation produces a
-          // gradient magnitude on the same rough scale as a 1-radian rotation
-          // at typical arm length (~50 units), making all DOFs compete fairly
-          // in gradient descent. The exact factor isn't critical — Armijo
-          // line search adapts alpha per iteration.
+          // radians. Without rescaling, the raw d(cost)/d(unit) gradient is
+          // ~1/L smaller than angular d(cost)/d(rad) for typical bone length
+          // L, because rotating a bone by 1 rad moves its tip by ~L units
+          // while translating the pelvis by 1 unit moves bones by only 1.
+          // That imbalance makes angular DOFs dominate gradNorm, and the
+          // solver's Armijo step moves the pelvis ~1/L as fast as it moves
+          // bone angles — far too slow to reach (say) a 30-unit squat drop
+          // within MAX_ITERS iterations.
+          //
+          // Fix: treat pelvis translation as if parameterized in units of
+          // L (dimensionless body-lengths), which rescales both the
+          // gradient (× POS_GRAD_SCALE) and the Armijo step (× POS_GRAD_SCALE
+          // again at the step site, for a total L² scaling on the final
+          // world-unit step). With L ≈ 50, a single iteration now moves
+          // pelvis ~1-2 units when the constraint miss is comparable to a
+          // typical bone length, so distal-pinned scenarios (squat, pull-up)
+          // converge in 10-30 iterations rather than 600+.
           const EPS_POS = 0.3;
+          const POS_GRAD_SCALE = 50;
           const gradsPosTrans: Record<string, number> = {};
           for (const bid of freeBonesPosTrans) {
               const tw = posTransMap[bid];
               const tPlus  = { ...solvedTwists, [bid]: tw + EPS_POS };
               const tMinus = { ...solvedTwists, [bid]: tw - EPS_POS };
-              const g = (computeConstraintCost(posture, tPlus,  relevantCons).cost
-                       - computeConstraintCost(posture, tMinus, relevantCons).cost) / (2 * EPS_POS);
-              gradsPosTrans[bid] = g; // cost/world-unit
+              const gRaw = (computeConstraintCost(posture, tPlus,  relevantCons).cost
+                          - computeConstraintCost(posture, tMinus, relevantCons).cost) / (2 * EPS_POS);
+              const g = gRaw * POS_GRAD_SCALE; // rescaled to body-length units
+              gradsPosTrans[bid] = g;
               gradSqNorm += g * g;
           }
 
@@ -5080,13 +5094,17 @@ const BioModelPage: React.FC = () => {
                   candidateTwists[bid] = newTw;
                   trialTwists[bid] = newTw;
               }
-              // Pelvis translation candidate step. gradsPosTrans is in world
-              // units directly (not radians → degrees like angular twists), so
-              // no unit conversion. Clamped against POSITION_LIMITS so the
-              // solver can't translate the pelvis arbitrarily far away.
+              // Pelvis translation candidate step. Complementary half of the
+              // L-rescaling done in the gradient computation above: the
+              // stored gradient is in body-length units (scaled by
+              // POS_GRAD_SCALE), so to convert the step back to real world
+              // units we apply POS_GRAD_SCALE once more. Net effect: the
+              // actual world-unit step is α · g_raw · POS_GRAD_SCALE², which
+              // matches the world-distance swept by a proportional angular
+              // rotation on a typical bone. Clamped against POSITION_LIMITS.
               const trialPosTrans: Record<string, number> = {};
               for (const bid of freeBonesPosTrans) {
-                  const stepUnits = alpha * gradsPosTrans[bid];
+                  const stepUnits = alpha * gradsPosTrans[bid] * POS_GRAD_SCALE;
                   let newTw = posTransMap[bid] - stepUnits;
                   const lim = POSITION_LIMITS[bid];
                   if (lim) newTw = Math.max(lim.min, Math.min(lim.max, newTw));
