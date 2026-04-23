@@ -358,6 +358,23 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
     const pelvisBase = { x: 0, y: CONFIG.TORSO_LEN / 2, z: 0 };
     const spineDirRaw = posture['spine'] || { x: 0, y: -1, z: 0 };
     const spineDir = normalize(spineDirRaw);
+
+    // Pelvis yaw — solver-controlled rotation of the lower body around
+    // the pelvis's vertical axis. Must match BioModelPage.calculateKinematics
+    // so the physics and the renderer stay in agreement.
+    const pelvisYaw = twists?.['pelvis'] || 0;
+    const rootFrameBase = createRootFrame({x:0, y:1, z:0});
+    const rootFrame = twistFrame(rootFrameBase, pelvisYaw);
+
+    // Pelvis frame — rigidly attached to the spine (spine is rigid in this
+    // model, so any spine tilt IS pelvis tilt). Used for placing the hip
+    // sockets so the hip line swings with spine tilt rather than staying
+    // fixed horizontal in the world. Legs still parent off rootFrame so
+    // they remain world-oriented when the spine tilts — but they now
+    // start from a tilted hip position.
+    const pelvisFrameBase = createRootFrame({ x: -spineDir.x, y: -spineDir.y, z: -spineDir.z });
+    const pelvisFrame = twistFrame(pelvisFrameBase, pelvisYaw);
+
     const neckBase = {
         x: pelvisBase.x + spineDir.x * CONFIG.TORSO_LEN,
         y: pelvisBase.y + spineDir.y * CONFIG.TORSO_LEN,
@@ -365,8 +382,22 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
     };
     addLine('spine', pelvisBase, neckBase, 12);
 
-    const lHipBase = { x: -20, y: pelvisBase.y, z: 0 };
-    const rHipBase = { x: 20, y: pelvisBase.y, z: 0 };
+    // Hip offsets are in pelvis-local coords; transform through pelvisFrame
+    // so they rotate with both pelvisYaw and spine tilt (the hip line
+    // swings with the pelvis the same way the shoulder offsets swing with
+    // the spine through spineFrame further down).
+    const lHipLocal = { x: -20, y: 0, z: 0 };
+    const rHipLocal = { x:  20, y: 0, z: 0 };
+    const lHipBase = {
+        x: pelvisBase.x + lHipLocal.x * pelvisFrame.x.x + lHipLocal.y * pelvisFrame.y.x + lHipLocal.z * pelvisFrame.z.x,
+        y: pelvisBase.y + lHipLocal.x * pelvisFrame.x.y + lHipLocal.y * pelvisFrame.y.y + lHipLocal.z * pelvisFrame.z.y,
+        z: pelvisBase.z + lHipLocal.x * pelvisFrame.x.z + lHipLocal.y * pelvisFrame.y.z + lHipLocal.z * pelvisFrame.z.z,
+    };
+    const rHipBase = {
+        x: pelvisBase.x + rHipLocal.x * pelvisFrame.x.x + rHipLocal.y * pelvisFrame.y.x + rHipLocal.z * pelvisFrame.z.x,
+        y: pelvisBase.y + rHipLocal.x * pelvisFrame.x.y + rHipLocal.y * pelvisFrame.y.y + rHipLocal.z * pelvisFrame.z.y,
+        z: pelvisBase.z + rHipLocal.x * pelvisFrame.x.z + rHipLocal.y * pelvisFrame.y.z + rHipLocal.z * pelvisFrame.z.z,
+    };
     addLine('lPelvis', pelvisBase, lHipBase, 8);
     addLine('rPelvis', pelvisBase, rHipBase, 8);
 
@@ -413,15 +444,27 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
         return { frame1: frame1Twisted, frame2: frame2Twisted, frame3: frame3Twisted, end1, end2 };
     };
 
-    const rootFrame = createRootFrame({x:0, y:1, z:0});
-
     // Spine-aligned frame for the upper body. The spine direction points
     // from pelvis to neck, so the torso's "down" direction (what a bone
     // with local-y = 1 hangs along) is the NEGATED spine direction. When
     // the spine is straight up (default), spineFrame == rootFrame.
     // When the spine tilts, the clavicles + arms rotate together with
     // the torso, keeping their same relative angle to the spine.
-    const spineFrame = createRootFrame({ x: -spineDir.x, y: -spineDir.y, z: -spineDir.z });
+    //
+    // Total axial twist of the shoulder frame = pelvisYaw + spineTwist.
+    // pelvisYaw rotates the lower body and carries the spine with it;
+    // spineTwist is the additional anatomical rotation of the shoulders
+    // relative to the pelvis. For a straight spine the two rotations are
+    // about the same world-Y axis, so combining them into a single
+    // twistFrame call is exact.
+    const spineTwist = twists?.['spine'] || 0;
+    // spineFrameBase shares the same orientation as pelvisFrameBase above
+    // (both are createRootFrame(-spineDir)) — they differ only in how
+    // much twist is applied: pelvisFrame gets pelvisYaw alone, spineFrame
+    // gets pelvisYaw + spineTwist. Recomputing here keeps this block
+    // self-contained and easy to reason about.
+    const spineFrameBase = createRootFrame({ x: -spineDir.x, y: -spineDir.y, z: -spineDir.z });
+    const spineFrame = twistFrame(spineFrameBase, pelvisYaw + spineTwist);
 
     // Dynamic Clavicles — offsets are stored in TORSO-LOCAL space and
     // transformed through spineFrame so they tilt with the torso.

@@ -22,6 +22,21 @@ const DEFAULT_POSTURE: Posture = {
 };
 
 const DEFAULT_TWISTS: Record<string, number> = {
+  // Spine axial rotation (RELATIVE rotation between pelvis and shoulders
+  // about the spine's long axis). This is the anatomical "spine twist":
+  // positive = torso rotated to the LEFT of the pelvis, negative = RIGHT.
+  // User-facing — driven by the rotation slider when spine is selected.
+  spine: 0,
+  // Pelvis yaw — an INTERNAL solver DOF representing the world-frame
+  // rotation of the pelvis+legs around the pelvis's vertical axis. Not
+  // user-facing. The solver adjusts this to accommodate constraints
+  // when spine rotation is applied: if the upper body is pinned and the
+  // user drags the spine slider, the solver spins the pelvis opposite
+  // so the shoulders stay put in world while the legs rotate.
+  //
+  // World-space shoulder rotation = pelvisYaw + spineTwist.
+  // World-space pelvis/leg rotation = pelvisYaw.
+  pelvis: 0,
   lHumerus: 0, rHumerus: 0,
   lFemur: 0, rFemur: 0,
   lForearm: 0, rForearm: 0,
@@ -37,7 +52,19 @@ const ROTATION_LIMITS: Record<string, { min: number, max: number }> = {
   lForearm: { min: -90, max: 90 },
   rForearm: { min: -90, max: 90 },
   lTibia: { min: -20, max: 20 },
-  rTibia: { min: -20, max: 20 }
+  rTibia: { min: -20, max: 20 },
+  // Spine axial rotation — torso rotation about the spine's long axis.
+  // ±45° per side is a typical thoracolumbar range for strength-training
+  // contexts; clinical ROM varies but this matches what a lifter can
+  // actually load (e.g. seated cable rotations, Russian twists).
+  // Convention: positive = rotation to the LEFT (Rotation L action),
+  // negative = to the RIGHT, applied to the spine frame via twistFrame.
+  spine: { min: -45, max: 45 },
+  // Pelvis yaw — world-frame rotation of the pelvis+legs. This is an
+  // internal solver DOF (no slider), so the range is loose: up to ±90°
+  // in either direction. In practice the spine limit (±45°) + the
+  // constraint geometry will keep pelvis in a sensible range.
+  pelvis: { min: -90, max: 90 }
 };
 
 const BONE_NAMES: Record<string, string> = {
@@ -710,6 +737,57 @@ const MUSCLE_CATALOG: MuscleDef[] = [
 //   elevation (angle = +150).
 const m = (base: number, peak: number, angle: number, steepness: number = 1): MuscleContribution => ({ base, peak, angle, steepness });
 
+// Default per-section activation scale. Computed as max(Σ bells) across
+// each action's effective angle range — makes primary muscles (bell peaks
+// at 1.0) read 100% MVC when the action's raw effort = 1.0, with
+// secondaries reading their own target fractions (0.8 for 80%-tier,
+// 0.5 for 50%-tier, etc.). Paired with the Option-B muscle auto-
+// normalization in timeline analysis (scales by 1/max_action_effort),
+// this yields "primary reads 100% at the scene's 1RM moment" regardless
+// of absolute force magnitude. User can still override per-section via
+// the Scale input in the Muscles tab.
+const DEFAULT_SECTION_SCALES: Record<string, number> = {
+    // Scapula (angles ≈ 0 structurally; scale = sum of targets).
+    'Scapula.elevation':             3.1,
+    'Scapula.depression':            3.5,
+    'Scapula.protraction':           2.8,
+    'Scapula.retraction':            3.3,
+    // Shoulder.
+    'Shoulder.flexion':              3.45,
+    'Shoulder.extension':            4.09,
+    'Shoulder.abduction':            3.27,
+    'Shoulder.adduction':            4.39,
+    'Shoulder.horizontalAbduction':  3.92,
+    'Shoulder.horizontalAdduction':  3.85,
+    'Shoulder.externalRotation':     2.99,
+    'Shoulder.internalRotation':     6.07,
+    // Elbow.
+    'Elbow.flexion':                 2.84,
+    'Elbow.extension':               1.96,
+    // Spine.
+    'Spine.flexion':                 3.1,
+    'Spine.extension':               3.6,
+    'Spine.lateralFlexionL':         4.7,
+    'Spine.lateralFlexionR':         4.7,
+    'Spine.rotationL':               3.6,
+    'Spine.rotationR':               3.6,
+    // Hip.
+    'Hip.flexion':                   3.12,
+    'Hip.extension':                 3.28,
+    'Hip.abduction':                 3.25,
+    'Hip.adduction':                 1.99,
+    'Hip.horizontalAbduction':       3.1,
+    'Hip.horizontalAdduction':       1.8,
+    'Hip.externalRotation':          4.8,
+    'Hip.internalRotation':          4.0,
+    // Knee.
+    'Knee.flexion':                  2.94,
+    'Knee.extension':                1.99,
+    // Ankle.
+    'Ankle.dorsiFlexion':            1.0,
+    'Ankle.plantarFlexion':          1.8,
+};
+
 // Default cross-joint modifications — user-editable in the Modifications tab.
 // Ships with the classic length-tension example: gastrocnemius shortening at
 // knee flex reduces its plantar-flexion contribution AND the ankle's total
@@ -736,6 +814,94 @@ const DEFAULT_MODIFICATIONS: CrossJointModification[] = [
             // Joint capacity for ankle PF drops more gently (up to 50%)
             // — soleus is monoarticular and keeps contributing.
             { kind: 'capacity', jointGroup: 'Ankle', actionKey: 'plantarFlexion', maxChange: 50, direction: 'reduce' },
+        ],
+    },
+    {
+        id: 'rf-shortening-at-hip-flex',
+        name: 'Rectus femoris shortening at hip flex',
+        sourceJoint: 'Hip',
+        sourceActionKey: 'flexion',
+        // 0% effect at hip extension (RF stretched at proximal end),
+        // ramping up to 100% at full hip flex (RF shortened → active
+        // insufficiency at the knee).
+        leftY: 0,
+        midX: 60,
+        midY: 50,
+        rightY: 100,
+        targets: [
+            // RF's share of knee extension drops up to 50% — vasti pick
+            // up the slack in the distribution.
+            { kind: 'muscle', jointGroup: 'Knee', actionKey: 'extension', muscleId: 'rectus-femoris', maxChange: 50, direction: 'reduce', muscleMode: 'relative' },
+            // Total knee-extension capacity drops only ~15% — vasti are
+            // monoarticular and keep working at full strength.
+            { kind: 'capacity', jointGroup: 'Knee', actionKey: 'extension', maxChange: 15, direction: 'reduce' },
+        ],
+    },
+    {
+        id: 'hams-shortening-at-knee-flex',
+        name: 'Hamstrings shortening at knee flex',
+        sourceJoint: 'Knee',
+        sourceActionKey: 'flexion',
+        // 0% effect at knee-straight (hams at full length for hip ext),
+        // ramping up to 100% at full knee flex (hams shortened at knee
+        // end → active insufficiency at the hip).
+        leftY: 0,
+        midX: 70,
+        midY: 50,
+        rightY: 100,
+        targets: [
+            // Hams' share of hip extension drops up to 60% — glute max
+            // and adductor-magnus-posterior pick up the slack.
+            { kind: 'muscle', jointGroup: 'Hip', actionKey: 'extension', muscleId: 'hamstrings-biarticular', maxChange: 60, direction: 'reduce', muscleMode: 'relative' },
+            // Total hip-extension capacity drops ~25% — hams were a
+            // significant contributor, glutes and magnus posterior can
+            // only partially compensate.
+            { kind: 'capacity', jointGroup: 'Hip', actionKey: 'extension', maxChange: 25, direction: 'reduce' },
+        ],
+    },
+    {
+        id: 'hams-stretched-at-hip-flex',
+        name: 'Hamstrings stretched at hip flex',
+        sourceJoint: 'Hip',
+        sourceActionKey: 'flexion',
+        // 0% effect at hip extension (hams at neutral length), ramping
+        // up to 100% at full hip flex (hams lengthened at hip end →
+        // length-tension boost for knee flexion).
+        leftY: 0,
+        midX: 60,
+        midY: 50,
+        rightY: 100,
+        targets: [
+            // Hams' share of knee flexion increases up to 30% — BF
+            // short head and gastroc see their share redistribute down.
+            { kind: 'muscle', jointGroup: 'Knee', actionKey: 'flexion', muscleId: 'hamstrings-biarticular', maxChange: 30, direction: 'increase', muscleMode: 'relative' },
+            // Total knee-flexion capacity increases ~15% — hams are a
+            // primary knee flexor, so their length-tension benefit
+            // propagates to the joint as a whole.
+            { kind: 'capacity', jointGroup: 'Knee', actionKey: 'flexion', maxChange: 15, direction: 'increase' },
+        ],
+    },
+    {
+        id: 'biceps-shortening-at-shoulder-flex',
+        name: 'Biceps shortening at shoulder flex',
+        sourceJoint: 'Shoulder',
+        sourceActionKey: 'flexion',
+        // 0% effect at shoulder-at-side or extended (biceps at full
+        // length), ramping to 100% at shoulder fully flexed overhead
+        // (biceps shortened at the proximal end → active insufficiency
+        // at the elbow). Preacher-curl-style positions.
+        leftY: 0,
+        midX: 90,
+        midY: 50,
+        rightY: 100,
+        targets: [
+            // Biceps' share of elbow flexion drops up to 40% — brachialis
+            // and brachioradialis absorb the slack.
+            { kind: 'muscle', jointGroup: 'Elbow', actionKey: 'flexion', muscleId: 'biceps-brachii', maxChange: 40, direction: 'reduce', muscleMode: 'relative' },
+            // Total elbow-flexion capacity drops ~12% — brachialis is
+            // the main flexor anyway, so the joint-level hit is smaller
+            // than the bicep-specific share change.
+            { kind: 'capacity', jointGroup: 'Elbow', actionKey: 'flexion', maxChange: 12, direction: 'reduce' },
         ],
     },
 ];
@@ -872,10 +1038,24 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'sartorius':       m(0.128, 0.8, 60, 1.4),
     },
     'Hip.extension': {
-        // Calibration range: -120° to 20° (flexion frame negated).
-        'glute-max':                 m(0.367, 1.0, -15, 3.15),
-        'hamstrings-biarticular':    m(0.1, 1.0, -54, 0.5),
-        'adductor-magnus-posterior': m(-0.121, 1.0, -100, 1),
+        // Calibration range: -120° to 20° (flexion frame negated;
+        // positive = more extension, negative = hip in flex).
+        //
+        // Hamstrings peak at -65° (centered in the 50-80° hip-flex
+        // range where they're at longest length and carry the most
+        // of the hip-extension load — sprint starts, deadlift bottom,
+        // seated good-morning). Steepness 2.5 makes the bell narrow
+        // enough that the hamstrings dominate the -80° → -50° sweet
+        // spot but fall off noticeably toward mid-range and
+        // hyperextension, where glute-max and adductor-magnus-posterior
+        // take over. glute-max and adductor-magnus-posterior steepness
+        // raised from 3.15/1 to 4/1.5 for cleaner hand-offs between
+        // the three primaries. Each primary still returns 1.0 at its
+        // own peak angle, preserving the 1:1:1 peak ratio; glute-med
+        // and glute-min's 0.4/0.3 secondary ratios also unchanged.
+        'glute-max':                 m(0.367, 1.0, -15, 4),
+        'hamstrings-biarticular':    m(0.1, 1.0, -65, 2.5),
+        'adductor-magnus-posterior': m(-0.121, 1.0, -100, 1.5),
         'glute-med':                 m(0.16, 0.4, 0, 1),
         'glute-min':                 m(0.12, 0.3, 0, 1),
     },
@@ -1130,18 +1310,32 @@ const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
     'Spine.action.Lateral Flexion L':{ min: -35, max: 35 },
     'Spine.action.Rotation L':       { min: -45, max: 45 },
 
-    // --- Hip (femur unit direction, right-normalized) ---
-    // Standing rest: (0, 1, 0). Conservative realistic limits (was too
-    // permissive):
+    // --- Hip (femur unit direction, right-normalized, PELVIS-FRAME) ---
+    // Standing rest in the pelvis frame: (0, 1, 0). Since the hip limits
+    // are interpreted in the pelvis frame (getDimensionValue transforms
+    // femur through pelvisFrame), these bounds track spine tilt: if the
+    // user tilts the spine forward, the same world-vertical femur moves
+    // closer to the y.min / z.min flexion corner automatically.
+    //
     //   Abduction: x.max = 0.65 → 40.5° pure-path (typical 30-45°).
     //   Adduction: x.min = -0.35 → 20.5° (typical 20-30°).
-    //   Flexion: y.min = -0.5 → caps at ~120° via combined paths (typical
-    //     80-90° with straight knee, up to 120° bent knee; was -0.55 → 140°).
-    //   Extension: z.max = 0.25 → 14.5° pure hyperextension (typical 10-15°).
-    //   ER / IR: ±40° (typical 35-45°; was ±45°).
+    //   Flexion:   y.min = -0.5 → 120° (cos 120° = -0.5). Bent knee
+    //     reaches this in-vivo; straight-knee flex is limited in real
+    //     people by the hamstring length-tension, which is modelled as
+    //     a separate cross-joint modification, NOT as a dir.z bound.
+    //   Extension: z.max = sin(45°) ≈ 0.707 → 45° hyperextension (prior
+    //     default was 14.5°; user wanted more range for extension-heavy
+    //     postures like back-leg lifts).
+    //   z.min = -1 → no lower z bound, so the pure-sagittal flex path
+    //     from 0° to 120° is CONTINUOUS (the old -0.9 bound interrupted
+    //     the path between ~64° and ~116°, forcing users to simultaneously
+    //     drag Y to "walk around" an invisible gap). y.min is now the
+    //     sole flexion limit, matching the intuitive "120° everywhere"
+    //     semantic.
+    //   ER / IR: ±40° (typical 35-45°).
     'Hip.dir.x': { min: -0.35, max: 0.65 },
     'Hip.dir.y': { min: -0.5,  max: 1.02 },
-    'Hip.dir.z': { min: -0.9,  max: 0.25 },
+    'Hip.dir.z': { min: -1.0,  max: 0.707 },
     'Hip.action.External Rotation': { min: -40, max: 40 },
 
     // --- Knee hinge. Same as Elbow — limit is in slider space (0=straight, 160=full flex). ---
@@ -1680,12 +1874,10 @@ const BioModelPage: React.FC = () => {
   const [muscleAssignments, setMuscleAssignments] = useState<MuscleAssignmentMap>(DEFAULT_MUSCLE_ASSIGNMENTS);
   // Per-section activation scale. Multiplier applied AFTER share distribution
   // to each muscle's contribution, then the final activation is clamped to
-  // [0, 1]. Lets sections with many co-active muscles read higher (set scale
-  // ≈ number of co-max muscles so each can hit 100% simultaneously) and
-  // sections with fewer / smaller muscles read lower. Default 1.0 preserves
-  // the pre-scale behavior. Keyed by the same `${group}.${actionKey}` that
-  // muscleAssignments uses.
-  const [sectionScales, setSectionScales] = useState<Record<string, number>>({});
+  // [0, 1]. Seeded from DEFAULT_SECTION_SCALES (max Σ bells per section)
+  // so primaries hit 100% when raw action effort = 1.0. User can override
+  // per-section via the Scale input in the Muscles tab.
+  const [sectionScales, setSectionScales] = useState<Record<string, number>>(DEFAULT_SECTION_SCALES);
   // Cross-joint modifications — user-editable rules that scale capacities or
   // muscle contributions based on another joint's current angle (see the
   // Modifications tab). Example: knee flexion shortens gastroc, which lowers
@@ -1803,11 +1995,55 @@ const BioModelPage: React.FC = () => {
     boneStartPoints['spine'] = pelvisPos;
     boneEndPoints['spine'] = neckBase;
 
-    const rootFrame = createRootFrame({x: 0, y: 1, z: 0});
+    // Pelvis yaw rotates the whole lower body (legs) AND carries the
+    // shoulders/clavicles/arms (which then ALSO pick up the extra
+    // anatomical spine twist on top). This is a solver-controllable
+    // DOF so that when the upper body is constrained and the user
+    // applies spine rotation, the solver can rotate the pelvis (and
+    // hence the lower body) instead of forcing the shoulders to move.
+    //
+    // World-space geometry:
+    //   legs rotate by  pelvisYaw
+    //   shoulders rotate by  pelvisYaw + spineTwist
+    //   anatomical spine twist = (shoulders - pelvis) = spineTwist (as set by user)
+    const pelvisYaw = currentTwists['pelvis'] || 0;
+    const spineTwist = currentTwists['spine'] || 0;
+
+    const rootFrameBase = createRootFrame({x: 0, y: 1, z: 0});
+    const rootFrame = twistFrame(rootFrameBase, pelvisYaw);
+
     // Spine frame — torso-down direction, used as the parent frame for
-    // the whole upper body (clavicles, arms). Legs continue to parent
-    // off rootFrame (hanging off the fixed pelvis).
-    const spineFrame = createRootFrame({ x: -spineDir.x, y: -spineDir.y, z: -spineDir.z });
+    // the whole upper body (clavicles, arms). Legs parent off rootFrame
+    // (which is also twisted by pelvisYaw so legs rotate with pelvis).
+    //
+    // Spine axial twist: rotation of the torso around the spine's long
+    // axis. Applied via twistFrame so the torso-local frame (and
+    // everything parented off it — clavicles, arms) rotates together.
+    // The total rotation of the spine frame is pelvisYaw + spineTwist
+    // because the spine bone sits on top of the pelvis (pelvis rotation
+    // carries it) and the anatomical spine twist adds on top. For a
+    // straight spine both rotations are about the same world-Y axis,
+    // so combining them into a single twistFrame call is exact.
+    // Torque about the rotation axis {0,1,0} is detected by Phase B as
+    // Spine.rotationL/R demand from the ANATOMICAL twist only.
+    const spineFrameBase = createRootFrame({ x: -spineDir.x, y: -spineDir.y, z: -spineDir.z });
+    const spineFrame = twistFrame(spineFrameBase, pelvisYaw + spineTwist);
+
+    // Pelvis frame — the pelvis's orientation in world. Since the spine
+    // is rigid in this model, the pelvis is rigidly attached to the
+    // spine: its "inferior" direction (pelvis → legs) is exactly the
+    // negated spine direction, and it yaws with pelvisYaw. It does NOT
+    // include spineTwist because that's the RELATIVE rotation between
+    // shoulders and pelvis, not the pelvis's own rotation.
+    //
+    // Used as the reference frame for hip joint actions and hip joint
+    // angles. A "hip flex = 0°" femur points along pelvisFrame.y (the
+    // pelvis's own inferior direction), not along world-vertical. When
+    // the user tilts the spine forward, the pelvis tilts forward with
+    // it, and if the legs remain world-vertical, the hip is in flexion
+    // relative to the pelvis — which is the anatomically correct
+    // interpretation. Tilt backward → hip extension, and so on.
+    const pelvisFrame = twistFrame(spineFrameBase, pelvisYaw);
 
     // Clavicle offsets are stored in TORSO-LOCAL coordinates; transform
     // through spineFrame to get world-space shoulder positions.
@@ -1832,16 +2068,38 @@ const BioModelPage: React.FC = () => {
     boneEndPoints['lClavicle'] = locations['lShoulder'];
     boneEndPoints['rClavicle'] = locations['rShoulder'];
 
-    locations['lHip'] = { x: -CONFIG.HIP_WIDTH, y: pelvisPos.y, z: 0 };
-    locations['rHip'] = { x: CONFIG.HIP_WIDTH, y: pelvisPos.y, z: 0 };
+    // Hip offsets are stored in pelvis-local coordinates (-HIP_WIDTH
+    // left, +HIP_WIDTH right on the x-axis) and transformed through
+    // pelvisFrame so the hip sockets rotate with BOTH the pelvis yaw
+    // AND the spine tilt. Since the spine is rigid, tilting it laterally
+    // IS the pelvis tilting about the hip — so the hip sockets must
+    // physically swing with pelvisFrame, not stay fixed in the world.
+    // The femur's kinematic parent stays rootFrame so legs remain world-
+    // oriented as before; the hip position change just means the legs
+    // now start from a rotated pelvis and the hip line visibly tilts.
+    const lHipLocal = { x: -CONFIG.HIP_WIDTH, y: 0, z: 0 };
+    const rHipLocal = { x:  CONFIG.HIP_WIDTH, y: 0, z: 0 };
+    locations['lHip'] = {
+        x: pelvisPos.x + lHipLocal.x * pelvisFrame.x.x + lHipLocal.y * pelvisFrame.y.x + lHipLocal.z * pelvisFrame.z.x,
+        y: pelvisPos.y + lHipLocal.x * pelvisFrame.x.y + lHipLocal.y * pelvisFrame.y.y + lHipLocal.z * pelvisFrame.z.y,
+        z: pelvisPos.z + lHipLocal.x * pelvisFrame.x.z + lHipLocal.y * pelvisFrame.y.z + lHipLocal.z * pelvisFrame.z.z,
+    };
+    locations['rHip'] = {
+        x: pelvisPos.x + rHipLocal.x * pelvisFrame.x.x + rHipLocal.y * pelvisFrame.y.x + rHipLocal.z * pelvisFrame.z.x,
+        y: pelvisPos.y + rHipLocal.x * pelvisFrame.x.y + rHipLocal.y * pelvisFrame.y.y + rHipLocal.z * pelvisFrame.z.y,
+        z: pelvisPos.z + rHipLocal.x * pelvisFrame.x.z + rHipLocal.y * pelvisFrame.y.z + rHipLocal.z * pelvisFrame.z.z,
+    };
 
     jointFrames['spine'] = rootFrame;
     jointFrames['lClavicle'] = spineFrame;
     jointFrames['rClavicle'] = spineFrame;
     jointFrames['lShoulder'] = spineFrame;
     jointFrames['rShoulder'] = spineFrame;
-    jointFrames['lHip'] = rootFrame;
-    jointFrames['rHip'] = rootFrame;
+    // Hip joints are anchored to the pelvis, so their action-axis frame
+    // is pelvisFrame (tilts with spine, yaws with pelvisYaw). This mirrors
+    // how the shoulder joints use spineFrame.
+    jointFrames['lHip'] = pelvisFrame;
+    jointFrames['rHip'] = pelvisFrame;
 
     const calculateChain = (name: string, child: string, grandChild: string, start: Vector3, parentFrame: Frame, len1: number, len2: number, len3: number) => {
         let frame1Base: Frame;
@@ -1896,7 +2154,21 @@ const BioModelPage: React.FC = () => {
     calculateChain('lHumerus', 'lForearm', '', locations['lShoulder'], spineFrame, BONE_LENGTHS.lHumerus, BONE_LENGTHS.lForearm, 0);
     calculateChain('rHumerus', 'rForearm', '', locations['rShoulder'], spineFrame, BONE_LENGTHS.rHumerus, BONE_LENGTHS.rForearm, 0);
 
-    return { locations, boneEndPoints, boneStartPoints, jointFrames };
+    // calculateChain sets jointFrames[femur] = rootFrame (its kinematic
+    // parent, used to interpret the stored femur direction as world-ish).
+    // For hip joint action axes and angle measurements, override with
+    // pelvisFrame — the pelvis's anatomical orientation. This means:
+    //   • Hip flex/ab/horiz axes are anchored to the pelvis (tilt with spine)
+    //   • Hip angles are measured relative to the pelvis
+    //   • Bone-local forces on the thigh are interpreted in pelvis-relative
+    //     coordinates too (transportFrame starts from pelvisFrame)
+    // The femur's STORED direction stays in rootFrame-local, so posing
+    // legs world-vertical is still natural — the computed hip angle will
+    // correctly read as extension/flexion when the spine tilts.
+    jointFrames['lFemur'] = pelvisFrame;
+    jointFrames['rFemur'] = pelvisFrame;
+
+    return { locations, boneEndPoints, boneStartPoints, jointFrames, pelvisFrame, rootFrame };
   };
 
   // --- CONSTRAINT HELPERS ---
@@ -3416,8 +3688,32 @@ const BioModelPage: React.FC = () => {
           if (!dir) return 0;
           return dirToHingeAngle(boneId, dir) * 180 / Math.PI;
       }
-      const dir = curPosture[boneId];
+      let dir = curPosture[boneId];
       if (!dir) return 0;
+
+      // Femur bones: the stored direction is in rootFrame-local (legs
+      // are kinematically parented to rootFrame so they stay world-
+      // oriented when the spine tilts). But hip joint ANGLES are
+      // measured in the pelvis frame — since the spine is rigid, any
+      // spine tilt is physically the pelvis rotating around the hip
+      // joint. So transform the femur direction through rootFrame into
+      // world, then into pelvisFrame-local, before computing flex/abd.
+      //
+      // Example: spine tilted backward 30°, legs world-vertical. In
+      // pelvis frame the femur points forward-and-down → atan2(-z, y)
+      // gives negative (extension). Matches anatomical intent.
+      if (/Femur/.test(boneId)) {
+          const spineRaw = curPosture['spine'] || { x: 0, y: -1, z: 0 };
+          const sMag = Math.sqrt(spineRaw.x*spineRaw.x + spineRaw.y*spineRaw.y + spineRaw.z*spineRaw.z) || 1;
+          const spineDirN = { x: spineRaw.x/sMag, y: spineRaw.y/sMag, z: spineRaw.z/sMag };
+          const pelvisYaw = curTwists['pelvis'] || 0;
+          const rootFrameBase = createRootFrame({ x: 0, y: 1, z: 0 });
+          const rootFrame = twistFrame(rootFrameBase, pelvisYaw);
+          const pelvisFrameBase = createRootFrame({ x: -spineDirN.x, y: -spineDirN.y, z: -spineDirN.z });
+          const pelvisFrame = twistFrame(pelvisFrameBase, pelvisYaw);
+          const worldDir = localToWorld(rootFrame, dir);
+          dir = worldToLocal(pelvisFrame, worldDir);
+      }
       const ax = action.axis;
       const sideSign = boneId.startsWith('l') ? -1 : 1;
       const rad = 180 / Math.PI;
@@ -3924,8 +4220,26 @@ const BioModelPage: React.FC = () => {
       curTwists: Record<string, number>,
   ): number => {
       if (dim.kind === 'dir' && dim.component) {
-          const v = curPosture[boneId];
+          let v = curPosture[boneId];
           if (!v) return 0;
+          // Femur dir limits (Hip.dir.x/y/z) must be interpreted in
+          // pelvis-local coordinates so they still hold when the spine
+          // tilts. The stored femur direction is in rootFrame-local
+          // (world-ish), so transform it through rootFrame → world →
+          // pelvisFrame-local. When the spine is straight, pelvisFrame
+          // equals rootFrame and this is a no-op.
+          if (/Femur/.test(boneId)) {
+              const spineRaw = curPosture['spine'] || { x: 0, y: -1, z: 0 };
+              const sMag = Math.sqrt(spineRaw.x*spineRaw.x + spineRaw.y*spineRaw.y + spineRaw.z*spineRaw.z) || 1;
+              const spineDirN = { x: spineRaw.x/sMag, y: spineRaw.y/sMag, z: spineRaw.z/sMag };
+              const pelvisYaw = curTwists['pelvis'] || 0;
+              const rootFrameBase = createRootFrame({ x: 0, y: 1, z: 0 });
+              const rootFrame = twistFrame(rootFrameBase, pelvisYaw);
+              const pelvisFrameBase = createRootFrame({ x: -spineDirN.x, y: -spineDirN.y, z: -spineDirN.z });
+              const pelvisFrame = twistFrame(pelvisFrameBase, pelvisYaw);
+              const worldDir = localToWorld(rootFrame, v);
+              v = worldToLocal(pelvisFrame, worldDir);
+          }
           let raw = v[dim.component];
           if (dim.component === 'x' && boneId.startsWith('l')) raw = -raw;
           return raw;
@@ -4023,24 +4337,65 @@ const BioModelPage: React.FC = () => {
       if (!group) return dir;
       const dims = limitDimensionsForGroup(group).filter(d => d.kind === 'dir' && d.component);
       if (dims.length === 0) return dir;
+
+      // Femur special case: Hip.dir.{x,y,z} limits are in the PELVIS
+      // frame (see getDimensionValue), while `dir` (the stored femur
+      // direction) is in rootFrame-local. We need to clamp the pelvis-
+      // frame components, not the stored components, or the post-drag
+      // projection will undo the user's carefully pelvis-frame-bound
+      // drag and silently pull the femur back to the world-frame box
+      // (undoing hip extension gained via spine tilt).
+      const isFemur = /Femur/.test(boneId);
+      let rootFrame: Frame | null = null;
+      let pelvisFrame: Frame | null = null;
+      if (isFemur) {
+          const spineRaw = curPosture['spine'] || { x: 0, y: -1, z: 0 };
+          const sMag = Math.sqrt(spineRaw.x*spineRaw.x + spineRaw.y*spineRaw.y + spineRaw.z*spineRaw.z) || 1;
+          const spineDirN = { x: spineRaw.x/sMag, y: spineRaw.y/sMag, z: spineRaw.z/sMag };
+          const pelvisYaw = curTwists['pelvis'] || 0;
+          rootFrame = twistFrame(createRootFrame({ x: 0, y: 1, z: 0 }), pelvisYaw);
+          pelvisFrame = twistFrame(createRootFrame({ x: -spineDirN.x, y: -spineDirN.y, z: -spineDirN.z }), pelvisYaw);
+      }
+
       let result: Vector3 = { ...dir };
       const flipX = boneId.startsWith('l');
       for (let iter = 0; iter < 4; iter++) {
           // Each iteration sees the latest `result` via the posture snapshot.
           const snapshot = { ...curPosture, [boneId]: result };
           let changed = false;
+
+          // Working vector: the one we actually clamp against the dir
+          // limits. For femur this is the pelvis-local direction; for
+          // everything else it's the stored direction itself.
+          let working: Vector3;
+          if (isFemur && rootFrame && pelvisFrame) {
+              const worldDir = localToWorld(rootFrame, result);
+              working = worldToLocal(pelvisFrame, worldDir);
+          } else {
+              working = { ...result };
+          }
+
           for (const dim of dims) {
               const eff = getEffectiveLimit(dim.key, boneId, snapshot, curTwists);
               if (!eff) continue;
               const comp = dim.component as 'x' | 'y' | 'z';
-              const stored = result[comp];
+              const stored = working[comp];
               const normalized = (comp === 'x' && flipX) ? -stored : stored;
               const clamped = clamp(normalized, eff.min, eff.max);
               if (Math.abs(clamped - normalized) > 1e-6) {
-                  result[comp] = (comp === 'x' && flipX) ? -clamped : clamped;
+                  working[comp] = (comp === 'x' && flipX) ? -clamped : clamped;
                   changed = true;
               }
           }
+
+          // Transform back to stored frame for femur.
+          if (isFemur && rootFrame && pelvisFrame) {
+              const newWorld = localToWorld(pelvisFrame, working);
+              result = worldToLocal(rootFrame, newWorld);
+          } else {
+              result = working;
+          }
+
           if (!changed) break;
           // Re-normalize — clamping can take the direction off the unit
           // sphere. Only re-normalize if magnitude is sane (avoid divide
@@ -4422,6 +4777,18 @@ const BioModelPage: React.FC = () => {
               cur = BONE_PARENTS[cur];
           }
       }
+      // Pelvis yaw is a GLOBAL rotation DOF — when it's free, adjusting
+      // it simultaneously rotates the legs (via rootFrame) and the
+      // shoulders/arms (via spineFrame). So when pelvis is a solver DOF
+      // AND the user is driving spine or any bone in the upper body,
+      // leg constraints become relevant (and vice versa). Include the
+      // entire skeleton in the influence chain whenever pelvis is free
+      // and there is any input — the solver must check all constraints
+      // because the pelvis maneuver affects every branch.
+      const pelvisIsFree = !lockedBoneIds.has('pelvis') && !lockedTwistIds.has('pelvis');
+      if (pelvisIsFree && inputBones.size > 0) {
+          for (const b of Object.keys(BONE_PARENTS)) influenceChain.add(b);
+      }
 
       const relevantCons = inputBones.size === 0
           ? cons  // no explicit input bones (e.g., playback): all constraints enforced
@@ -4490,12 +4857,27 @@ const BioModelPage: React.FC = () => {
           };
       }
 
-      // Twist DOFs: humerus/femur bones whose twist can be adjusted by the
-      // solver. Each gets a single scalar DOF (the twist angle in degrees).
-      const isTwistBone = (b: string) => /Humerus|Femur/.test(b);
-      const freeBonesTwist = Object.keys(posture).filter(
+      // Twist DOFs the solver can adjust:
+      //   - humerus/femur twists (per-bone axial rotation)
+      //   - spine twist (anatomical shoulder-to-pelvis relative rotation)
+      //   - pelvis yaw (world-frame rotation of the lower body)
+      //
+      // Spine and pelvis together handle axial rotation of the torso:
+      // the user sets spine; the solver freely adjusts pelvis (and other
+      // bones) to satisfy constraints. If the upper body is pinned, the
+      // solver drives pelvis opposite to spine so the shoulders stay
+      // fixed in world while the legs rotate. Pelvis is not a posture
+      // bone — it's a scalar DOF tracked only in `twists`.
+      const isTwistBone = (b: string) => /Humerus|Femur/.test(b) || b === 'spine' || b === 'pelvis';
+      const freeBonesTwistFromPosture = Object.keys(posture).filter(
           b => isTwistBone(b) && !lockedBoneIds.has(b) && !lockedTwistIds.has(b) && posture[b] !== undefined
       );
+      // Pelvis is a pseudo-bone — not in posture, but still a scalar
+      // twist DOF whenever it isn't explicitly locked.
+      const freeBonesTwist = [...freeBonesTwistFromPosture];
+      if (!lockedBoneIds.has('pelvis') && !lockedTwistIds.has('pelvis') && !freeBonesTwist.includes('pelvis')) {
+          freeBonesTwist.push('pelvis');
+      }
       const twistMap: Record<string, number> = {};
       for (const bid of freeBonesTwist) twistMap[bid] = solvedTwists[bid] || 0;
 
@@ -4663,6 +5045,41 @@ const BioModelPage: React.FC = () => {
       }
 
       return maxAbs <= globalTol ? { posture, twists: solvedTwists } : null;
+  };
+
+  // Standalone posture-level joint-limit check: returns true if ANY joint
+  // has a dim whose value falls outside its effective limits. This covers
+  // the cross-bone case where moving bone A (e.g. spine) implicitly changes
+  // bone B's angle in bone B's own reference frame (e.g. femur's pelvis-
+  // local angle). Spine drags can't violate hip limits via direct clamping
+  // alone because the clamp only runs on the bone being dragged — the
+  // downstream effect on the hip is invisible to the spine's slider.
+  //
+  // Used by the adaptive step-halving drag loops: a step that produces a
+  // limit-violating posture is treated the same as a solver failure, so
+  // the loop halves the step and retries. Naturally clamps the user's
+  // drag at the point where any joint hits its range boundary.
+  //
+  // A small tolerance prevents numerical drift (the step slightly past
+  // the boundary due to FP noise) from endlessly re-halving when the
+  // drag has actually converged.
+  const postureViolatesLimits = (p: Posture, t: Record<string, number>): boolean => {
+      const DIR_TOL = 0.01;     // unit-vector component tolerance (~0.6°)
+      const ANGLE_TOL = 0.5;    // degree tolerance for action-based limits
+      for (const [group, sides] of Object.entries(GROUP_BONES) as [JointGroup, { left: string; right: string } | null][]) {
+          if (!sides) continue;
+          const dims = limitDimensionsForGroup(group);
+          for (const bone of [sides.left, sides.right]) {
+              for (const dim of dims) {
+                  const eff = getEffectiveLimit(dim.key, bone, p, t);
+                  if (!eff) continue;
+                  const val = getDimensionValue(dim, bone, p, t);
+                  const tol = dim.kind === 'dir' ? DIR_TOL : ANGLE_TOL;
+                  if (val > eff.max + tol || val < eff.min - tol) return true;
+              }
+          }
+      }
+      return false;
   };
 
   // Standalone posture-level constraint check: returns true if any active
@@ -4890,13 +5307,19 @@ const BioModelPage: React.FC = () => {
           const oppositeKey = `${d.jointGroup}.${actionKey(oppositeName)}`;
           distributeToSection(oppositeKey, -directionAngle, side, -d.effort);
       }
-      // Clamp activations to [−1, 1]. Positive clamp at 1 = can't display
-      // above 100% MVC (enforced by section-scale math). Negative clamp at
-      // −1 preserves the existing antagonist-cancellation bookkeeping; the
-      // downstream `> 1e-6` filter drops fully-negative entries.
+      // No upper clamp at this stage. Raw activations scale linearly with
+      // action_effort, so they can legitimately exceed 1.0 when force
+      // magnitude is set high — the Option-B auto-normalization downstream
+      // divides by max_action_effort to bring them back into [0, 1] at
+      // display time. Previously clamping at 1.0 here defeated that math
+      // (primary saturated early, then got re-divided by a larger denom
+      // → under-reads).
+      //
+      // Lower clamp at −1 preserves antagonist-cancellation bookkeeping;
+      // the downstream `> 1e-6` filter drops fully-negative entries.
       for (const key of Object.keys(acc)) {
           const a = acc[key].activation;
-          acc[key].activation = a > 1 ? 1 : a < -1 ? -1 : a;
+          if (a < -1) acc[key].activation = -1;
       }
       return acc;
   };
@@ -5272,8 +5695,24 @@ const BioModelPage: React.FC = () => {
           }
       }
 
+      // Find max RAW action effort across the ROM (pre-joint-1RM scaling).
+      // Used as the denominator for Option-B muscle auto-normalization:
+      // at the scene's hardest-action frame, the action's primary muscles
+      // read 100% MVC, regardless of the user's absolute force magnitude.
+      // Independent of the joint-1RM scaling below (which sums actions
+      // and would cause muscles to cap at ~25% for multi-action joints).
+      let maxRawActionEffort = 0;
+      for (const s of actionSeries) {
+          for (let i = 0; i < s.efforts.length; i++) {
+              if (s.efforts[i] > maxRawActionEffort) maxRawActionEffort = s.efforts[i];
+          }
+      }
+
       if (globalMaxJointEffort > 1e-9) {
           const scale = 1 / globalMaxJointEffort;
+          // Joint-1RM scale applies to the JOINT EFFORT / ACTION DEMAND
+          // displays: it renormalizes so the limiting joint reads 100%.
+          // This is a DISPLAY transform on a relative metric.
           for (const p of peaks) {
               p.peakEffort *= scale;
               p.peakTorque *= scale;
@@ -5287,15 +5726,21 @@ const BioModelPage: React.FC = () => {
                   s.efforts[i] *= scale;
               }
           }
-          // Apply same scale to muscle activations, then clamp at 1.0.
-          // Muscles already saturated pre-scale stay at 1.0; others
-          // scale up in step with the joint-level 1RM factor.
+      }
+
+      // Option B: muscle auto-normalization using max RAW action effort
+      // (not joint effort). Scales so the primary muscle of the scene's
+      // hardest action reads 100% MVC at that frame. Secondaries scale
+      // proportionally. Clamp at 1.0 after scaling (biarticular sums
+      // can exceed 1.0 but a muscle can't physiologically pass MVC).
+      if (maxRawActionEffort > 1e-9) {
+          const muscleScale = 1 / maxRawActionEffort;
           for (const mp of musclePeakMap.values()) {
-              mp.peakActivation = Math.min(1, mp.peakActivation * scale);
+              mp.peakActivation = Math.min(1, mp.peakActivation * muscleScale);
           }
           for (const ms of muscleSeriesMap.values()) {
               for (let i = 0; i < ms.activations.length; i++) {
-                  ms.activations[i] = Math.min(1, ms.activations[i] * scale);
+                  ms.activations[i] = Math.min(1, ms.activations[i] * muscleScale);
               }
           }
       }
@@ -5396,6 +5841,14 @@ const BioModelPage: React.FC = () => {
       let lastAcceptedPosture: Posture = workingPosture;
       let lastAcceptedTwists: Record<string, number> = workingTwists;
 
+      // If the drag starts in a limit-violating posture, don't apply the
+      // new-violation check (we can't strictly enforce when we're already
+      // past the boundary — just let the drag proceed as before). For
+      // valid starting poses, each step must not introduce a new violation
+      // on ANY joint (including downstream effects like scapula changes
+      // shifting shoulder position past its limit).
+      const startedInViolation = postureViolatesLimits(posture, twists);
+
       let progress = 0;
       let step = NOMINAL_STEP;
       while (progress < 1 - 1e-9) {
@@ -5413,7 +5866,8 @@ const BioModelPage: React.FC = () => {
           if (symmetryMode) tentative = mirrorPosture(tentative, selectedBone);
 
           const solved = solveConstraintsAccommodating(tentative, lockedSet, workingTwists);
-          if (solved !== null) {
+          const limitsOk = solved !== null && (startedInViolation || !postureViolatesLimits(solved.posture, solved.twists));
+          if (limitsOk && solved !== null) {
               workingPosture = solved.posture;
               workingTwists = solved.twists;
               lastAcceptedPosture = solved.posture;
@@ -5486,6 +5940,8 @@ const BioModelPage: React.FC = () => {
       let lastAcceptedPosture: Posture = workingPosture;
       let lastAcceptedTwists: Record<string, number> = workingTwists;
 
+      const startedInViolation = postureViolatesLimits(posture, twists);
+
       let progress = 0;
       let step = NOMINAL_STEP;
       while (progress < 1 - 1e-9) {
@@ -5497,7 +5953,8 @@ const BioModelPage: React.FC = () => {
           if (symmetryMode) tentative = mirrorPosture(tentative, selectedBone);
 
           const solved = solveConstraintsAccommodating(tentative, lockedSet, workingTwists);
-          if (solved !== null) {
+          const limitsOk = solved !== null && (startedInViolation || !postureViolatesLimits(solved.posture, solved.twists));
+          if (limitsOk && solved !== null) {
               workingPosture = solved.posture;
               workingTwists = solved.twists;
               lastAcceptedPosture = solved.posture;
@@ -5563,6 +6020,8 @@ const BioModelPage: React.FC = () => {
         let lastAcceptedPosture: Posture = workingPosture;
         let lastAcceptedTwists: Record<string, number> = workingTwists;
 
+        const startedInViolation = postureViolatesLimits(posture, twists);
+
         let progress = 0;
         let step = NOMINAL_STEP;
         while (progress < 1 - 1e-9) {
@@ -5584,7 +6043,8 @@ const BioModelPage: React.FC = () => {
             let tentative: Posture = { ...workingPosture, [rootBone]: solution.vec1, [childBone]: childVecLocal };
             if (symmetryMode) tentative = mirrorPosture(tentative, rootBone);
             const solved = solveConstraintsAccommodating(tentative, lockedSet, workingTwists);
-            if (solved !== null) {
+            const limitsOk = solved !== null && (startedInViolation || !postureViolatesLimits(solved.posture, solved.twists));
+            if (limitsOk && solved !== null) {
                 workingPosture = solved.posture;
                 workingTwists = solved.twists;
                 lastAcceptedPosture = solved.posture;
@@ -5622,6 +6082,17 @@ const BioModelPage: React.FC = () => {
     // Clamp against the DIR limit for this bone's joint group. Limits are
     // stored in right-normalized form — for left-side bones we flip X
     // before clamping, then flip back.
+    //
+    // FEMUR special case: Hip.dir.{x,y,z} limits are interpreted in the
+    // PELVIS frame (getDimensionValue transforms before reading the
+    // component). A world-frame clamp on targetComp against a pelvis-
+    // frame bound is wrong — when the spine is tilted, the world-frame
+    // value that corresponds to the pelvis-frame limit is different. We
+    // solve analytically: pelvisLocal[axis] is linear in targetComp
+    // (holding other stored components fixed), so we can invert the
+    // relationship to get the world-frame bounds that produce the
+    // pelvis-frame limit. Falls back to the world-frame clamp when the
+    // slope is degenerate (axis nearly perpendicular to the pelvis axis).
     const dirGroup = getBoneJointGroup(selectedBone);
     if (dirGroup) {
         const dims = limitDimensionsForGroup(dirGroup);
@@ -5629,9 +6100,70 @@ const BioModelPage: React.FC = () => {
         if (dirDim) {
             const eff = getEffectiveLimit(dirDim.key, selectedBone, posture, twists);
             if (eff) {
-                const flipped = axis === 'x' && selectedBone.startsWith('l') ? -targetComp : targetComp;
-                const clamped = clamp(flipped, eff.min, eff.max);
-                targetComp = axis === 'x' && selectedBone.startsWith('l') ? -clamped : clamped;
+                const isFemur = /Femur/.test(selectedBone);
+                if (isFemur) {
+                    // Build rootFrame / pelvisFrame from current state (must
+                    // match calculateKinematics). Legs parent off rootFrame,
+                    // so stored femur → world via localToWorld(rootFrame, …).
+                    const spineRaw = posture['spine'] || { x: 0, y: -1, z: 0 };
+                    const sMag = Math.sqrt(spineRaw.x*spineRaw.x + spineRaw.y*spineRaw.y + spineRaw.z*spineRaw.z) || 1;
+                    const spineDirN = { x: spineRaw.x/sMag, y: spineRaw.y/sMag, z: spineRaw.z/sMag };
+                    const pelvisYaw = twists['pelvis'] || 0;
+                    const rootFrameBase = createRootFrame({ x: 0, y: 1, z: 0 });
+                    const rootFrame = twistFrame(rootFrameBase, pelvisYaw);
+                    const pelvisFrameBase = createRootFrame({ x: -spineDirN.x, y: -spineDirN.y, z: -spineDirN.z });
+                    const pelvisFrame = twistFrame(pelvisFrameBase, pelvisYaw);
+
+                    // pelvisLocal[axis] = dot(pelvisFrame[axis], worldDir)
+                    //   where worldDir = rootFrame.x * stored.x + rootFrame.y * stored.y + rootFrame.z * stored.z
+                    // Holding stored.{other axes} fixed, this is linear in targetComp:
+                    //   pelvisLocal[axis] = offset + slope * targetComp
+                    //   slope = dot(pelvisFrame[axis], rootFrame[axis])
+                    //   offset = Σ over i≠axis of dot(pelvisFrame[axis], rootFrame.i) * startDir.i
+                    const pf = pelvisFrame[axis];
+                    const slopes = {
+                        x: dotProduct(pf, rootFrame.x),
+                        y: dotProduct(pf, rootFrame.y),
+                        z: dotProduct(pf, rootFrame.z),
+                    };
+                    const slope = slopes[axis];
+                    const offset =
+                          (axis !== 'x' ? slopes.x * startDir.x : 0)
+                        + (axis !== 'y' ? slopes.y * startDir.y : 0)
+                        + (axis !== 'z' ? slopes.z * startDir.z : 0);
+
+                    // Pelvis-frame limits for this axis. Left-side x is
+                    // stored as the negated pelvis-local x (bilateral
+                    // normalization), so the bounds invert: if the stored
+                    // dim value is in [eff.min, eff.max], the pelvis-local
+                    // value is in [-eff.max, -eff.min] for the left side.
+                    let pelvisLo = eff.min, pelvisHi = eff.max;
+                    if (axis === 'x' && selectedBone.startsWith('l')) {
+                        pelvisLo = -eff.max;
+                        pelvisHi = -eff.min;
+                    }
+
+                    if (Math.abs(slope) > 1e-6) {
+                        const tcA = (pelvisLo - offset) / slope;
+                        const tcB = (pelvisHi - offset) / slope;
+                        const lo = Math.min(tcA, tcB);
+                        const hi = Math.max(tcA, tcB);
+                        targetComp = clamp(targetComp, lo, hi);
+                    } else {
+                        // Degenerate slope (this axis doesn't move pelvis-
+                        // local[axis] at the current pose). Fall back to the
+                        // world-frame clamp — the adaptive loop's
+                        // postureViolatesLimits will catch any remaining
+                        // out-of-range state.
+                        const flipped = axis === 'x' && selectedBone.startsWith('l') ? -targetComp : targetComp;
+                        const clamped = clamp(flipped, eff.min, eff.max);
+                        targetComp = axis === 'x' && selectedBone.startsWith('l') ? -clamped : clamped;
+                    }
+                } else {
+                    const flipped = axis === 'x' && selectedBone.startsWith('l') ? -targetComp : targetComp;
+                    const clamped = clamp(flipped, eff.min, eff.max);
+                    targetComp = axis === 'x' && selectedBone.startsWith('l') ? -clamped : clamped;
+                }
             }
         }
     }
@@ -5658,6 +6190,12 @@ const BioModelPage: React.FC = () => {
 
     const oppBone = symmetryMode ? getOppositeBone(selectedBone) : null;
 
+    // Primary enforcement hook for cross-bone limit effects — e.g. dragging
+    // the spine direction here will shift the femur's pelvis-local angle
+    // (via pelvisFrame), so the hip.dir.x/y/z limits must be re-checked on
+    // every step even though the femur itself isn't being dragged.
+    const startedInViolation = postureViolatesLimits(posture, twists);
+
     let progress = 0;
     let step = NOMINAL_STEP;
     while (progress < 1 - 1e-9) {
@@ -5679,7 +6217,8 @@ const BioModelPage: React.FC = () => {
         const solved = solveConstraintsAccommodating(
             tentative, lockedSet, workingTwists, axisLocks
         );
-        if (solved !== null) {
+        const limitsOk = solved !== null && (startedInViolation || !postureViolatesLimits(solved.posture, solved.twists));
+        if (limitsOk && solved !== null) {
             workingPosture = solved.posture;
             workingTwists = solved.twists;
             lastAcceptedPosture = solved.posture;
@@ -5748,7 +6287,9 @@ const BioModelPage: React.FC = () => {
     }
 
     // Negate so that increasing slider = external rotation for both arms.
-    const storeVal = selectedBone.startsWith('l') ? clampedVal : -clampedVal;
+    // Spine is central (no mirror side), so store slider value directly.
+    const storeVal = selectedBone === 'spine' ? clampedVal
+                  : selectedBone.startsWith('l') ? clampedVal : -clampedVal;
 
     const startTwist = twists[selectedBone] || 0;
     const totalDelta = storeVal - startTwist;
@@ -5774,6 +6315,8 @@ const BioModelPage: React.FC = () => {
     let lastAcceptedPosture: Posture = workingPosture;
     let lastAcceptedTwists: Record<string, number> = workingTwists;
 
+    const startedInViolation = postureViolatesLimits(posture, twists);
+
     let progress = 0;
     let step = NOMINAL_STEP;
     while (progress < 1 - 1e-9) {
@@ -5788,12 +6331,21 @@ const BioModelPage: React.FC = () => {
         const solved = solveConstraintsAccommodating(
             tentativePosture, lockedSet, tentativeTwists, [], lockedTwistSet
         );
+        // Build the candidate posture+twists the same way the accept branch
+        // will, so the limit check sees the preserved user-intended twist
+        // rather than any drift the solver introduced.
+        let candidatePosture: Posture | null = null;
+        let candidateTwists: Record<string, number> | null = null;
         if (solved !== null) {
-            workingPosture = solved.posture;
-            workingTwists = solved.twists;
-            // Preserve the user's intended twist value.
-            workingTwists[selectedBone] = stepTwist;
-            if (oppBone) workingTwists[oppBone] = -stepTwist;
+            candidatePosture = solved.posture;
+            candidateTwists = { ...solved.twists, [selectedBone]: stepTwist };
+            if (oppBone) candidateTwists[oppBone] = -stepTwist;
+        }
+        const limitsOk = candidatePosture !== null && candidateTwists !== null &&
+            (startedInViolation || !postureViolatesLimits(candidatePosture, candidateTwists));
+        if (limitsOk && candidatePosture !== null && candidateTwists !== null) {
+            workingPosture = candidatePosture;
+            workingTwists = candidateTwists;
             lastAcceptedPosture = workingPosture;
             lastAcceptedTwists = { ...workingTwists };
             progress = nextProgress;
@@ -5830,7 +6382,9 @@ const BioModelPage: React.FC = () => {
     // Right-side twist is stored negated so increasing slider = external.
     // Left-side is stored non-negated (mirrorTwists handles the mirror).
     // Negate right for display so both arms show the same anatomical angle.
-    const twist = selectedBone.startsWith('l') ? raw : -raw;
+    // Spine is central — display value = stored value directly.
+    const twist = selectedBone === 'spine' ? raw
+                : selectedBone.startsWith('l') ? raw : -raw;
     return isNaN(twist) ? 0 : Math.round(twist * 10) / 10;
   }, [selectedBone, twists]);
 
@@ -6406,7 +6960,7 @@ const BioModelPage: React.FC = () => {
                             <div><div className="flex justify-between mb-2"><label className="font-bold text-gray-700 text-xs flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-blue-500"></span>Z Axis (Ext/Flex)</label><span className="font-mono text-gray-500 font-bold text-xs">{intentCoords.z}</span></div><input type="range" min="-150" max="150" step="1" value={intentCoords.z} onChange={(e) => handlePointChange('z', parseFloat(e.target.value))} className="bio-range w-full text-gray-900"/></div>
                             <div className="pt-4 mt-4 border-t border-gray-100">
                                 <div className="flex justify-between mb-2">
-                                    <label className="font-bold text-gray-700 text-xs flex items-center gap-2"><RefreshCw className="w-3 h-3 text-orange-500" />Rotation (Int/Ext)</label>
+                                    <label className="font-bold text-gray-700 text-xs flex items-center gap-2"><RefreshCw className="w-3 h-3 text-orange-500" />Rotation {selectedBone === 'spine' ? '(R/L)' : '(Int/Ext)'}</label>
                                     <span className="font-mono text-gray-500 font-bold text-xs">{displayTwist}°</span>
                                 </div>
                                 <input
@@ -6420,8 +6974,8 @@ const BioModelPage: React.FC = () => {
                                 />
                                 {ROTATION_LIMITS[selectedBone] && (
                                     <div className="flex justify-between mt-1">
-                                        <span className="text-[9px] font-bold text-gray-400">{ROTATION_LIMITS[selectedBone].min}° (Int)</span>
-                                        <span className="text-[9px] font-bold text-gray-400">{ROTATION_LIMITS[selectedBone].max}° (Ext)</span>
+                                        <span className="text-[9px] font-bold text-gray-400">{ROTATION_LIMITS[selectedBone].min}° ({selectedBone === 'spine' ? 'R' : 'Int'})</span>
+                                        <span className="text-[9px] font-bold text-gray-400">{ROTATION_LIMITS[selectedBone].max}° ({selectedBone === 'spine' ? 'L' : 'Ext'})</span>
                                     </div>
                                 )}
                             </div>
@@ -6949,8 +7503,19 @@ const BioModelPage: React.FC = () => {
                                          * muscle reads 100%; raw: passes through).
                                          */}
                                        {analysisView === 'muscle' && muscleActivation.length > 0 && (() => {
-                                           const muscleScale = torqueDisplayMode === '1rm-local'
-                                               ? (muscleActivation[0].activation > 1e-9 ? 1 / muscleActivation[0].activation : 1)
+                                           // Option-B auto-normalization: scale muscles so the
+                                           // primary of the scene's hardest action reads 100% MVC.
+                                           // Uses max RAW action effort (not joint effort) as the
+                                           // denominator — avoids the 25% cap that would come from
+                                           // joint-1RM scaling on multi-action joints.
+                                           let maxActionEffort = 0;
+                                           if (torqueDisplayMode === '1rm-local') {
+                                               for (const d of torqueDistribution.demands) {
+                                                   if (d.effort > maxActionEffort) maxActionEffort = d.effort;
+                                               }
+                                           }
+                                           const muscleScale = (torqueDisplayMode === '1rm-local' && maxActionEffort > 1e-9)
+                                               ? 1 / maxActionEffort
                                                : 1;
                                            return (
                                                <div className="bg-white border border-gray-100 rounded-2xl p-4">
@@ -6960,7 +7525,7 @@ const BioModelPage: React.FC = () => {
                                                    </div>
                                                    <div className="space-y-2">
                                                        {muscleActivation.map(ma => {
-                                                           const pct = ma.activation * muscleScale * 100;
+                                                           const pct = Math.min(100, ma.activation * muscleScale * 100);
                                                            const barColor = pct > 80 ? 'bg-red-400' : pct > 50 ? 'bg-amber-400' : 'bg-teal-400';
                                                            const sideTag = ma.side ? `${ma.side[0]} ` : '';
                                                            return (
