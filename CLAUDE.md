@@ -29,7 +29,20 @@ The target exercises are basic strength training (pull-ups, dumbbell shoulder pr
 - Ball-and-socket (Humerus, Femur): 2-DOF direction + 1-DOF twist (IR/ER)
 - Hinge (Forearm, Tibia, Foot): 1-DOF arc in parent's y-z plane (x=0 in parent-local)
 - Clavicle: offset vector (elevation + protraction), not unit direction
-- Spine: passive 2-DOF unit direction bone (pelvis → ribcage). No user controls — positioned only by the solver to accommodate constraints. Torque demands detected via the force chain. Arms parent off spineFrame, legs off rootFrame.
+- Spine: 2-DOF unit direction bone (pelvis → ribcage). User can edit direction via intent-coord sliders (tilt/flex) and axial rotation via the rotation slider (spineTwist). Arms parent off spineFrame, legs off rootFrame. Torque demands detected via the force chain.
+
+**Pelvis DOFs (pseudo-bone, tracked in `twists`):**
+- `pelvis` (yaw): axial rotation of the lower body around the pelvis's vertical axis. Solver-controllable. Lets the solver counter-rotate legs when the upper body is constrained and the user applies spine rotation.
+- `pelvisTx`, `pelvisTy`, `pelvisTz`: world-unit translational offsets of the pelvis from its default (0, TORSO_LEN/2, 0). Solver-controllable. Fix the over-constrained closed-chain case: feet pinned + knee flex needs the pelvis to drop (squat); hands pinned on a pull-up bar needs the pelvis to hang down. Position gradient is L²-rescaled (POS_GRAD_SCALE=50) so the Armijo step magnitude competes with angular gradients — without rescaling the solver would take ~1/L as big a translation step per iteration and fail to converge within MAX_ITERS. Ranges: ±100 world units per axis.
+
+**Pelvis frame (`pelvisFrame`):**
+- Built from `createRootFrame(-spineDir)` twisted by pelvisYaw. Does NOT include spineTwist (that's the anatomical shoulder-to-pelvis relative rotation, not the pelvis's own rotation).
+- Used as the reference frame for:
+  - Hip joint action axes (so hip flex/ab/horiz track spine tilt)
+  - Hip joint angle measurement (femur direction is transformed rootFrame → world → pelvisFrame before the plane-projection atan2)
+  - Hip joint limits (`Hip.dir.{x,y,z}` values are read in pelvis-local via `getDimensionValue`, so limits hold regardless of spine tilt)
+  - Hip socket world positions (the hip line visually swings with the spine)
+- The femur's KINEMATIC parent stays rootFrame so legs remain world-fixed when only the spine tilts — the decoupling is deliberate. `handlePointChange`'s pre-loop clamp for femur solves analytically for the world-frame equivalent of the pelvis-frame bound so intent-coord drags can reach the anatomical boundary even when the spine is tilted.
 
 **Constraint system (BoneConstraint):**
 - `type: 'planar'`: bone tip locked to a plane (normal + center). Used for flat motion paths.
@@ -71,9 +84,11 @@ The target exercises are basic strength training (pull-ups, dumbbell shoulder pr
 - Dimensions: hinges use action-based (angle in degrees), ball-sockets/scapula/spine use DIR X/Y/Z on stored vector.
 - Bilateral normalization: left-side DIR X is flipped for limit comparison so both sides share one table.
 - Slider clamping: all drag handlers clamp input against effective limits.
-- Solver enforcement: hinge angles clamped in the Armijo line search.
+- Solver enforcement: hinge angles clamped in the Armijo line search; angular twists clamped against ROTATION_LIMITS; pelvis translation clamped against POSITION_LIMITS.
 - Torque zeroing: demands pushing into a hit limit are dropped.
 - Default scapula coupling: retraction range widens as scapula elevates.
+- **Cross-bone enforcement (`postureViolatesLimits`)**: spine drags that would shift a downstream joint (e.g. hip) past its limit in pelvis-frame coordinates get step-halved in every drag handler's adaptive loop, treating limit violation the same as solver failure. Prevents the "tilt spine backward so hip extension exceeds 45°" class of bugs where direct slider clamping only checks the bone being dragged. Drags that START in a violating state are waived through so the user can escape bad postures.
+- **Hip defaults (2026-04-22 update)**: `Hip.dir.z.max = 0.707` (45° extension, up from 14.5°); `Hip.dir.z.min = -1.0` (removes the gap that blocked pure-sagittal flex between ~64° and ~116°); `Hip.dir.y.min = -0.5` remains the sole flex stop at 120°.
 
 **Symmetry mode:**
 - `applyWholesaleSync(src)`: any edit on one side regenerates the other side's posture, twists, forces, AND constraints from scratch.
@@ -90,7 +105,7 @@ The target exercises are basic strength training (pull-ups, dumbbell shoulder pr
 
 1. **No gravity in the model.** All forces are manually defined vectors on bones. A dumbbell press is just a downward force at the hands. A leg press is a force at the feet pushing in the correct direction.
 
-2. **Spine is passive.** The spine is in the kinematic chain (pelvis → spine → clavicles) and the solver can tilt it to accommodate constraints, but there are no dedicated user controls for spine position. For exercises requiring torso tilt (bent-over rows), the user can either constrain the feet and flex the hips (solver tilts spine), or rotate all forces by the desired angle to simulate a different gravity direction while keeping the figure upright. Spine torque demands (flexion, lateral flex, rotation) are detected from forces propagating through the chain.
+2. **Spine is directly user-controllable (as of 2026-04-22).** The spine direction is a 2-DOF unit vector the user edits via X/Y/Z intent-coord sliders. Spine axial rotation is a separate scalar edited via the rotation slider. Because the spine is rigid in this model, any tilt of the spine is anatomically equivalent to rotating the pelvis at the hip — which is why `pelvisFrame` uses `-spineDir` as its Y axis and why hip angles are measured in pelvis-frame coordinates. Spine torque demands (flexion, lateral flex, rotation) are detected from forces propagating through the chain; the user's direct spine input generates those demands naturally.
 
 3. **No "equipment objects."** Exercises are built by posing the figure and adding constraints + forces to body parts. A barbell isn't an object — it's constraints on the hands. A cable machine is a point-tracking force.
 
@@ -115,8 +130,13 @@ The target exercises are basic strength training (pull-ups, dumbbell shoulder pr
 7. ~~Joint limits~~ (DONE) — passive end-range with slider clamping, solver enforcement, torque zeroing, coupling.
 8. ~~Angle-dependent capacity~~ (DONE) — cosine interpolation creates realistic strength curves.
 9. ~~Force refinement~~ (DONE) — bone-local direction, ignore-twist, resistance profiles, magnitude scaling.
-10. ~~Spine unlock~~ (DONE) — passive chain element, solver-positionable, torque demands detected.
-11. **Muscle activation mapping** — combine joint torques with manually-defined strength curves and per-muscle recruitment ratios to produce per-muscle activation percentages. Includes two-joint muscle inhibition as separate modifiers.
+10. ~~Spine unlock~~ (DONE) — direct user control via intent coords + rotation slider.
+11. ~~Muscle activation mapping~~ (DONE) — per-muscle bell curves + section scales + Option-B muscle normalization + cross-joint modifications. Live in the Muscles tab and the Timeline Peaks muscle view.
+12. ~~Pelvis rotation DOF (pelvisYaw)~~ (DONE, 2026-04-22) — solver-controllable axial rotation of the lower body. Lets the solver counter-rotate legs when the spine rotates and the upper body is constrained.
+13. ~~Pelvis frame (tilt-aware hip angles)~~ (DONE, 2026-04-22) — hip joint actions and angle measurements anchor to `pelvisFrame`. Spine tilt correctly propagates to hip flexion/extension readouts.
+14. ~~Cross-bone limit enforcement~~ (DONE, 2026-04-22) — `postureViolatesLimits` hooked into all adaptive drag loops. Spine drags can't silently push downstream joints past their limits.
+15. ~~Pelvis translation DOFs (pelvisTx/Ty/Tz)~~ (DONE, 2026-04-22) — solver can translate the whole body in world space to satisfy distal constraints (squats, pull-ups, deadlifts, any closed-chain exercise). Gradient L²-rescaled for convergence in ≤150 iterations.
+16. **Machine cataloging pipeline** — in progress. Per-machine JSON files with metadata + physics; build step runs sim on each and writes a consolidated output bundle for the fitness app. See `SESSION_NOTES.md` for the format decision (Option A) and the current stress-test status.
 
 ## Key Technical Concepts
 
@@ -137,3 +157,7 @@ The target exercises are basic strength training (pull-ups, dumbbell shoulder pr
 - **Shoulder/Hip horizontal ab/ad**: Uses `useWorldAxis: true` with axis {0,1,0} = world vertical. Without this flag, the local-frame Y would alias to the bone axis (since frame.y = bone direction for createAbsoluteFrame), colliding with IR/ER and causing horizontal adduction demand to be identically zero via residual subtraction.
 
 - **Bilateral normalization**: For DIR-based limits and display, left-side bones negate their X component so both sides share one limits table. `getDimensionValue` handles this automatically.
+
+- **Pelvis DOF keys in `twists`**: `pelvis` = yaw angle (degrees, positive = counterclockwise looking down). `pelvisTx`, `pelvisTy`, `pelvisTz` = translation offsets (world units) from the default pelvis anchor (0, TORSO_LEN/2, 0). These keys are always free for the solver unless explicitly added to `lockedBoneIds` / `lockedTwistIds`. `mirrorTwists` doesn't touch them (they're central DOFs, no l/r mirror).
+
+- **Femur kinematic parent vs joint-action frame**: The femur's kinematic parent is `rootFrame` (so legs stay world-fixed when the spine tilts alone). Its joint-action frame (via `jointFrames['lFemur']`) is overridden to `pelvisFrame` AFTER `calculateChain` runs, so hip torque projections and action-axis visualization use the pelvis-anchored axes. If you read `kin.jointFrames['lFemur']` expecting the kinematic parent, you'll get `pelvisFrame`; use `rootFrame` (returned from `calculateKinematics`) if you truly want the kinematic parent.
