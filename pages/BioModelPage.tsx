@@ -930,6 +930,31 @@ const DEFAULT_MODIFICATIONS: CrossJointModification[] = [
             { kind: 'capacity', jointGroup: 'Elbow', actionKey: 'flexion', maxChange: 12, direction: 'reduce' },
         ],
     },
+    {
+        id: 'front-delt-share-at-shoulder-er',
+        name: 'Anterior deltoid share of abduction at shoulder ER',
+        sourceJoint: 'Shoulder',
+        sourceActionKey: 'externalRotation',
+        // ER range is -90° (full internal rotation) to +90° (full
+        // external rotation). Effect is 0 through IR and neutral, then
+        // ramps up from neutral to 100% at full ER. Rationale: as the
+        // humerus externally rotates, the anterior deltoid's line of
+        // pull migrates outward and aligns more with the abduction
+        // moment axis, so its mechanical share of abduction grows at
+        // the expense of middle/rear delt and supraspinatus.
+        leftY: 0,
+        midX: 0,
+        midY: 0,
+        rightY: 100,
+        targets: [
+            // Front delt's share of shoulder abduction increases up to
+            // 50% at full ER. 'relative' means middle delt, rear delt,
+            // and supraspinatus pick up a smaller share as a consequence
+            // (the joint's total abduction capacity is unchanged — this
+            // is a redistribution, not a capacity shift).
+            { kind: 'muscle', jointGroup: 'Shoulder', actionKey: 'abduction', muscleId: 'delt-front', maxChange: 50, direction: 'increase', muscleMode: 'relative' },
+        ],
+    },
 ];
 
 const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
