@@ -787,13 +787,16 @@ const DEFAULT_SECTION_SCALES: Record<string, number> = {
     // Elbow.
     'Elbow.flexion':                 2.84,
     'Elbow.extension':               1.96,
-    // Spine.
-    'Spine.flexion':                 3.1,
-    'Spine.extension':               3.6,
-    'Spine.lateralFlexionL':         4.7,
-    'Spine.lateralFlexionR':         4.7,
-    'Spine.rotationL':               3.6,
-    'Spine.rotationR':               3.6,
+    // Spine — each scale = sum of peaks across muscles assigned to the
+    // section, so at max action effort the muscle with peak=1.0 reads
+    // 100% MVC, peak=0.8 reads 80%, etc. before any downstream 1RM
+    // rescale. See DEFAULT_MUSCLE_MAPPINGS spine block for the peaks.
+    'Spine.flexion':                 3.1,    // 1.0 + 0.8 + 0.8 + 0.5 (rectus/obl-ext/obl-int/iliopsoas)
+    'Spine.extension':               1.175,  // 1.0 + 0.175 (erector/QL)
+    'Spine.lateralFlexionL':         4.7,    // 1.0 + 1.0 + 1.0 + 0.7 + 0.5 + 0.5
+    'Spine.lateralFlexionR':         4.7,    // same set as L
+    'Spine.rotationL':               3.0,    // 1.0 + 1.0 + 0.6 + 0.4 (obl-ext/obl-int/erector/lats)
+    'Spine.rotationR':               3.0,    // same set as L
     // Hip.
     'Hip.flexion':                   3.12,
     'Hip.extension':                 3.28,
@@ -1174,11 +1177,12 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     },
     'Spine.extension': {
         // Calibration range: -80° to 30°.
+        // Primary: erectors. Minor: QL. The broader "assists" (traps,
+        // glutes) that used to live here were routing spinal-extension
+        // demand to muscles that don't actually spinal-extend, inflating
+        // their activation in hip-hinge exercises — removed.
         'erector-spinae':     m(0.37, 1.0, 0, 1),
-        'quadratus-lumborum': m(0.28, 0.7, 0, 1),
-        'traps-mid':          m(0.2, 0.7, 0, 1),     // NEW — thoracic extension assist
-        'traps-lower':        m(0.2, 0.7, 0, 1),     // NEW — thoracic extension assist
-        'glute-max':          m(0.2, 0.5, 0, 1),
+        'quadratus-lumborum': m(0.07, 0.175, 0, 1),
     },
     'Spine.lateralFlexionL': {
         // Calibration range: -35° to 35°.
@@ -1203,7 +1207,6 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'obliques-external': m(0.333, 1.0, 0, 1),  // contralateral rotates trunk
         'obliques-internal': m(0.353, 1.0, 0, 1),  // ipsilateral rotates trunk
         'erector-spinae':    m(0.2, 0.6, 0, 1),
-        'traps-mid':         m(0.2, 0.6, 0, 1),    // NEW — thoracic rotation assist
         'lats':              m(0.133, 0.4, 0, 1),
     },
     'Spine.rotationR': {
@@ -1211,7 +1214,6 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'obliques-external': m(0.333, 1.0, 0, 1),
         'obliques-internal': m(0.353, 1.0, 0, 1),
         'erector-spinae':    m(0.2, 0.6, 0, 1),
-        'traps-mid':         m(0.2, 0.6, 0, 1),
         'lats':              m(0.133, 0.4, 0, 1),
     },
 
@@ -2112,28 +2114,331 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             },
         ],
         constraints: {
-            // SINGLE fixed constraint per foot at the MIDPOINT (position 0.5).
-            // This represents the center of pressure (CoP) of the
-            // foot-ground contact, which is what a real foot-on-ground
-            // reaction behaves like: a single net force at one point on the
-            // foot, not two independent reactions at ankle and toe. See
-            // CLAUDE.md "Multi-pin constraint trap" section.
+            // TWO fixed constraints per foot — at the heel (foot bone
+            // position 0 = ankle end) and the toe (position 1 = far end).
+            // A single midfoot pin would leave the foot free to rotate
+            // about itself; pinning BOTH ends locks the foot-ground
+            // contact in all 6 rigid-body DOFs, matching physical reality
+            // (the floor prevents the heel AND the toe from moving).
             //
-            // Midpoint at z=-10 (halfway between ankle z=0 and toe z=-20).
-            // Ankle Y=133 is standing-height (pelvisY=30 + femur 54 + tibia
-            // 49 = 133); the foot is horizontal so midpoint shares that Y.
-            //
-            // Consequence: the reaction at midfoot has a non-zero moment arm
-            // at the hip, so Phase B's force-balance at the feet correctly
-            // propagates to non-zero hip extension demand. An earlier
-            // ankle+toe two-pin model let Phase B concentrate all Y
-            // reaction at the ankle pin (moment arm zero at hip) and
-            // silently zero out hip demand.
+            // The old "zero-moment-arm concentration" bug (where Phase B
+            // dumped all Y-reaction at the ankle pin — directly below
+            // the hip, zero moment arm — silently zeroing hip demand) is
+            // prevented by the whole-body moment-balance rows added to
+            // Phase B: the λ solution is now forced to match the applied
+            // wrench about pelvisOrigin, so it can't arbitrarily sink
+            // all reaction into a zero-moment-arm pin.
             lFoot: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 133, z: -10 }, position: 0.5 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 133, z: -20 }, position: 1 },
             ],
             rFoot: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 133, z: -10 }, position: 0.5 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 133, z: -20 }, position: 1 },
+            ],
+        },
+    },
+    // ========================================================================
+    // ROMANIAN DEADLIFT (RDL) — option B test
+    // ========================================================================
+    // Authored with pelvisTx/Ty/Tz = 0 for both start and end. The preset-
+    // load solver should adjust those DOFs automatically so feet land at
+    // the (fixed) constraint point for BOTH poses.
+    {
+        id: 'rdl',
+        name: 'ROMANIAN DEADLIFT',
+        category: 'Pull',
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            spine: { x: 0, y: -0.25881904510252074, z: -0.9659258262890683 },
+            lHumerus: { x: 0, y: 0.25881904510252074, z: -0.9659258262890683 },
+            rHumerus: { x: 0, y: 0.25881904510252074, z: -0.9659258262890683 },
+            lForearm: { x: 0, y: 1, z: 0 },
+            rForearm: { x: 0, y: 1, z: 0 },
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 0.984807753012208, z: 0.17364817766693033 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 0.984807753012208, z: 0.17364817766693033 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            spine: { x: 0, y: -1, z: 0 },
+            lHumerus: { x: 0, y: 1, z: 0 },
+            rHumerus: { x: 0, y: 1, z: 0 },
+            lForearm: { x: 0, y: 1, z: 0 },
+            rForearm: { x: 0, y: 1, z: 0 },
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 1, z: 0 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 1, z: 0 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            { name: 'Barbell weight (right hand)', boneId: 'rForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+            { name: 'Barbell weight (left hand)', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+        ],
+        // Two pins per foot (heel at position 0, toe at position 1) so
+        // the floor fully constrains the foot — pinning only one point
+        // would leave the foot free to rotate about it. Start-pose
+        // natural positions: 10° knee flex → ankle at (y=132.27,
+        // z=8.51), foot world direction (0, 0.174, -0.985), toe at
+        // (y=132.27 + 3.47, z=8.51 - 19.70) = (y=135.74, z=-11.19).
+        constraints: {
+            lFoot: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 132.27, z: 8.51 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 135.74, z: -11.19 }, position: 1 },
+            ],
+            rFoot: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 132.27, z: 8.51 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 135.74, z: -11.19 }, position: 1 },
+            ],
+        },
+    },
+    // ========================================================================
+    // CONVENTIONAL DEADLIFT
+    // ========================================================================
+    // 60° knee flex + 45° spine tilt at bottom; lockout is straight legs +
+    // upright spine. Constraint is at the start-pose natural foot midpoint;
+    // applyPreset's solver translates pelvis to keep feet there for the
+    // end pose (lockout).
+    {
+        id: 'deadlift',
+        name: 'CONVENTIONAL DEADLIFT',
+        category: 'Pull',
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            spine: { x: 0, y: -0.7071067811865475, z: -0.7071067811865476 },
+            lHumerus: { x: 0, y: 0.7071067811865475, z: -0.7071067811865476 },
+            rHumerus: { x: 0, y: 0.7071067811865475, z: -0.7071067811865476 },
+            lForearm: { x: 0, y: 1, z: 0 },
+            rForearm: { x: 0, y: 1, z: 0 },
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 0.5, z: 0.8660254037844386 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 0.5, z: 0.8660254037844386 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            spine: { x: 0, y: -1, z: 0 },
+            lHumerus: { x: 0, y: 1, z: 0 },
+            rHumerus: { x: 0, y: 1, z: 0 },
+            lForearm: { x: 0, y: 1, z: 0 },
+            rForearm: { x: 0, y: 1, z: 0 },
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 1, z: 0 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 1, z: 0 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            { name: 'Barbell weight (right hand)', boneId: 'rForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+            { name: 'Barbell weight (left hand)', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+        ],
+        // Two pins per foot (heel / toe). 60° knee flex natural
+        // positions: ankle at (y=108.5, z=42.43), foot world (0, 0.866,
+        // -0.5), toe = ankle + 20·foot_world = (y=125.83, z=32.43).
+        constraints: {
+            lFoot: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 108.5, z: 42.43 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 125.83, z: 32.43 }, position: 1 },
+            ],
+            rFoot: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 108.5, z: 42.43 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 125.83, z: 32.43 }, position: 1 },
+            ],
+        },
+    },
+
+    // ========================================================================
+    // Bar on upper back (force applied at spine position 1). 80° hip flex
+    // + 80° knee flex gives a deep bottom with shin vertical. End = upright
+    // lockout (solver translates pelvis up at preset-load).
+    {
+        id: 'back-squat',
+        name: 'BARBELL BACK SQUAT',
+        category: 'Push',
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            spine: { x: 0, y: -0.8660254037844386, z: -0.5 },
+            // Arms across chest (physically irrelevant; neutral pose).
+            lHumerus: { x: 0, y: 0.8660254037844386, z: -0.5 },
+            rHumerus: { x: 0, y: 0.8660254037844386, z: -0.5 },
+            lForearm: { x: 0, y: 1, z: 0 },
+            rForearm: { x: 0, y: 1, z: 0 },
+            // 80° hip flex → femur world (0, sin 10°, -cos 10°).
+            lFemur: { x: 0, y: 0.17364817766693033, z: -0.984807753012208 },
+            // 80° knee flex → tibia vertical down in world (derived so
+            // tibia_world = (0, 1, 0) via femur frame).
+            lTibia: { x: 0, y: 0.17364817766693033, z: 0.984807753012208 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.17364817766693033, z: -0.984807753012208 },
+            rTibia: { x: 0, y: 0.17364817766693033, z: 0.984807753012208 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            spine: { x: 0, y: -1, z: 0 },
+            lHumerus: { x: 0, y: 1, z: 0 },
+            rHumerus: { x: 0, y: 1, z: 0 },
+            lForearm: { x: 0, y: 1, z: 0 },
+            rForearm: { x: 0, y: 1, z: 0 },
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 1, z: 0 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 1, z: 0 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            { name: 'Barbell on back', boneId: 'spine', position: 1, x: 0, y: 1, z: 0, magnitude: 20 },
+        ],
+        // Two pins per foot (heel / toe). 80° hip + 80° knee natural
+        // positions: ankle at (y=88.40, z=-53.19), foot world (0, 0, -1),
+        // toe = ankle + 20·(0,0,-1) = (y=88.40, z=-73.19).
+        constraints: {
+            lFoot: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 88.40, z: -53.19 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 88.40, z: -73.19 }, position: 1 },
+            ],
+            rFoot: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 88.40, z: -53.19 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 88.40, z: -73.19 }, position: 1 },
+            ],
+        },
+    },
+    // ========================================================================
+    // BARBELL ROW
+    // ========================================================================
+    // Bent-over row. Legs same throughout (10° knee flex), only arms move.
+    // Start = arms straight down (bar near shins). End = elbow ~90° flex
+    // with humerus pulled back ~30° (bar pulled toward stomach).
+    {
+        id: 'bb-row',
+        name: 'BARBELL ROW',
+        category: 'Pull',
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            spine: { x: 0, y: -0.5, z: -0.8660254037844386 },
+            lHumerus: { x: 0, y: 0.5, z: -0.8660254037844386 },
+            rHumerus: { x: 0, y: 0.5, z: -0.8660254037844386 },
+            lForearm: { x: 0, y: 1, z: 0 },
+            rForearm: { x: 0, y: 1, z: 0 },
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 0.984807753012208, z: 0.17364817766693033 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 0.984807753012208, z: 0.17364817766693033 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            spine: { x: 0, y: -0.5, z: -0.8660254037844386 },
+            // Humerus pulled back 30° (shoulder extension); spineFrame-local.
+            lHumerus: { x: 0, y: 0.8660254037844386, z: -0.5 },
+            rHumerus: { x: 0, y: 0.8660254037844386, z: -0.5 },
+            // Elbow ~90° flex in "other rotation direction" (handles forward
+            // of elbow from pulled-back humerus → hand lands at stomach).
+            lForearm: { x: 0, y: 0, z: -1 },
+            rForearm: { x: 0, y: 0, z: -1 },
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 0.984807753012208, z: 0.17364817766693033 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 0.984807753012208, z: 0.17364817766693033 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            { name: 'Barbell weight (right hand)', boneId: 'rForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+            { name: 'Barbell weight (left hand)', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+        ],
+        // Two pins per foot (heel / toe). Same leg geometry as RDL (10°
+        // knee flex): heel at (y=132.27, z=8.51), toe at (y=135.74, z=-11.19).
+        constraints: {
+            lFoot: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 132.27, z: 8.51 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 135.74, z: -11.19 }, position: 1 },
+            ],
+            rFoot: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 132.27, z: 8.51 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 135.74, z: -11.19 }, position: 1 },
             ],
         },
     },
@@ -2206,6 +2511,13 @@ const BioModelPage: React.FC = () => {
   // and Timeline Peaks for consistency.
   const [analysisView, setAnalysisView] = useState<'joint' | 'muscle'>('joint');
   const [timelineView, setTimelineView] = useState<'joint' | 'muscle'>('joint');
+  // Bracing fraction: the portion of any Spine Extension demand that is
+  // off-loaded to abdominal bracing (represented as activation on the
+  // rectus abdominis) instead of being handled purely by the erectors.
+  // Defaults to 30% bracing / 70% erectors. When set > 0, rectus
+  // abdominis is exempted from the normal Spine-extension antagonist
+  // suppression so its reported activation reflects bracing work alone.
+  const [bracingFraction, setBracingFraction] = useState<number>(0.3);
   // Muscles tab expand state. Members are either `${group}` (joint group
   // header expanded → show its action rows) or `${group}.${actionKey}`
   // (action row expanded → show its graph + per-muscle controls). Empty by
@@ -2395,7 +2707,17 @@ const BioModelPage: React.FC = () => {
         z: pelvisPos.z + rHipLocal.x * pelvisFrame.x.z + rHipLocal.y * pelvisFrame.y.z + rHipLocal.z * pelvisFrame.z.z,
     };
 
-    jointFrames['spine'] = rootFrame;
+    // Spine actions (flexion, lateral flexion, rotation) are defined in
+    // body-local coordinates, not world. pelvisFrame tracks the torso's
+    // orientation (tilts with spine direction AND yaws with pelvisYaw),
+    // so using it here means:
+    //   Flexion axis (1,0,0) local → pelvisFrame.x world → body-lateral.
+    //   Lateral flex axis (0,0,1) local → pelvisFrame.z world → body AP.
+    //   Rotation axis (0,1,0) local → pelvisFrame.y world → along spine.
+    // Previously jointFrames['spine'] = rootFrame, which twists with yaw
+    // but doesn't tilt — so a forward-hinged spine had its rotation axis
+    // stuck at world-vertical instead of tracking the tilted long axis.
+    jointFrames['spine'] = pelvisFrame;
     jointFrames['lClavicle'] = spineFrame;
     jointFrames['rClavicle'] = spineFrame;
     jointFrames['lShoulder'] = spineFrame;
@@ -2854,6 +3176,127 @@ const BioModelPage: React.FC = () => {
           return kin.boneStartPoints[bone] ?? null;
       };
 
+      // Joint-limit detection — shared by Phase A decomposition and Phase B
+      // column building. Treats passive end-range limits like constraints:
+      // when a joint action is at its stop AND the signed torque component
+      // pushes further into that stop, the passive anatomy absorbs the load
+      // and the muscle demand at that action is dropped. The caller supplies
+      // the signed, already-bilaterally-flipped component / tau0 on the
+      // action axis and the WORLD axis for 2-DOF motion-direction checks.
+      //
+      // Dimensions:
+      //   Hinges (Forearm/Tibia/Foot): single action-based limit on hinge angle.
+      //   Bone-axis twists (IR/ER):    action-based limit on twist angle.
+      //   2-DOF ball-sockets:          dir-based limits + motion gradient
+      //                                (axis × boneDir, the direction the
+      //                                bone tip would move under a positive
+      //                                rotation about the action axis).
+      //
+      // Returning true means: the passive structure is fully absorbing
+      // this action's component of the torque; the muscle produces zero.
+      // Phase B then drops this column from the effort objective so the
+      // optimizer doesn't try to "carry" demand that doesn't exist.
+      const isActionLimitBlocked = (
+          bone: string,
+          act: ActionAxis,
+          signedComponent: number,
+          worldAxis: Vector3,
+          jointGroup: JointGroup,
+      ): boolean => {
+          const dims = limitDimensionsForGroup(jointGroup);
+          // Scapula: translation DOFs. Motion under a positive "action"
+          // is the axis IN TORSO-LOCAL coordinates — same space as the
+          // clavicle-offset dim.x/y/z limits. Passing the world axis
+          // here would mis-index the limit dimensions when the spine is
+          // tilted, since a world-vertical vector no longer maps to
+          // body-vertical. Use act.axis directly instead.
+          if (jointGroup === 'Scapula') {
+              const sign = signedComponent > 0 ? 1 : -1;
+              for (const dim of dims) {
+                  if (dim.kind !== 'dir' || !dim.component) continue;
+                  const eff = getEffectiveLimit(dim.key, bone, currentPosture, currentTwists);
+                  if (!eff) continue;
+                  const val = getDimensionValue(dim, bone, currentPosture, currentTwists);
+                  const motionC = act.axis[dim.component] * sign;
+                  if (val >= eff.max - 0.5 && motionC > 0.01) return true;
+                  if (val <= eff.min + 0.5 && motionC < -0.01) return true;
+              }
+              return false;
+          }
+          if (/Forearm|Tibia|Foot/.test(bone)) {
+              const ad = dims.find(d => d.kind === 'action');
+              if (ad) {
+                  const eff = getEffectiveLimit(ad.key, bone, currentPosture, currentTwists);
+                  if (eff) {
+                      const curAngle = getActionAngle(bone, act, currentPosture, currentTwists);
+                      const isForearm = /Forearm/.test(bone);
+                      if (isForearm) {
+                          // Forearm hinge: stored angle can be negative
+                          // (row-style flex, humerus-forward + hand-to-face
+                          // flex). Limits are defined in slider space
+                          // (|angle| range). Use |angle| for proximity
+                          // checks.
+                          //
+                          // Sign-invariant tau0 convention (CLAUDE.md +
+                          // elbow fix above): tau0 > 0 = applied-FLEXION
+                          // direction → Extension label (extensor muscle
+                          // resists). tau0 < 0 = applied-EXTENSION
+                          // direction → Flexion label (flexor muscle
+                          // resists). So "pushing into hyperextension
+                          // past min=0" is tau0 < 0, and "pushing into
+                          // hyperflex past max" is tau0 > 0. That's the
+                          // same condition the other hinges use — the
+                          // forearm branch just uses |angle| for proximity.
+                          const absAngle = Math.abs(curAngle);
+                          // At straight + applied-extension torque → hyperextension past min.
+                          if (absAngle <= eff.min + 1 && signedComponent < 0) return true;
+                          // At max flex + applied-flexion torque → into max.
+                          if (absAngle >= eff.max - 1 && signedComponent > 0) return true;
+                      } else {
+                          // Tibia / Foot: unchanged convention.
+                          if (curAngle >= eff.max - 1 && signedComponent > 0) return true;
+                          if (curAngle <= eff.min + 1 && signedComponent < 0) return true;
+                      }
+                  }
+              }
+              return false;
+          }
+          if (act.isBoneAxis) {
+              const td = dims.find(d => d.kind === 'action' && d.action?.isBoneAxis);
+              if (td) {
+                  const eff = getEffectiveLimit(td.key, bone, currentPosture, currentTwists);
+                  if (eff) {
+                      const curAngle = getActionAngle(bone, act, currentPosture, currentTwists);
+                      if (curAngle >= eff.max - 1 && signedComponent > 0) return true;
+                      if (curAngle <= eff.min + 1 && signedComponent < 0) return true;
+                  }
+              }
+              return false;
+          }
+          const boneDir = currentPosture[bone];
+          if (!boneDir) return false;
+          const motionRaw = crossProduct(worldAxis, boneDir);
+          const sign = signedComponent > 0 ? 1 : -1;
+          // Dir limits at ±1 (or beyond, like Hip.dir.y.max = 1.02) are
+          // "no-bound" sentinels — a unit-vector component can't exceed
+          // them, so they don't represent a real anatomical stop. Skip
+          // blocking on those sides so poses that naturally land at a
+          // component extreme (pure sagittal flex = z=-1) don't zero
+          // out real muscle demand.
+          const NO_BOUND = 0.99;
+          for (const dim of dims) {
+              if (dim.kind !== 'dir' || !dim.component) continue;
+              const eff = getEffectiveLimit(dim.key, bone, currentPosture, currentTwists);
+              if (!eff) continue;
+              const val = getDimensionValue(dim, bone, currentPosture, currentTwists);
+              let motionC = motionRaw[dim.component] * sign;
+              if (dim.component === 'x' && bone.startsWith('l')) motionC = -motionC;
+              if (val >= eff.max - 0.02 && motionC > 0.01 && eff.max < NO_BOUND) return true;
+              if (val <= eff.min + 0.02 && motionC < -0.01 && eff.min > -NO_BOUND) return true;
+          }
+          return false;
+      };
+
       // Accumulate torque at each joint from all forces, and net linear
       // force at each scapula (clavicle) since scapulae translate, not rotate.
       const scapulaForces: Record<string, Vector3> = {};
@@ -2883,14 +3326,34 @@ const BioModelPage: React.FC = () => {
       // infeasible — the solver falls back gracefully (λ = 0) and
       // Phase A's up-the-chain propagation dominates.
 
-      // Track total applied force (after F_∥ extraction at force bones
-      // that are constrained). Phase B's constraint-subspace force balance
-      // uses this as the RHS:
-      //    for each consRef i:  Σ_j (n_i · n_j) λ_j = -(F_total · n_i)
-      // Moment balance isn't enforced — point constraints can't absorb
-      // moments, so the figure is treated as kinematically pinned and any
-      // residual moment is absorbed by an implicit world anchor.
+      // Track total applied force AND moment (after F_∥ extraction at
+      // force bones that are constrained). Phase B enforces BOTH the
+      // constraint-subspace force balance and a full 3-axis moment
+      // balance about pelvisOrigin:
+      //    force:  for each consRef i:  Σ_j (n_i · n_j) λ_j = -(F_total · n_i)
+      //    moment: for each axis a:     Σ_j (r_j × n_j)_a  λ_j = -(M_total)_a
+      // where r_j = tip_j - pelvisOrigin. Together these are whole-body
+      // wrench equilibrium: the constraint reactions absorb every
+      // component of the external wrench the constraint subspace can
+      // reach. Any residual (rank-deficient geometry) is softly
+      // distributed by the KKT regularization (see Phase B comments).
+      //
+      // The moment block is what couples kinematically-disconnected
+      // subtrees (legs vs. torso — legs are siblings of the spine below
+      // the pelvis anchor, not children of it). Without it, a force at
+      // the hands creates a moment about the pelvis that has no path
+      // into any hip action axis via the chain walk, so the moment
+      // vanishes into an implicit world anchor and the hip reads zero
+      // demand. Adding moment balance forces the foot λs to carry that
+      // moment, and each joint's sens·λ term delivers the corresponding
+      // hip / knee / ankle demand — universally, not just for SLDL.
+      //
+      // pelvisOrigin tracks the live (possibly translated) pelvis:
+      // kin.boneStartPoints['spine'] IS pelvisPos, and pelvisTx/Ty/Tz
+      // shifts it.
+      const pelvisOrigin = kin.boneStartPoints['spine'] || { x: 0, y: CONFIG.TORSO_LEN / 2, z: 0 };
       let totalAppliedForce: Vector3 = { x: 0, y: 0, z: 0 };
+      let totalAppliedMoment: Vector3 = { x: 0, y: 0, z: 0 };
 
       for (const f of currentForces) {
           const seg = kin.boneStartPoints[f.boneId];
@@ -2958,6 +3421,8 @@ const BioModelPage: React.FC = () => {
           }
 
           totalAppliedForce = add(totalAppliedForce, propagatedForce);
+          const rAboutPelvis = sub(attachPt, pelvisOrigin);
+          totalAppliedMoment = add(totalAppliedMoment, crossProduct(rAboutPelvis, propagatedForce));
 
           for (const bone of chain) {
               const prevJ = jointForces[bone] || { x: 0, y: 0, z: 0 };
@@ -3033,6 +3498,18 @@ const BioModelPage: React.FC = () => {
               if (isLeft && (act.isBoneAxis || Math.abs(act.axis.y) > 0.5 || Math.abs(act.axis.z) > 0.5)) {
                   component = -component;
               }
+              // Elbow sign-invariance: the forearm can flex in either
+              // rotation direction from straight depending on humerus
+              // orientation (standard curl = +θ; bent-over row =  -θ).
+              // Both are anatomically "flexion" (biceps contracting),
+              // but the raw tau0 sign flips between them. Multiply by
+              // sign(hingeAngle) so the positiveAction/negativeAction
+              // mapping reflects muscle groups consistently regardless
+              // of which side of straight the forearm is on.
+              if (/Forearm/.test(bone) && !act.isBoneAxis) {
+                  const hingeAngle = getActionAngle(bone, act, currentPosture, currentTwists);
+                  if (hingeAngle < 0) component = -component;
+              }
               const action = component > 0 ? act.positiveAction : act.negativeAction;
               const torqueMag = Math.abs(component);
               if (torqueMag < 0.01) continue;
@@ -3041,54 +3518,10 @@ const BioModelPage: React.FC = () => {
               // stop AND the torque is pushing further into that stop, the
               // passive anatomy (ligaments/capsule/bony contact) absorbs the
               // load and the muscle demand drops to zero. Skip this demand.
-              //
-              //   Hinges (elbow/knee/ankle): action-based limit on hinge angle.
-              //   Twists (IR/ER):            action-based limit on twist angle.
-              //   2-DOF ball-sockets:        dir-based limits + motion gradient.
-              const dims = limitDimensionsForGroup(jointGroup);
-              let blockedByLimit = false;
-              if (/Forearm|Tibia|Foot/.test(bone)) {
-                  const ad = dims.find(d => d.kind === 'action');
-                  if (ad) {
-                      const eff = getEffectiveLimit(ad.key, bone, currentPosture, currentTwists);
-                      if (eff) {
-                          const curAngle = getActionAngle(bone, act, currentPosture, currentTwists);
-                          if (curAngle >= eff.max - 1 && component > 0) blockedByLimit = true;
-                          if (curAngle <= eff.min + 1 && component < 0) blockedByLimit = true;
-                      }
-                  }
-              } else if (act.isBoneAxis) {
-                  const td = dims.find(d => d.kind === 'action' && d.action?.isBoneAxis);
-                  if (td) {
-                      const eff = getEffectiveLimit(td.key, bone, currentPosture, currentTwists);
-                      if (eff) {
-                          const curAngle = getActionAngle(bone, act, currentPosture, currentTwists);
-                          if (curAngle >= eff.max - 1 && component > 0) blockedByLimit = true;
-                          if (curAngle <= eff.min + 1 && component < 0) blockedByLimit = true;
-                      }
-                  }
-              } else {
-                  // 2-DOF: check each DIR limit. The motion of the bone tip
-                  // under a positive rotation about `axis` is axis × boneDir.
-                  // If the torque direction (sign of component) pushes further
-                  // into a limited component, zero the demand.
-                  const boneDir = currentPosture[bone];
-                  if (boneDir) {
-                      const motionRaw = crossProduct(axis, boneDir);
-                      const sign = component > 0 ? 1 : -1;
-                      for (const dim of dims) {
-                          if (dim.kind !== 'dir' || !dim.component) continue;
-                          const eff = getEffectiveLimit(dim.key, bone, currentPosture, currentTwists);
-                          if (!eff) continue;
-                          const val = getDimensionValue(dim, bone, currentPosture, currentTwists);
-                          let motionC = motionRaw[dim.component] * sign;
-                          if (dim.component === 'x' && bone.startsWith('l')) motionC = -motionC;
-                          if (val >= eff.max - 0.02 && motionC > 0.01) { blockedByLimit = true; break; }
-                          if (val <= eff.min + 0.02 && motionC < -0.01) { blockedByLimit = true; break; }
-                      }
-                  }
-              }
-              if (blockedByLimit) continue;
+              // See isActionLimitBlocked helper at the top of the function —
+              // same logic is re-applied in Phase B column building so the
+              // KKT optimizer also ignores limit-blocked cols.
+              if (isActionLimitBlocked(bone, act, component, axis, jointGroup)) continue;
 
               // Look up capacity for effort calculation. Capacity is
               // position-dependent: evaluateCapacity interpolates between
@@ -3125,8 +3558,18 @@ const BioModelPage: React.FC = () => {
           const actions = JOINT_ACTIONS[jointGroup];
           if (!actions) continue;
 
+          // Scapula axes are defined in torso-local coordinates; transform
+          // through the clavicle's jointFrame (= spineFrame) so "elevation"
+          // tracks the spine's tilt and "retraction" points from the
+          // shoulder toward the tilted spine, not toward world-back.
+          const jf = kin.jointFrames[bone];
+
           for (const act of actions) {
-              const axis = act.axis; // scapula axes are world-space (Y and Z)
+              const axis: Vector3 = jf ? {
+                  x: act.axis.x * jf.x.x + act.axis.y * jf.y.x + act.axis.z * jf.z.x,
+                  y: act.axis.x * jf.x.y + act.axis.y * jf.y.y + act.axis.z * jf.z.y,
+                  z: act.axis.x * jf.x.z + act.axis.y * jf.y.z + act.axis.z * jf.z.z,
+              } : act.axis;
               const component = dotProduct(forceVec, axis);
               // No left-side flip: protraction/retraction are anatomically
               // the same direction on both sides (+Z = both scapulas moving
@@ -3137,11 +3580,12 @@ const BioModelPage: React.FC = () => {
               const forceMag = Math.abs(component);
               if (forceMag < 0.01) continue;
 
-              // Scapula joint limits: clavicle offset already lives in the
-              // same coordinate space as the action axis, so the motion
-              // gradient is just the axis itself (no cross product). If the
-              // offset is at a dir.y or dir.z limit and the force pushes
-              // further into it, zero the demand.
+              // Scapula joint limits: clavicle offset is stored in
+              // spineFrame-local coordinates, and the dim.x/y/z limits
+              // are defined in that same local space. So the motion
+              // gradient uses the UNTRANSFORMED act.axis (local), not the
+              // world-transformed axis. Force projection above uses the
+              // world axis; limit geometry stays local.
               {
                   const dims = limitDimensionsForGroup(jointGroup);
                   const sign = component > 0 ? 1 : -1;
@@ -3151,15 +3595,24 @@ const BioModelPage: React.FC = () => {
                       const eff = getEffectiveLimit(dim.key, bone, currentPosture, currentTwists);
                       if (!eff) continue;
                       const val = getDimensionValue(dim, bone, currentPosture, currentTwists);
-                      const motionC = axis[dim.component] * sign;
+                      const motionC = act.axis[dim.component] * sign;
                       if (val >= eff.max - 0.5 && motionC > 0.01) { blockedByLimit = true; break; }
                       if (val <= eff.min + 0.5 && motionC < -0.01) { blockedByLimit = true; break; }
                   }
                   if (blockedByLimit) continue;
               }
 
-              const cap = capacities[jointGroup]?.[action.toLowerCase().replace(/ /g, '')] ||
-                          capacities[jointGroup]?.[action] || null;
+              // Scapula is a unified stabilizer group — elevation,
+              // depression, protraction, and retraction all draw from
+              // the same muscle pool (traps, rhomboids, serratus,
+              // levator, pec minor). Use a SINGLE combined cap for all
+              // four directional actions so any demand divides by the
+              // same budget. The combined cap is the max of the four
+              // directional entries the user has configured — that
+              // represents the strongest agonist group's peak force.
+              const scapCaps = Object.values(capacities[jointGroup] || {});
+              const scapMax = scapCaps.length > 0 ? Math.max(...scapCaps.map(c => c.specific)) : 0;
+              const cap = scapMax > 0 ? { base: scapMax, specific: scapMax, angle: 0 } : null;
               const scapAngle = getActionAngle(bone, act, currentPosture, currentTwists);
               const scapModSide: 'left' | 'right' = bone.startsWith('l') ? 'left' : 'right';
               const scapModMult = getModificationMultiplier(
@@ -3274,6 +3727,26 @@ const BioModelPage: React.FC = () => {
                   boneId: string; jointGroup: JointGroup; act: ActionAxis;
                   tau0: number; cap: number; sens: number[];
                   isLeft: boolean;
+                  // World-space action axis cached for post-Phase-B limit
+                  // re-checks. Required for 2-DOF rotational joints (axis
+                  // × boneDir gives the motion direction under rotation)
+                  // and Scapula (axis IS the motion direction).
+                  worldAxis: Vector3;
+                  // True when the joint action is at its passive end-range
+                  // AND the EFFECTIVE torque (tau0 + Σ sens·λ) pushes
+                  // further into that stop. Treated like a constraint:
+                  // passive anatomy absorbs the load, so the col is
+                  // excluded from the effort objective (colWeight → 0 in
+                  // AtWA/AtWb and IRLS) and skipped in writeback so it
+                  // never appears in the demand list. The external λs
+                  // still solve for wrench balance; only the local muscle-
+                  // effort accounting at this action is zeroed.
+                  //
+                  // This re-evaluates each IRLS iter off newTau = tau0 +
+                  // Σ lam·sens, so joints whose demand arrives only via
+                  // constraint reactions (not Phase A's chain walk) are
+                  // correctly blocked once λ reveals the push direction.
+                  isLimitBlocked: boolean;
               };
               const cols: CouplingCol[] = [];
 
@@ -3297,10 +3770,27 @@ const BioModelPage: React.FC = () => {
                       // up the chain through the clavicle).
                       const isLeft = bone.startsWith('l');
                       const forceVec = scapulaForces[bone] || { x: 0, y: 0, z: 0 };
+                      // Transform scapula action axes from torso-local to
+                      // world via the clavicle's jointFrame (spineFrame),
+                      // so elevation/protraction track the spine's tilt.
+                      const jf = kin2.jointFrames[bone];
                       for (const act of acts) {
-                          const tau0 = dotProduct(forceVec, act.axis);
+                          const scapWorldAxis: Vector3 = jf ? {
+                              x: act.axis.x * jf.x.x + act.axis.y * jf.y.x + act.axis.z * jf.z.x,
+                              y: act.axis.x * jf.x.y + act.axis.y * jf.y.y + act.axis.z * jf.z.y,
+                              z: act.axis.x * jf.x.z + act.axis.y * jf.y.z + act.axis.z * jf.z.z,
+                          } : act.axis;
+                          const tau0 = dotProduct(forceVec, scapWorldAxis);
                           const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
-                          const capLk = capacities[jg]?.[capacityKey(actName)] || capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
+                          // Unified scapula cap — see Phase A scapula
+                          // decomposition above. All four directional
+                          // actions (elevation/depression, protraction/
+                          // retraction) share the same effective
+                          // capacity so demand in any direction draws
+                          // from the same stabilizer-muscle pool.
+                          const scapCapsPB = Object.values(capacities[jg] || {});
+                          const scapMaxPB = scapCapsPB.length > 0 ? Math.max(...scapCapsPB.map(c => c.specific)) : 0;
+                          const capLk = scapMaxPB > 0 ? { base: scapMaxPB, specific: scapMaxPB, angle: 0 } : null;
                           const isPos = actName === act.positiveAction;
                           const availability = sectionAvailabilityModifier(
                               jg, act, isPos, bone, rawTorques, kin2, currentPosture, currentTwists,
@@ -3317,9 +3807,10 @@ const BioModelPage: React.FC = () => {
                           const sens: number[] = [];
                           for (const cref of consRefs) {
                               if (!cref.ancestors.has(bone)) { sens.push(0); continue; }
-                              sens.push(dotProduct(cref.n, act.axis));
+                              sens.push(dotProduct(cref.n, scapWorldAxis));
                           }
-                          cols.push({ boneId: bone, jointGroup: jg, act, tau0, cap: capVal, sens, isLeft });
+                          const isLimitBlocked = isActionLimitBlocked(bone, act, tau0, scapWorldAxis, jg);
+                          cols.push({ boneId: bone, jointGroup: jg, act, tau0, cap: capVal, sens, isLeft, worldAxis: scapWorldAxis, isLimitBlocked });
                       }
                       continue;
                   }
@@ -3363,6 +3854,21 @@ const BioModelPage: React.FC = () => {
                       const tauSrc = act.isBoneAxis ? rawTau : residTau;
                       let tau0 = dotProduct(tauSrc, worldAxis);
                       if (isLeft && (act.isBoneAxis || Math.abs(act.axis.y) > 0.5 || Math.abs(act.axis.z) > 0.5)) tau0 = -tau0;
+                      // Elbow sign-invariance (same fix as Phase A decomp):
+                      // when the forearm is stored at negative hinge angle
+                      // (non-standard flexion direction, e.g. bent-over row
+                      // end pose), flip tau0 so positive/negative labels
+                      // still map to extensor/flexor muscle groups. Sens
+                      // entries must be flipped in lockstep so sens·λ
+                      // retains the correct muscle-direction sign.
+                      let hingeFlipForearm = 1;
+                      if (/Forearm/.test(bone) && !act.isBoneAxis) {
+                          const hingeAngle = getActionAngle(bone, act, currentPosture, currentTwists);
+                          if (hingeAngle < 0) {
+                              tau0 = -tau0;
+                              hingeFlipForearm = -1;
+                          }
+                      }
 
                       const actName = tau0 > 0 ? act.positiveAction : act.negativeAction;
                       const capLk = capacities[jg]?.[capacityKey(actName)] || capacities[jg]?.[actionKey(actName)] || capacities[jg]?.[actName] || null;
@@ -3392,9 +3898,11 @@ const BioModelPage: React.FC = () => {
                               s -= bAxDotAxis * rxnDotBAx;
                           }
                           if (isLeft && (act.isBoneAxis || Math.abs(act.axis.y) > 0.5 || Math.abs(act.axis.z) > 0.5)) s = -s;
+                          s *= hingeFlipForearm;
                           sens.push(s);
                       }
-                      cols.push({ boneId: bone, jointGroup: jg, act, tau0, cap: capVal, sens, isLeft });
+                      const isLimitBlocked = isActionLimitBlocked(bone, act, tau0, worldAxis, jg);
+                      cols.push({ boneId: bone, jointGroup: jg, act, tau0, cap: capVal, sens, isLeft, worldAxis, isLimitBlocked });
                   }
               }
 
@@ -3435,19 +3943,50 @@ const BioModelPage: React.FC = () => {
                   //       after Phase B reconciles the reaction with the
                   //       moment arms.
                   //
-                  // Moment balance (Σ r × F + Σ r_tip × λn = 0) is NOT
-                  // enforced. Point constraints can't resist moments about
-                  // themselves, so whole-body moment balance is generally
-                  // infeasible — the figure would rotate freely under any
-                  // off-axis force. The assumption here is the standard
-                  // biomechanics one: treat the figure as kinematically
-                  // pinned in space, so any residual moment is absorbed
-                  // by an implicit world anchor. Joint demands are what
-                  // muscles produce to hold the pose under this assumption.
+                  //   3. Moment balance about pelvisOrigin (3 equations):
+                  //       For each world axis a ∈ {x,y,z}:
+                  //         Σ_j (r_j × n_j)_a λ_j = -(M_total)_a
+                  //       where r_j = tip_j - pelvisOrigin and M_total is
+                  //       the Phase-A-accumulated sum of
+                  //       (attach_k - pelvisOrigin) × propagatedForce_k.
                   //
-                  //   [AtWA     A_H     A_F   ] [λ  ]   [AtWb ]
-                  //   [A_H^T    0       0    ] [μ_H] = [-b_H ]
-                  //   [A_F^T    0       0    ] [μ_F]   [-b_F ]
+                  //       This is the block that couples kinematically-
+                  //       disconnected subtrees. Legs are siblings of the
+                  //       spine below the pelvis anchor (not children of
+                  //       it), so a force at the hands creates a moment
+                  //       about the pelvis that has no chain-walk path to
+                  //       any hip action axis. Without this block, that
+                  //       moment silently vanishes into an implicit world
+                  //       anchor and the hip reads zero demand — the root
+                  //       cause of the SLDL hip-zeroing issue. A prior
+                  //       band-aid moved the foot-CoP constraint to give
+                  //       a small non-zero moment arm at the hip, but
+                  //       that only recovers ~10% of the true demand
+                  //       because the Y-reaction λ_y is pinned by force
+                  //       balance and only horizontal λ_x/λ_z can balance
+                  //       the true bar moment. With this block enforced,
+                  //       λ_x/λ_z at the feet pick up the required
+                  //       horizontal reaction, and each joint's sens·λ
+                  //       term delivers the full physically-correct
+                  //       demand.
+                  //
+                  //       For degenerate geometries (e.g. single-foot
+                  //       pin with vertical-only applied force and hip
+                  //       directly above foot) the moment block can be
+                  //       rank-deficient in some axes. The 1e-10 dual-
+                  //       diagonal regularization makes the failure soft:
+                  //       residual moment spreads across λ as a least-
+                  //       squares best fit, reverting smoothly to the
+                  //       old implicit-anchor behavior when the constraint
+                  //       subspace genuinely can't absorb the moment.
+                  //       Such poses aren't physically balanceable
+                  //       anyway — the body would tip — so a soft
+                  //       degradation is the right behavior.
+                  //
+                  //   [AtWA     A_H     A_F     A_M  ] [λ  ]   [AtWb ]
+                  //   [A_H^T    0       0       0   ] [μ_H] = [-b_H ]
+                  //   [A_F^T    0       0       0   ] [μ_F]   [-b_F ]
+                  //   [A_M^T    0       0       0   ] [μ_M]   [-b_M ]
                   //
                   // For p ≠ 2 (user-tunable effort exponent), the AtWA /
                   // AtWb construction is wrapped in an IRLS loop below:
@@ -3506,16 +4045,37 @@ const BioModelPage: React.FC = () => {
                   }
                   const H = hingeFrozenIdx.length;
                   const B = N;
-                  const dim = N + H + B;
+                  const Mom = 3;
+                  const dim = N + H + B + Mom;
 
                   // IRLS parameters. EPS_EFFORT floors |u_c| so columns that
                   // are near-zero in the current iterate don't get infinite
                   // weight (which would explode the solve for p < 2).
+                  //
+                  // LIMIT-BLOCKING ITERATION: joint limits treated like
+                  // constraints need iterative refinement — a col's
+                  // isLimitBlocked depends on sign(tau0 + Σ lam·sens), but
+                  // lam depends on which cols are blocked. We fold the
+                  // limit-blocking convergence into the IRLS loop (same
+                  // fixed-point structure) by checking blocking status
+                  // after each λ solve and setting its weight to 0 if
+                  // blocked. Use at least 5 iters even for p=2 to give
+                  // the blocking set a chance to converge.
                   const EPS_EFFORT = 0.01;
                   const isQuadratic = Math.abs(effortExponent - 2) < 1e-6;
-                  const IRLS_ITERS = isQuadratic ? 1 : 5;
+                  const IRLS_ITERS = isQuadratic ? 5 : 5;
                   const colWeights: number[] = new Array(cols.length).fill(1);
                   let lam: number[] = new Array(N).fill(0);
+
+                  // Limit-blocked cols are excluded from the effort
+                  // objective — passive anatomy absorbs the local moment,
+                  // so the optimizer has no reason to minimize their
+                  // demand. Baked into colWeights upfront so it propagates
+                  // through both AtWA/AtWb construction and the IRLS
+                  // weight update below.
+                  for (let ci = 0; ci < cols.length; ci++) {
+                      if (cols[ci].isLimitBlocked) colWeights[ci] = 0;
+                  }
 
                   for (let iter = 0; iter < IRLS_ITERS; iter++) {
                       // Build weighted AtWA, AtWb.
@@ -3526,6 +4086,7 @@ const BioModelPage: React.FC = () => {
                               let s = 0;
                               for (let ci = 0; ci < cols.length; ci++) {
                                   const c = cols[ci];
+                                  if (c.isLimitBlocked) continue;
                                   s += colWeights[ci] * c.sens[i] * c.sens[j] / (c.cap * c.cap);
                               }
                               AtWA[i][j] = s;
@@ -3533,6 +4094,7 @@ const BioModelPage: React.FC = () => {
                           let r = 0;
                           for (let ci = 0; ci < cols.length; ci++) {
                               const c = cols[ci];
+                              if (c.isLimitBlocked) continue;
                               r += colWeights[ci] * c.sens[i] * c.tau0 / (c.cap * c.cap);
                           }
                           AtWb[i] = -r;
@@ -3569,24 +4131,65 @@ const BioModelPage: React.FC = () => {
                       }
                       for (let k = 0; k < B; k++) Mm[N + H + k][N + H + k] += 1e-10;
 
+                      // Moment-balance rows about pelvisOrigin. One row
+                      // per world axis a:
+                      //   Σ_j (r_j × n_j)_a λ_j = -(M_total)_a
+                      // r_j = tip_j - pelvisOrigin, M_total accumulated in
+                      // Phase A from each force's (attach - pelvisOrigin) ×
+                      // propagatedForce. Weight-independent; rebuilt each
+                      // iter because Mm is rebuilt.
+                      for (let a = 0; a < Mom; a++) {
+                          const rowIdx = N + H + B + a;
+                          for (let j = 0; j < N; j++) {
+                              const cref = consRefs[j];
+                              const rVec = sub(cref.tip, pelvisOrigin);
+                              const rxN = crossProduct(rVec, cref.n);
+                              const entry = a === 0 ? rxN.x : a === 1 ? rxN.y : rxN.z;
+                              Mm[j][rowIdx] = entry;
+                              Mm[rowIdx][j] = entry;
+                          }
+                          RHS[rowIdx] = -(a === 0 ? totalAppliedMoment.x : a === 1 ? totalAppliedMoment.y : totalAppliedMoment.z);
+                      }
+                      for (let a = 0; a < Mom; a++) Mm[N + H + B + a][N + H + B + a] += 1e-10;
+
                       const sol = solveSmall(Mm, RHS);
                       lam = sol.slice(0, N);
 
-                      if (iter === IRLS_ITERS - 1) break;
-
-                      // Update weights from current τ estimates. w_c =
-                      // max(|u_c|, eps)^(p-2). For p < 2 this is > 1 at
-                      // small u (punishes the near-zero columns less) and
-                      // < 1 at large u (relaxes them). The converged fixed
-                      // point is the minimizer of Σ (τ/cap)^p.
+                      // Update limit-blocking and IRLS weights from the
+                      // current λ estimate. Each col's blocking state is
+                      // re-evaluated against the EFFECTIVE torque newTau =
+                      // tau0 + Σ lam·sens (not just tau0), which lets us
+                      // catch joints whose demand arrives purely via
+                      // constraint reactions — e.g. an SLDL-straight knee
+                      // where Phase A delivers tau0 = 0 but foot-λ sens·λ
+                      // produces hyperextension-direction demand.
+                      //
+                      // For p = 2 the IRLS weight is constant (1), so
+                      // changes here only come from blocking transitions.
+                      // Early exit once blocking stabilizes to avoid
+                      // wasted work.
+                      let blockingChanged = false;
                       for (let ci = 0; ci < cols.length; ci++) {
                           const c = cols[ci];
                           let newTau = c.tau0;
                           for (let i = 0; i < N; i++) newTau += lam[i] * c.sens[i];
-                          const u = Math.abs(newTau / c.cap);
-                          const uSafe = Math.max(u, EPS_EFFORT);
-                          colWeights[ci] = Math.pow(uSafe, effortExponent - 2);
+                          const nowBlocked = isActionLimitBlocked(
+                              c.boneId, c.act, newTau, c.worldAxis, c.jointGroup,
+                          );
+                          if (nowBlocked !== c.isLimitBlocked) {
+                              c.isLimitBlocked = nowBlocked;
+                              blockingChanged = true;
+                          }
+                          if (nowBlocked) {
+                              colWeights[ci] = 0;
+                          } else {
+                              const u = Math.abs(newTau / c.cap);
+                              const uSafe = Math.max(u, EPS_EFFORT);
+                              colWeights[ci] = Math.pow(uSafe, effortExponent - 2);
+                          }
                       }
+                      if (iter === IRLS_ITERS - 1) break;
+                      if (isQuadratic && !blockingChanged && iter >= 1) break;
                   }
 
                   // DEBUG: expose Phase B internals for console inspection.
@@ -3629,14 +4232,14 @@ const BioModelPage: React.FC = () => {
                       // the constrained bone is invariant to F's free-DOF
                       // direction, every (boneId, action) pair's newTau
                       // should also be invariant.
-                      const perJointDbg: Record<string, { tau0: number; newTau: number; cap: number; sensSum: number; }> = {};
+                      const perJointDbg: Record<string, { tau0: number; newTau: number; cap: number; sensSum: number; blocked: boolean; }> = {};
                       for (const c of cols) {
                           if (!/Forearm|Humerus|Clavicle|spine|Tibia|Femur|Foot/.test(c.boneId)) continue;
                           let nt = c.tau0;
                           let ss = 0;
                           for (let i = 0; i < N; i++) { nt += lam[i] * c.sens[i]; ss += Math.abs(c.sens[i]); }
                           const key = `${c.boneId}.${c.act.positiveAction}/${c.act.negativeAction}`;
-                          perJointDbg[key] = { tau0: c.tau0, newTau: nt, cap: c.cap, sensSum: ss };
+                          perJointDbg[key] = { tau0: c.tau0, newTau: nt, cap: c.cap, sensSum: ss, blocked: c.isLimitBlocked };
                       }
                       // Bone positions for moment-arm verification across tests.
                       const bonePosDbg: Record<string, { start: Vector3; end: Vector3 }> = {};
@@ -3644,6 +4247,22 @@ const BioModelPage: React.FC = () => {
                           const s = kin2.boneStartPoints[b], e = kin2.boneEndPoints[b];
                           if (s && e) bonePosDbg[b] = { start: s, end: e };
                       }
+                      // Wrench-balance residuals for verification. In a
+                      // well-posed scene both should be ≈0 at machine
+                      // precision. Nonzero residual (especially in any
+                      // moment axis) indicates the constraint subspace
+                      // can't absorb the applied wrench — pose isn't
+                      // physically balanceable.
+                      let Msum: Vector3 = { x: 0, y: 0, z: 0 };
+                      let Fsum: Vector3 = { x: 0, y: 0, z: 0 };
+                      for (let i = 0; i < consRefs.length; i++) {
+                          const rVec = sub(consRefs[i].tip, pelvisOrigin);
+                          const rxn = crossProduct(rVec, consRefs[i].n);
+                          Msum = add(Msum, mul(rxn, lam[i]));
+                          Fsum = add(Fsum, mul(consRefs[i].n, lam[i]));
+                      }
+                      const forceResidual = add(totalAppliedForce, Fsum);
+                      const momentResidual = add(totalAppliedMoment, Msum);
                       (window as unknown as Record<string, unknown>).__phaseBDebug = {
                           appliedForces: Object.fromEntries(fByBoneDbg),
                           constraintNormalsByBone: Object.fromEntries(normalsByBoneDbg),
@@ -3652,6 +4271,13 @@ const BioModelPage: React.FC = () => {
                           fEffByBone: fEffByBoneDbg,
                           perJoint: perJointDbg,
                           bonePositions: bonePosDbg,
+                          pelvisOrigin,
+                          totalAppliedForce,
+                          totalAppliedMoment,
+                          reactionForce: Fsum,
+                          reactionMomentAboutPelvis: Msum,
+                          forceResidual,
+                          momentResidual,
                       };
                   }
 
@@ -3689,6 +4315,10 @@ const BioModelPage: React.FC = () => {
                   // Cap_Flex / Cap_Ext ratios, so when both flipped, the
                   // displayed ratio between them shifted.
                   for (const c of cols) {
+                      // Limit-blocked: passive anatomy absorbs the moment.
+                      // Phase A already dropped any demand entry for this
+                      // action; skip writeback so it never gets re-added.
+                      if (c.isLimitBlocked) continue;
                       let newTau = c.tau0;
                       for (let i = 0; i < N; i++) newTau += lam[i] * c.sens[i];
                       const newMag = Math.abs(newTau);
@@ -3738,6 +4368,13 @@ const BioModelPage: React.FC = () => {
                               torqueMagnitude: newMag,
                               effort: newMag / effectiveCap,
                           });
+                      }
+                  }
+                  // Post-writeback snapshot of the full demand list.
+                  if (typeof window !== 'undefined') {
+                      const dbg = (window as unknown as Record<string, unknown>).__phaseBDebug as Record<string, unknown> | undefined;
+                      if (dbg) {
+                          dbg.demandsAfterWriteback = filtered.slice().sort((a, b) => b.torqueMagnitude - a.torqueMagnitude);
                       }
                   }
               }
@@ -3903,7 +4540,16 @@ const BioModelPage: React.FC = () => {
         { positiveAction: 'Extension', negativeAction: 'Flexion', axis: {x:1,y:0,z:0} },
     ],
     'Spine': [
-        { positiveAction: 'Flexion', negativeAction: 'Extension', axis: {x:1,y:0,z:0} },
+        // Unlike Hip/Knee/Elbow, the spine points UP from pelvis, so a +X
+        // applied torque drives it INTO flexion (neck tip moves forward).
+        // Per the "label = muscle working" convention (see Elbow comment),
+        // an applied flexion-direction torque means the EXTENSORS are
+        // resisting, so positiveAction = Extension. This is the opposite
+        // order from Hip, where a down-pointing femur under +X goes into
+        // extension (tip moves backward), so flexors resist and
+        // positiveAction = Flexion. The sign mismatch comes from which
+        // way the bone points, not from a convention change.
+        { positiveAction: 'Extension', negativeAction: 'Flexion', axis: {x:1,y:0,z:0} },
         { positiveAction: 'Lateral Flexion L', negativeAction: 'Lateral Flexion R', axis: {x:0,y:0,z:1} },
         { positiveAction: 'Rotation L', negativeAction: 'Rotation R', axis: {x:0,y:1,z:0} },
     ],
@@ -4994,9 +5640,18 @@ const BioModelPage: React.FC = () => {
       lockedBoneIds: Set<string>,
       t: Record<string, number>,
       axisLocks: AxisLock[] = [],
-      lockedTwistIds: Set<string> = new Set()
+      lockedTwistIds: Set<string> = new Set(),
+      // Optional constraints override: callers in React state-update
+      // batches (e.g. applyPreset, which sets constraints AND solves in
+      // the same tick) can't rely on `collectActiveConstraints()` because
+      // the React closure still holds stale `constraints`. Pass the new
+      // constraints here to bypass closure.
+      constraintsOverride?: Record<string, BoneConstraint[]>,
   ): { posture: Posture; twists: Record<string, number> } | null => {
-      const cons = collectActiveConstraints();
+      const cons = constraintsOverride
+          ? Object.entries(constraintsOverride).flatMap(([bid, list]) =>
+              list.filter(c => c.active).map(c => ({ boneId: bid, c })))
+          : collectActiveConstraints();
       if (cons.length === 0) return { posture: tentative, twists: t };
 
       // Per-bone tolerance, take the loosest as global early-exit threshold.
@@ -5536,6 +6191,20 @@ const BioModelPage: React.FC = () => {
       frameTwists: Record<string, number>,
       assignments: MuscleAssignmentMap,
       scales: Record<string, number> = {},
+      // Optional out-parameter. When provided, records which demand
+      // actions contribute positively (agonist) and negatively
+      // (antagonist) to each muscle. Timeline Peaks uses this to show
+      // per-muscle "+/−" chips next to each muscle row so users can
+      // trace why a muscle is active or suppressed.
+      contributionsOut?: Record<string, { positive: Set<string>; negative: Set<string> }>,
+      // Fraction of Spine Extension demand routed to rectus abdominis as
+      // abdominal bracing, in [0, 1]. When > 0, the primary + antagonist
+      // routes for Spine.extension are scaled by (1 − bracingFrac), and
+      // the remaining bracingFrac of the effort is applied directly to
+      // rectus abdominis (labeled "Spine Extension (bracing)"). Rectus
+      // is also exempted from Spine.extension's antagonist suppression
+      // so its reported activation cleanly reflects bracing work.
+      bracingFrac: number = 0,
   ): Record<string, { side: string; muscleId: string; activation: number }> => {
       const acc: Record<string, { side: string; muscleId: string; activation: number }> = {};
 
@@ -5556,10 +6225,22 @@ const BioModelPage: React.FC = () => {
           angleInDirection: number,
           side: string,
           effortSigned: number,
+          // Label identifying the DEMAND action that triggered this
+          // distribution (e.g. "Hip Extension"). For the primary call
+          // this matches the demand itself; for the antagonist call
+          // the same label is used but with effortSigned flipped —
+          // muscles on the opposite-section get a NEGATIVE contribution
+          // labelled by the demand that suppressed them.
+          contributionActionLabel?: string,
+          // Muscles to exclude from this section's distribution (used by
+          // bracing: skip rectus abdominis when routing Spine.extension's
+          // antagonist call to Spine.flexion, so rectus's activation
+          // comes purely from the bracing branch).
+          skipMuscleIds?: Set<string>,
       ) => {
           const assigned = assignments[sectionKey];
           if (!assigned) return;
-          const ids = Object.keys(assigned);
+          const ids = Object.keys(assigned).filter(id => !skipMuscleIds?.has(id));
           if (ids.length === 0) return;
           const sectionScale = scales[sectionKey] ?? 1;
           // Parse section key to build modification lookup keys.
@@ -5594,16 +6275,29 @@ const BioModelPage: React.FC = () => {
               ) : 1;
               const key = `${side}|${id}`;
               if (!acc[key]) acc[key] = { side, muscleId: id, activation: 0 };
-              acc[key].activation += effortSigned * share * isoMod * sectionScale;
+              const delta = effortSigned * share * isoMod * sectionScale;
+              acc[key].activation += delta;
+
+              // Record the contribution in the out-map when the caller
+              // opted into tracking. Filters near-zero contributions
+              // (tiny share / deeply out-of-range bell weight) to avoid
+              // noise chips.
+              if (contributionsOut && contributionActionLabel && Math.abs(delta) > 1e-6) {
+                  if (!contributionsOut[key]) {
+                      contributionsOut[key] = { positive: new Set(), negative: new Set() };
+                  }
+                  if (delta > 0) contributionsOut[key].positive.add(contributionActionLabel);
+                  else contributionsOut[key].negative.add(contributionActionLabel);
+              }
           }
       };
 
       for (const d of demands) {
           // Parse `${side} ${group} ${directionName}` back out of d.action.
           let s = d.action;
-          let side = '';
-          if (s.startsWith('Left '))  { side = 'Left';  s = s.slice(5); }
-          else if (s.startsWith('Right ')) { side = 'Right'; s = s.slice(6); }
+          let parsedSide = '';
+          if (s.startsWith('Left '))  { parsedSide = 'Left';  s = s.slice(5); }
+          else if (s.startsWith('Right ')) { parsedSide = 'Right'; s = s.slice(6); }
           s = s.replace(new RegExp(`^${d.jointGroup}\\s+`), '');
           const directionName = s.trim();
 
@@ -5661,26 +6355,67 @@ const BioModelPage: React.FC = () => {
           const directionAngle = rawAngle * actionSign * (isPositive ? 1 : -1);
 
           const sectionKey = `${d.jointGroup}.${actionKey(directionName)}`;
-          // 1) PRIMARY: muscles assigned to this direction get positive
-          //    activation, distributed by their bell-weighted share.
-          distributeToSection(sectionKey, directionAngle, side, d.effort);
-
-          // 2) ANTAGONIST: muscles assigned to the OPPOSITE direction get
-          //    negative activation of the same magnitude, distributed by
-          //    their own bell-weighted share at the opposite-direction angle
-          //    (which is just -directionAngle).
-          //
-          //    Net effect: a muscle that is purely a flexor disappears
-          //    entirely under pure extension demand (negative → clamped
-          //    away by the > 1e-6 filter). A multi-joint muscle whose
-          //    actions partially oppose each other across joints sees its
-          //    net activation lowered when the opposing demand is loaded —
-          //    e.g. biceps under simultaneous elbow flexion + shoulder
-          //    extension demand, or gastroc under plantarflexion + knee
-          //    extension demand.
           const oppositeName = isPositive ? ax.negativeAction : ax.positiveAction;
           const oppositeKey = `${d.jointGroup}.${actionKey(oppositeName)}`;
-          distributeToSection(oppositeKey, -directionAngle, side, -d.effort);
+
+          // Spine / mid-line demands have no side in the action name
+          // ("Spine Flexion" instead of "Left Spine Flexion"). Without
+          // special handling these route to a side-less muscle bucket
+          // that shows up as an unlabeled row alongside the L/R rows of
+          // the same muscle (e.g. an "unlabeled" Gluteus Maximus from
+          // Spine.extension → glute-max alongside the L/R Hip.extension
+          // glute-max). Split side-less demands 50/50 across Left and
+          // Right so bilateral muscles accumulate evenly on both sides
+          // in symmetric exercises.
+          const sides = parsedSide === '' ? ['Left', 'Right'] : [parsedSide];
+          const splitMult = parsedSide === '' ? 0.5 : 1;
+          // Contribution label is side-agnostic ("Hip Extension" not
+          // "Right Hip Extension") — the muscle's own key already
+          // carries its side, so the label just identifies the action.
+          const contribLabel = `${d.jointGroup} ${directionName}`;
+
+          // BRACING: for Spine Extension demand only, split some of
+          // the effort off to abdominal bracing (rectus abdominis).
+          // Primary + antagonist are scaled by (1 − bracingFrac), and
+          // bracingFrac × effort is applied directly to rectus (with
+          // rectus exempted from the antagonist call so its reported
+          // activation is pure bracing, not a net of suppression and
+          // bracing bonus).
+          const isSpineExtension = d.jointGroup === 'Spine' && directionName === 'Extension';
+          const bFrac = isSpineExtension ? bracingFrac : 0;
+          const primaryMult = 1 - bFrac;
+          const antagonistSkip = bFrac > 0 ? new Set(['rectus-abdominis']) : undefined;
+
+          for (const side of sides) {
+              // 1) PRIMARY: muscles assigned to this direction get positive
+              //    activation, distributed by their bell-weighted share.
+              distributeToSection(sectionKey, directionAngle, side, d.effort * splitMult * primaryMult, contribLabel);
+
+              // 2) ANTAGONIST: muscles assigned to the OPPOSITE direction
+              //    get negative activation of the same magnitude, at the
+              //    opposite-direction angle. Multi-joint / bilateral
+              //    agonist-antagonist coupling cancels here.
+              distributeToSection(oppositeKey, -directionAngle, side, -d.effort * splitMult * primaryMult, contribLabel, antagonistSkip);
+
+              // 3) BRACING: direct rectus-abdominis activation for the
+              //    off-loaded portion of Spine.extension demand. Labeled
+              //    distinctly so users can see bracing vs. normal routes
+              //    in the contribution chips.
+              if (bFrac > 0) {
+                  const bracingDelta = d.effort * splitMult * bFrac;
+                  if (Math.abs(bracingDelta) > 1e-9) {
+                      const key = `${side}|rectus-abdominis`;
+                      if (!acc[key]) acc[key] = { side, muscleId: 'rectus-abdominis', activation: 0 };
+                      acc[key].activation += bracingDelta;
+                      if (contributionsOut) {
+                          if (!contributionsOut[key]) {
+                              contributionsOut[key] = { positive: new Set(), negative: new Set() };
+                          }
+                          contributionsOut[key].positive.add('Spine Extension (bracing)');
+                      }
+                  }
+              }
+          }
       }
       // No upper clamp at this stage. Raw activations scale linearly with
       // action_effort, so they can legitimately exceed 1.0 when force
@@ -5701,7 +6436,7 @@ const BioModelPage: React.FC = () => {
 
   const muscleActivation = useMemo<MuscleActivation[]>(() => {
       if (!torqueDistribution || torqueDistribution.demands.length === 0) return [];
-      const acc = distributeMuscleLoadForFrame(torqueDistribution.demands, posture, twists, muscleAssignments, sectionScales);
+      const acc = distributeMuscleLoadForFrame(torqueDistribution.demands, posture, twists, muscleAssignments, sectionScales, undefined, bracingFraction);
       return Object.entries(acc)
           .map(([key, a]) => ({
               key,
@@ -5713,7 +6448,7 @@ const BioModelPage: React.FC = () => {
           .filter(a => a.activation > 1e-6)
           .sort((a, b) => b.activation - a.activation);
       // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [torqueDistribution, muscleAssignments, sectionScales, posture, twists]);
+  }, [torqueDistribution, muscleAssignments, sectionScales, posture, twists, bracingFraction]);
 
   // --- JOINT FORCE ARROWS ---
   //
@@ -5821,6 +6556,13 @@ const BioModelPage: React.FC = () => {
       muscleName: string;
       peakActivation: number;
       peakFramePct: number;
+      // Joint-action labels aggregated across the timeline frames.
+      // `positive`: demand actions that increased this muscle's
+      // activation (agonist routes). `negative`: demand actions that
+      // reduced it via the antagonist rule (opposite-section routing).
+      // Each label is action-only ("Hip Extension"), side-agnostic.
+      positiveContributors: string[];
+      negativeContributors: string[];
   }
   // Time series of activation per muscle across frames, parallel to profile[].
   interface MuscleTimeSeries {
@@ -5863,6 +6605,12 @@ const BioModelPage: React.FC = () => {
       // scale fixes the limiting muscle to 1.0.
       const muscleSeriesMap = new Map<string, { side: string; muscleId: string; activations: number[] }>();
       const musclePeakMap = new Map<string, { side: string; muscleId: string; peakActivation: number; peakFramePct: number }>();
+      // Aggregated across all frames: per-muscle set of demand actions
+      // that ever contributed positively (agonist) vs. negatively
+      // (antagonist). Populated by distributeMuscleLoadForFrame via the
+      // optional contributionsOut parameter. The union across frames
+      // captures every action that was ever non-zero in the ROM.
+      const muscleContributions: Record<string, { positive: Set<string>; negative: Set<string> }> = {};
       let framesAnalyzed = 0;
       let framesSkipped = 0;
 
@@ -5965,7 +6713,7 @@ const BioModelPage: React.FC = () => {
           // Distribute this frame's joint demands across assigned muscles
           // using the bell-curve weights at the joint's current angle.
           // Track per-(side, muscle) activation in time series + peak map.
-          const frameMuscle = distributeMuscleLoadForFrame(dist.demands, framePose, frameTw, muscleAssignments, sectionScales);
+          const frameMuscle = distributeMuscleLoadForFrame(dist.demands, framePose, frameTw, muscleAssignments, sectionScales, muscleContributions, bracingFraction);
           const frameMuscleKeys = new Set<string>();
           for (const [key, m] of Object.entries(frameMuscle)) {
               // Clamp net-negative activation to 0 — antagonist demands can
@@ -6125,13 +6873,26 @@ const BioModelPage: React.FC = () => {
           // when a muscle is purely antagonised across the whole rep (its
           // bell-share contributions all came in negative and got clamped).
           .filter(mp => mp.peakActivation > 1e-6)
-          .map(mp => ({
-          side: mp.side,
-          muscleId: mp.muscleId,
-          muscleName: MUSCLE_CATALOG.find(m => m.id === mp.muscleId)?.name || mp.muscleId,
-          peakActivation: mp.peakActivation,
-          peakFramePct: mp.peakFramePct,
-      }));
+          .map(mp => {
+              // Aggregate contributions: actions that EVER contributed
+              // positively vs. ever contributed negatively across any
+              // timeline frame. A given action may appear in both sets
+              // (e.g. when bell weight flips sign mid-ROM); in that case
+              // we keep it only on the "positive" side since net
+              // contribution across the rep is what the user cares about.
+              const contribs = muscleContributions[`${mp.side}|${mp.muscleId}`];
+              const pos = contribs ? Array.from(contribs.positive).sort() : [];
+              const neg = contribs ? Array.from(contribs.negative).filter(a => !contribs.positive.has(a)).sort() : [];
+              return {
+                  side: mp.side,
+                  muscleId: mp.muscleId,
+                  muscleName: MUSCLE_CATALOG.find(m => m.id === mp.muscleId)?.name || mp.muscleId,
+                  peakActivation: mp.peakActivation,
+                  peakFramePct: mp.peakFramePct,
+                  positiveContributors: pos,
+                  negativeContributors: neg,
+              };
+          });
       const muscleSeries: MuscleTimeSeries[] = Array.from(muscleSeriesMap.values()).map(ms => ({
           side: ms.side,
           muscleId: ms.muscleId,
@@ -6145,7 +6906,7 @@ const BioModelPage: React.FC = () => {
 
       return { peaks, limitingPeak, framesAnalyzed, framesSkipped, profile, actionSeries, musclePeaks, muscleSeries, limitingMuscle };
       // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, startPosture, endPosture, startTwists, endTwists, forces, constraints, jointCapacities, jointLimits, muscleAssignments, sectionScales, effortExponent]);
+  }, [activeTab, startPosture, endPosture, startTwists, endTwists, forces, constraints, jointCapacities, jointLimits, muscleAssignments, sectionScales, effortExponent, bracingFraction]);
 
   const resolveKinematics = (boneId: string, proposedVector: Vector3, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } => {
       const projected = projectDirOntoConstraints(boneId, proposedVector, currentPosture, currentTwists);
@@ -6825,28 +7586,19 @@ const BioModelPage: React.FC = () => {
   // and the timeline cursor is rewound to 0 so the user sees the start
   // position first. Symmetry mode is left as-is.
   const applyPreset = (preset: ExercisePreset) => {
-    const sTwists = preset.startTwists || DEFAULT_TWISTS;
-    const eTwists = preset.endTwists || DEFAULT_TWISTS;
-    setStartPosture(preset.startPosture);
-    setEndPosture(preset.endPosture);
-    setStartTwists(sTwists);
-    setEndTwists(eTwists);
-    setPosture(preset.startPosture);
-    setTwists(sTwists);
-    setPoseMode('start');
-    setCurrentRomT(0);
-    setSelectedBone(null);
-    setTargetPos(null);
-    setTargetReferenceBone(null);
-    setIsPlaying(false);
+    const sTwistsRaw = preset.startTwists || DEFAULT_TWISTS;
+    const eTwistsRaw = preset.endTwists || DEFAULT_TWISTS;
 
     const baseId = Date.now().toString();
     const newForces: ForceConfig[] = preset.forces.map((f, i) => ({
         ...f,
         id: `${baseId}-f${i}`,
     }));
-    setForces(newForces);
 
+    // Build constraints first so we can pass them to the solver before
+    // React state updates propagate. Without this, the solver's
+    // `collectActiveConstraints()` closure would see the PREVIOUS
+    // preset's constraints and solve against the wrong targets.
     const newConstraints: Record<string, BoneConstraint[]> = {};
     let cidx = 0;
     for (const [bid, list] of Object.entries(preset.constraints)) {
@@ -6856,6 +7608,73 @@ const BioModelPage: React.FC = () => {
             physicsEnabled: c.physicsEnabled !== false,
         }));
     }
+
+    // Smart pelvisT initialization: compute the average offset between
+    // natural constraint-point positions (given the posture + pelvisT=0)
+    // and the constraint CENTERS, then pre-shift pelvisT by that offset.
+    // Without this, the solver often gets stuck in local minima for
+    // poses that differ significantly from the one the constraint was
+    // placed for (e.g. deep-squat start → lockout end) — it bends the
+    // legs instead of translating the pelvis the full distance needed.
+    // With the pre-shift, the solver starts close to the solution and
+    // refines it to satisfy the constraint exactly.
+    const initPelvisT = (posture: Posture, twists: Record<string, number>): Record<string, number> => {
+        const kin = calculateKinematics(posture, twists);
+        let dx = 0, dy = 0, dz = 0, count = 0;
+        for (const [bid, consList] of Object.entries(newConstraints)) {
+            for (const c of consList) {
+                if (c.type !== 'fixed' || !c.active) continue;
+                const natural = getConstraintPoint(bid, c, kin);
+                if (!natural) continue;
+                dx += c.center.x - natural.x;
+                dy += c.center.y - natural.y;
+                dz += c.center.z - natural.z;
+                count++;
+            }
+        }
+        if (count === 0) return twists;
+        return {
+            ...twists,
+            pelvisTx: (twists.pelvisTx || 0) + dx / count,
+            pelvisTy: (twists.pelvisTy || 0) + dy / count,
+            pelvisTz: (twists.pelvisTz || 0) + dz / count,
+        };
+    };
+    const sTwistsInit = initPelvisT(preset.startPosture, sTwistsRaw);
+    const eTwistsInit = initPelvisT(preset.endPosture, eTwistsRaw);
+
+    // Run the constraint solver against BOTH the start and end poses.
+    // This replicates the UI workflow: the user drags limbs into position,
+    // the solver adjusts pelvisTx/Ty/Tz to keep constraints satisfied. For
+    // programmatic preset loading, we run the same solve here so the
+    // constraint points actually land where the preset's limbs go, for
+    // both ends of the motion. Empty locked-bones set = no user input =
+    // solver can move any free DOF including pelvis translation.
+    const startSolved = solveConstraintsAccommodating(
+        preset.startPosture, new Set(), sTwistsInit, [], new Set(), newConstraints,
+    );
+    const endSolved = solveConstraintsAccommodating(
+        preset.endPosture, new Set(), eTwistsInit, [], new Set(), newConstraints,
+    );
+    const startPost = startSolved?.posture ?? preset.startPosture;
+    const startTw = startSolved?.twists ?? sTwistsInit;
+    const endPost = endSolved?.posture ?? preset.endPosture;
+    const endTw = endSolved?.twists ?? eTwistsInit;
+
+    setStartPosture(startPost);
+    setEndPosture(endPost);
+    setStartTwists(startTw);
+    setEndTwists(endTw);
+    setPosture(startPost);
+    setTwists(startTw);
+    setPoseMode('start');
+    setCurrentRomT(0);
+    setSelectedBone(null);
+    setTargetPos(null);
+    setTargetReferenceBone(null);
+    setIsPlaying(false);
+
+    setForces(newForces);
     setConstraints(newConstraints);
     setEditingForceId(null);
   };
@@ -7842,10 +8661,11 @@ const BioModelPage: React.FC = () => {
                                    if (jg === 'Shoulder' || jg === 'Hip') {
                                        if (/\bRotation\b/.test(action)) return 'Rotation';
                                    }
-                                   if (jg === 'Scapula') {
-                                       if (/Elevation|Depression/.test(action)) return 'Elev/Dep';
-                                       if (/Protraction|Retraction/.test(action)) return 'Prot/Ret';
-                                   }
+                                   // Scapula is treated as ONE joint group (elevation,
+                                   // depression, protraction, and retraction all count
+                                   // toward the scapula's combined capacity), so no
+                                   // sub-split — max of 2 scapula rows per pose
+                                   // (Left Scapula, Right Scapula).
                                    return '';
                                };
                                const groups: Record<string, JointActionDemand[]> = {};
@@ -8145,10 +8965,9 @@ const BioModelPage: React.FC = () => {
                                   if (jg === 'Shoulder' || jg === 'Hip') {
                                       if (/\bRotation\b/.test(action)) return 'Rotation';
                                   }
-                                  if (jg === 'Scapula') {
-                                      if (/Elevation|Depression/.test(action)) return 'Elev/Dep';
-                                      if (/Protraction|Retraction/.test(action)) return 'Prot/Ret';
-                                  }
+                                  // Scapula is treated as ONE joint group — elevation,
+                                  // depression, protraction, and retraction all roll up
+                                  // into a single scapula row (per side).
                                   return '';
                               };
                               const groups: Record<string, TimelinePeak[]> = {};
@@ -8423,10 +9242,72 @@ const BioModelPage: React.FC = () => {
                                                                   </div>
                                                               );
                                                           })()}
+                                                          {/* Contribution chips: which joint actions
+                                                              drove this muscle's activation. + chips
+                                                              are agonist routes (the action made the
+                                                              muscle work), − chips are antagonist
+                                                              routes (the action suppressed it via the
+                                                              opposite-section rule). Labels are
+                                                              side-agnostic since the muscle row itself
+                                                              is already side-tagged. */}
+                                                          {(mp.positiveContributors.length > 0 || mp.negativeContributors.length > 0) && (
+                                                              <div className="mt-1.5 flex flex-wrap gap-1">
+                                                                  {mp.positiveContributors.map(a => (
+                                                                      <span key={`pos-${a}`} className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-emerald-50 text-emerald-700 text-[9px] font-mono font-semibold">
+                                                                          +{a}
+                                                                      </span>
+                                                                  ))}
+                                                                  {mp.negativeContributors.map(a => (
+                                                                      <span key={`neg-${a}`} className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-rose-50 text-rose-700 text-[9px] font-mono font-semibold">
+                                                                          −{a}
+                                                                      </span>
+                                                                  ))}
+                                                              </div>
+                                                          )}
                                                       </div>
                                                   );
                                               })}
                                           </div>
+                                          {/* Bracing slider — under the Core region only.
+                                              Abdominal bracing represents the portion of Spine
+                                              Extension demand off-loaded to rectus abdominis
+                                              (via intra-abdominal pressure) instead of being
+                                              carried purely by the erectors. Only relevant
+                                              when Spine Extension is active in the timeline. */}
+                                          {regionName === 'Core' && (() => {
+                                              // Detect any spine-extension activity in timeline.
+                                              const hasSpineExt = timelineAnalysis.peaks.some(p =>
+                                                  p.jointGroup === 'Spine' && /Extension/.test(p.action) && p.peakEffort > 1e-6
+                                              );
+                                              if (!hasSpineExt) return null;
+                                              const bPct = Math.round(bracingFraction * 100);
+                                              const ePct = 100 - bPct;
+                                              return (
+                                                  <div className="mt-4 pt-3 border-t border-gray-100">
+                                                      <div className="flex items-baseline justify-between mb-1">
+                                                          <span className="text-[10px] font-bold uppercase tracking-wide text-gray-500">Bracing / Erector Split</span>
+                                                          <span className="font-mono text-[10px] font-bold text-gray-600 tabular-nums">
+                                                              {bPct}% bracing · {ePct}% erectors
+                                                          </span>
+                                                      </div>
+                                                      <input
+                                                          type="range"
+                                                          min={0}
+                                                          max={100}
+                                                          step={1}
+                                                          value={bPct}
+                                                          onChange={e => setBracingFraction(Number(e.target.value) / 100)}
+                                                          className="w-full"
+                                                      />
+                                                      <p className="text-[9px] text-gray-400 mt-1 leading-snug">
+                                                          Portion of Spine Extension demand routed to rectus abdominis as
+                                                          abdominal bracing. Remainder goes to the erectors. Rectus is
+                                                          exempted from the normal antagonist-suppression by this route,
+                                                          so its activation shown here reflects bracing work alone.
+                                                      </p>
+                                                  </div>
+                                              );
+                                          })()}
                                       </div>
                                   );
                               });
