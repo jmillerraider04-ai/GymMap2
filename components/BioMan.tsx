@@ -31,6 +31,12 @@ export interface VisualPlane {
   pivot?: Vector3;
   axis?: Vector3;
   radius?: number;
+  // When set, the plane is one-sided: the +normal halfspace is forbidden,
+  // -normal is free. Renderer adds an arrow pointing along +normal (into
+  // the blocked side) so the user can see which way is locked. 'one-way'
+  // additionally indicates a ratcheting wall (chevrons instead of single
+  // arrow).
+  directional?: 'half-space' | 'one-way';
 }
 
 interface BioManProps {
@@ -619,6 +625,86 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
                         style: { pointerEvents: 'none' }
                     }
                 });
+                // Directional indicator: draw an arrow along +normal (the
+                // blocked direction) starting at the plane's center. The
+                // limb is free on the −normal side; +normal is locked.
+                if (plane.directional) {
+                    const N = normalize(plane.normal);
+                    const ARROW_LEN = 18;
+                    const arrowTail = plane.center;
+                    const arrowHead = add(plane.center, mul(N, ARROW_LEN));
+                    const tailProj = project(applyCamera(arrowTail));
+                    const headProj = project(applyCamera(arrowHead));
+                    // Color: rose for half-space (static wall), amber for
+                    // one-way (ratchet — same hue family as the existing
+                    // arc constraint indicators).
+                    const arrowColor = plane.directional === 'one-way'
+                        ? `rgba(245, 158, 11, ${isSelected ? 0.95 : 0.55})`
+                        : `rgba(244, 63, 94, ${isSelected ? 0.95 : 0.55})`;
+                    // Shaft
+                    items.push({
+                        type: 'line',
+                        id: `${plane.id}-dir-shaft`,
+                        z: camCenter.z - 49,
+                        props: {
+                            x1: tailProj.x, y1: tailProj.y,
+                            x2: headProj.x, y2: headProj.y,
+                            stroke: arrowColor,
+                            strokeWidth: isSelected ? 2.5 : 1.8,
+                            style: { pointerEvents: 'none' }
+                        }
+                    });
+                    // Arrowhead: small triangle at the head pointing along
+                    // (head - tail). Compute screen-space perpendicular for
+                    // the two base vertices.
+                    const dx = headProj.x - tailProj.x;
+                    const dy = headProj.y - tailProj.y;
+                    const screenLen = Math.sqrt(dx * dx + dy * dy) || 1;
+                    const ux = dx / screenLen;
+                    const uy = dy / screenLen;
+                    const HEAD_SIZE = 6;
+                    const baseX = headProj.x - ux * HEAD_SIZE;
+                    const baseY = headProj.y - uy * HEAD_SIZE;
+                    const px = -uy;
+                    const py = ux;
+                    const v1x = baseX + px * HEAD_SIZE * 0.6;
+                    const v1y = baseY + py * HEAD_SIZE * 0.6;
+                    const v2x = baseX - px * HEAD_SIZE * 0.6;
+                    const v2y = baseY - py * HEAD_SIZE * 0.6;
+                    items.push({
+                        type: 'path',
+                        id: `${plane.id}-dir-head`,
+                        z: camCenter.z - 48,
+                        props: {
+                            d: `M ${headProj.x} ${headProj.y} L ${v1x} ${v1y} L ${v2x} ${v2y} Z`,
+                            fill: arrowColor,
+                            stroke: 'none',
+                            style: { pointerEvents: 'none' }
+                        }
+                    });
+                    // For 'one-way' (ratchet), add a second chevron behind
+                    // the first to convey the "no return" idea visually.
+                    if (plane.directional === 'one-way') {
+                        const back2X = baseX - ux * HEAD_SIZE * 1.0;
+                        const back2Y = baseY - uy * HEAD_SIZE * 1.0;
+                        const v3x = back2X + px * HEAD_SIZE * 0.5;
+                        const v3y = back2Y + py * HEAD_SIZE * 0.5;
+                        const v4x = back2X - px * HEAD_SIZE * 0.5;
+                        const v4y = back2Y - py * HEAD_SIZE * 0.5;
+                        items.push({
+                            type: 'path',
+                            id: `${plane.id}-dir-head2`,
+                            z: camCenter.z - 48,
+                            props: {
+                                d: `M ${baseX} ${baseY} L ${v3x} ${v3y} M ${baseX} ${baseY} L ${v4x} ${v4y}`,
+                                fill: 'none',
+                                stroke: arrowColor,
+                                strokeWidth: 1.5,
+                                style: { pointerEvents: 'none' }
+                            }
+                        });
+                    }
+                }
             }
         });
     }

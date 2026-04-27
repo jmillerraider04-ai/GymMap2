@@ -208,6 +208,26 @@ interface BoneConstraint {
     //           is drawn. Models a MOTION PATH without a physical object
     //           (e.g. "forearm sweeps in sagittal plane during a curl").
     physicsEnabled?: boolean;
+    // Direction-restriction mode for `planar` constraints (ignored on arc/fixed).
+    //   undefined  = bidirectional equality (current default). The tip's
+    //                signed distance to the plane must be exactly 0 — both
+    //                sides of the plane are forbidden.
+    //   'half-space' = static one-sided wall. The tip's signed distance
+    //                  must satisfy sd ≤ 0 (free in -normal halfspace,
+    //                  blocked when crossing into +normal halfspace). The
+    //                  wall stays where authored. Models safety pins, the
+    //                  floor under the feet, machine end-stops.
+    //   'one-way'    = ratchet / monotonic motion. Same as half-space at
+    //                  any instant, but the wall's effective center slides
+    //                  with the tip whenever the tip moves further into
+    //                  the allowed region. Once the tip has moved past
+    //                  the wall in the -normal direction, it cannot back
+    //                  up: the wall has advanced to its new position.
+    //                  Models one-way bearings, latching mechanisms,
+    //                  "no-eccentric" rehab modes.
+    // Cost function: violation = directional ? max(0, sd) : sd; cost = violation².
+    // Cost is C¹ at sd=0 so existing Armijo backtracking handles the kink.
+    directional?: 'half-space' | 'one-way';
 }
 
 interface Frame {
@@ -2579,6 +2599,31 @@ const BioModelPage: React.FC = () => {
   // EXERCISE_PRESETS above); applyPreset wires them into state.
   const [presetMenuOpen, setPresetMenuOpen] = useState(false);
   const presetMenuRef = useRef<HTMLDivElement | null>(null);
+  // Watermarks for `directional: 'one-way'` planar constraints. Map keyed
+  // by constraint id; value is the scalar offset α along the normal that
+  // the wall has advanced from its authored center. The effective
+  // constraint center is `c.center + α * normalize(c.normal)`. α monotonic-
+  // ally decreases (slides into -normal halfspace) as the tip moves further
+  // into the allowed region; never increases. Cleared on preset load and
+  // model reset. Stored in a ref so updates don't trigger re-renders.
+  const ratchetWatermarks = useRef<Map<string, number>>(new Map());
+  // Active-set test for directional constraints. Returns true when the
+  // constraint's boundary is currently within tolerance of the tip (the
+  // wall is "loaded" and will exert a reaction force). Returns false when
+  // the tip is comfortably inside the allowed halfspace — in that case
+  // the wall exerts no force and the constraint should not contribute
+  // to Phase B / force-projection. Bidirectional constraints (no
+  // `directional`) always return true.
+  const DIRECTIONAL_ACTIVE_TOL = 1e-2;
+  const isDirectionalActive = (c: BoneConstraint, tip: Vector3 | null | undefined): boolean => {
+    if (!c.directional) return true;
+    if (c.type !== 'planar') return true;
+    if (!tip) return true;
+    const N = normalize(c.normal);
+    const alpha = c.directional === 'one-way' ? (ratchetWatermarks.current.get(c.id) ?? 0) : 0;
+    const sd = dotProduct(sub(tip, c.center), N) - alpha;
+    return sd >= -DIRECTIONAL_ACTIVE_TOL;
+  };
   useEffect(() => {
     if (!presetMenuOpen) return;
     const onDocClick = (e: MouseEvent) => {
@@ -2991,6 +3036,14 @@ const BioModelPage: React.FC = () => {
   };
 
   const updateConstraint = (boneId: string, id: string, updates: Partial<BoneConstraint>) => {
+      // Any geometry edit (normal, center, position, directional mode,
+      // physicsEnabled toggle) invalidates an existing one-way ratchet
+      // watermark — the wall has effectively moved or the mode no longer
+      // applies. Clearing here is a coarse-but-safe reset.
+      const isGeomChange = ('normal' in updates) || ('center' in updates) ||
+                            ('position' in updates) || ('directional' in updates) ||
+                            ('physicsEnabled' in updates);
+      if (isGeomChange) ratchetWatermarks.current.delete(id);
       setConstraints(prev => {
           const sourceList = (prev[boneId] || []).map(c => c.id === id ? { ...c, ...updates } : c);
           return { ...prev, [boneId]: sourceList };
@@ -3000,6 +3053,7 @@ const BioModelPage: React.FC = () => {
   };
 
   const removeConstraint = (boneId: string, id: string) => {
+      ratchetWatermarks.current.delete(id);
       setConstraints(prev => ({
           ...prev,
           [boneId]: (prev[boneId] || []).filter(c => c.id !== id),
@@ -3044,7 +3098,8 @@ const BioModelPage: React.FC = () => {
                       normal: c.normal,
                       size: 80,
                       color: 'rgba(139, 92, 246, 0.2)',
-                      boneId
+                      boneId,
+                      directional: c.directional,
                   });
               }
           });
@@ -3404,7 +3459,7 @@ const BioModelPage: React.FC = () => {
           let propagatedForce = scaledForce;
           const consAtBone = activeConstraints?.[f.boneId];
           if (consAtBone) {
-              const activeCons = consAtBone.filter(c => c.active && c.physicsEnabled !== false);
+              const activeCons = consAtBone.filter(c => c.active && c.physicsEnabled !== false && isDirectionalActive(c, getConstraintPoint(f.boneId, c, kin)));
               if (activeCons.length > 0) {
                   const normals: Vector3[] = [];
                   for (const c of activeCons) {
@@ -3725,6 +3780,13 @@ const BioModelPage: React.FC = () => {
               for (const c of activeList) {
                   const tipB = getConstraintPoint(bid, c, kin2);
                   if (!tipB) continue;
+                  // Active-set check: a directional constraint only emits a
+                  // KKT row when its boundary is active (tip touching the
+                  // wall). When the limb is comfortably inside the allowed
+                  // halfspace, the constraint exerts no reaction force, so
+                  // skip the row entirely. Bidirectional constraints always
+                  // emit (always active).
+                  if (!isDirectionalActive(c, tipB)) continue;
                   if (c.type === 'fixed') {
                       consRefs.push({ n: { x: 1, y: 0, z: 0 }, center: c.center, tip: tipB, constrainedBone: bid, ancestors });
                       consRefs.push({ n: { x: 0, y: 1, z: 0 }, center: c.center, tip: tipB, constrainedBone: bid, ancestors });
@@ -5586,13 +5648,52 @@ const BioModelPage: React.FC = () => {
               cost += radialErr * radialErr + axialDist * axialDist;
               maxAbs = Math.max(maxAbs, Math.abs(radialErr), Math.abs(axialDist));
           } else {
+              // Planar. Default = bidirectional equality (cost = sd²). When
+              // `directional` is set, the constraint becomes one-sided and
+              // cost = max(0, sd)² (zero on the allowed -normal halfspace).
+              // For 'one-way' the wall's effective center has slid by the
+              // ratchet watermark α: effective_center = c.center + α·N.
               const N = normalize(c.normal);
-              const sd = dotProduct(sub(tip, c.center), N);
-              cost += sd * sd;
-              if (Math.abs(sd) > maxAbs) maxAbs = Math.abs(sd);
+              let alpha = 0;
+              if (c.directional === 'one-way') {
+                  alpha = ratchetWatermarks.current.get(c.id) ?? 0;
+              }
+              const sd = dotProduct(sub(tip, c.center), N) - alpha;
+              const violation = c.directional ? Math.max(0, sd) : sd;
+              cost += violation * violation;
+              if (Math.abs(violation) > maxAbs) maxAbs = Math.abs(violation);
           }
       }
       return { cost, maxAbs };
+  };
+
+  // For each `directional: 'one-way'` constraint, slide the wall's
+  // effective center to match the tip's current position projected onto
+  // the constraint axis — but only in the -normal direction (the allowed
+  // direction). Once advanced, the wall blocks return motion. Called by
+  // solveConstraintsAccommodating after every successful solve.
+  const advanceRatchets = (
+      posture: Posture,
+      twists: Record<string, number>,
+      cons: { boneId: string; c: BoneConstraint }[]
+  ) => {
+      let needsKin = false;
+      for (const { c } of cons) { if (c.directional === 'one-way') { needsKin = true; break; } }
+      if (!needsKin) return;
+      const kin = calculateKinematics(posture, twists);
+      for (const { boneId: bid, c } of cons) {
+          if (c.directional !== 'one-way') continue;
+          const tip = getConstraintPoint(bid, c, kin);
+          if (!tip) continue;
+          const N = normalize(c.normal);
+          // Raw signed distance from the tip to the AUTHORED center
+          // (independent of the watermark). Watermark α tracks the most
+          // negative sdRaw seen so far — i.e. how deep into the allowed
+          // halfspace the limb has moved. α is monotonically non-increasing.
+          const sdRaw = dotProduct(sub(tip, c.center), N);
+          const prevAlpha = ratchetWatermarks.current.get(c.id) ?? 0;
+          if (sdRaw < prevAlpha) ratchetWatermarks.current.set(c.id, sdRaw);
+      }
   };
 
   // Build an orthonormal tangent basis (e1, e2) at unit vector d.
@@ -5679,6 +5780,16 @@ const BioModelPage: React.FC = () => {
           : collectActiveConstraints();
       if (cons.length === 0) return { posture: tentative, twists: t };
 
+      // Wrap a successful return: advance any one-way ratchet watermarks
+      // before handing the result back, so the wall stays flush with the
+      // limb's deepest excursion into the allowed halfspace. Inactive on
+      // a return that produces no change, since `advanceRatchets` clamps
+      // α to min(prev, current) and preserves α when current is shallower.
+      const ok = (p: Posture, twists: Record<string, number>) => {
+          advanceRatchets(p, twists, cons);
+          return { posture: p, twists };
+      };
+
       // Per-bone tolerance, take the loosest as global early-exit threshold.
       let globalTol = SOLVER_MIN_TOL;
       for (const { boneId: bid } of cons) {
@@ -5718,7 +5829,7 @@ const BioModelPage: React.FC = () => {
       let solvedTwists: Record<string, number> = { ...t };
 
       let { cost, maxAbs } = computeConstraintCost(posture, solvedTwists, cons);
-      if (maxAbs <= globalTol) return { posture, twists: solvedTwists };
+      if (maxAbs <= globalTol) return ok(posture, solvedTwists);
 
       // Free bones: only bones that are on the kinematic chain of at least
       // one constrained bone. A foot constraint should only let the solver
@@ -5785,11 +5896,11 @@ const BioModelPage: React.FC = () => {
 
       // If no constraints are relevant to the user's input branch, skip
       // the solver entirely — the input can't violate any constraint.
-      if (relevantCons.length === 0) return { posture, twists: solvedTwists };
+      if (relevantCons.length === 0) return ok(posture, solvedTwists);
 
       // Recompute cost with only relevant constraints.
       ({ cost, maxAbs } = computeConstraintCost(posture, solvedTwists, relevantCons));
-      if (maxAbs <= globalTol) return { posture, twists: solvedTwists };
+      if (maxAbs <= globalTol) return ok(posture, solvedTwists);
 
       // Rebuild chain bones from relevant constraints only — used to restrict
       // which bones the solver can move when the user is actively editing.
@@ -6096,10 +6207,10 @@ const BioModelPage: React.FC = () => {
               // No descent step satisfies Armijo — impasse.
               return null;
           }
-          if (maxAbs <= globalTol) return { posture, twists: solvedTwists };
+          if (maxAbs <= globalTol) return ok(posture, solvedTwists);
       }
 
-      return maxAbs <= globalTol ? { posture, twists: solvedTwists } : null;
+      return maxAbs <= globalTol ? ok(posture, solvedTwists) : null;
   };
 
   // Standalone posture-level joint-limit check: returns true if ANY joint
@@ -7603,6 +7714,7 @@ const BioModelPage: React.FC = () => {
     setSymmetryMode(false);
     setIsPlaying(false);
     setConstraints({});
+    ratchetWatermarks.current.clear();
   };
 
   // Apply an exercise preset. Replaces the scene with the preset's poses,
@@ -7611,6 +7723,10 @@ const BioModelPage: React.FC = () => {
   // and the timeline cursor is rewound to 0 so the user sees the start
   // position first. Symmetry mode is left as-is.
   const applyPreset = (preset: ExercisePreset) => {
+    // Ratchet state belongs to the active scene; loading a preset starts
+    // a fresh scene, so any one-way watermarks from a previous preset
+    // must be cleared.
+    ratchetWatermarks.current.clear();
     const sTwistsRaw = preset.startTwists || DEFAULT_TWISTS;
     const eTwistsRaw = preset.endTwists || DEFAULT_TWISTS;
 
@@ -8284,6 +8400,53 @@ const BioModelPage: React.FC = () => {
                                               >
                                                   <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${isPhysics ? 'translate-x-4' : 'translate-x-0'}`} />
                                               </button>
+                                          </div>
+                                      );
+                                  })()}
+
+                                  {/* Direction picker: only meaningful for planar constraints. Arc/fixed don't have a "side" concept. */}
+                                  {c.active && c.type === 'planar' && (() => {
+                                      const mode: 'both' | 'half-space' | 'one-way' = c.directional ?? 'both';
+                                      const setMode = (m: 'both' | 'half-space' | 'one-way') => {
+                                          updateConstraint(selectedBone, c.id, {
+                                              directional: m === 'both' ? undefined : m,
+                                          });
+                                      };
+                                      const blurb =
+                                          mode === 'both'      ? 'plane blocks both sides (equality)' :
+                                          mode === 'half-space' ? 'wall blocks +normal side; free in -normal' :
+                                                                  'ratchet: wall slides with limb; no return';
+                                      return (
+                                          <div className="mb-3 px-3 py-2 rounded-lg bg-gray-50 border border-gray-100">
+                                              <div className="flex items-center justify-between mb-2">
+                                                  <span className="text-[10px] font-bold uppercase tracking-wide text-gray-500">
+                                                      Direction
+                                                  </span>
+                                                  <span className="text-[10px] text-gray-400 truncate ml-2">{blurb}</span>
+                                              </div>
+                                              <div className="flex gap-1">
+                                                  <button
+                                                      onClick={() => setMode('both')}
+                                                      className={`flex-1 py-1.5 text-[10px] font-bold rounded-md transition-colors ${mode === 'both' ? 'bg-violet-600 text-white' : 'bg-white text-gray-600 hover:bg-violet-50 border border-gray-200'}`}
+                                                      title="Bidirectional plane: tip locked exactly on the plane (current default behavior)."
+                                                  >
+                                                      Both Sides
+                                                  </button>
+                                                  <button
+                                                      onClick={() => setMode('half-space')}
+                                                      className={`flex-1 py-1.5 text-[10px] font-bold rounded-md transition-colors ${mode === 'half-space' ? 'bg-violet-600 text-white' : 'bg-white text-gray-600 hover:bg-violet-50 border border-gray-200'}`}
+                                                      title="One-sided wall: tip can be anywhere on the −normal side; blocked when crossing into +normal. Wall stays where you place it (e.g. safety pins, floor)."
+                                                  >
+                                                      Half-Space
+                                                  </button>
+                                                  <button
+                                                      onClick={() => setMode('one-way')}
+                                                      className={`flex-1 py-1.5 text-[10px] font-bold rounded-md transition-colors ${mode === 'one-way' ? 'bg-violet-600 text-white' : 'bg-white text-gray-600 hover:bg-violet-50 border border-gray-200'}`}
+                                                      title="Ratchet: wall slides with the tip as it moves into the −normal halfspace, never letting it return. Models one-way bearings, latching mechanisms."
+                                                  >
+                                                      One-Way
+                                                  </button>
+                                              </div>
                                           </div>
                                       );
                                   })()}
