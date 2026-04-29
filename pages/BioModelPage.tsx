@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import BioMan, { Posture, Vector3, VisualForce, VisualPlane } from '../components/BioMan';
+import BioMan, { Posture, Vector3, VisualForce, VisualPlane, AxisCircle } from '../components/BioMan';
 import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, ChevronDown, BrainCircuit, Axis3d, Plus, Trash2, TrendingUp, Activity, Link2 } from 'lucide-react';
 
 const DEFAULT_POSTURE: Posture = {
@@ -228,6 +228,14 @@ interface BoneConstraint {
     // Cost function: violation = directional ? max(0, sd) : sd; cost = violation².
     // Cost is C¹ at sd=0 so existing Armijo backtracking handles the kink.
     directional?: 'half-space' | 'one-way';
+    // Optional joint anchor for the arc pivot. When set, the constraint's
+    // pivot follows the live world position of the named joint each
+    // frame instead of staying at the stored `pivot` value. Lets you
+    // model "lever arm rotates around the knee/elbow/etc." setups
+    // where the axle moves with the body. Joint name format is e.g.
+    // 'Knee.L', 'Elbow.R', 'Hip.L', 'Pelvis', 'Neck' — see
+    // JOINT_ANCHOR_POINTS for the full list. Ignored on planar/fixed.
+    anchor?: { joint: string };
 }
 
 interface Frame {
@@ -237,6 +245,46 @@ interface Frame {
 }
 
 type JointGroup = 'Shoulder' | 'Elbow' | 'Hip' | 'Knee' | 'Ankle' | 'Scapula' | 'Spine';
+
+// Map of pickable joint anchor points → which bone end they correspond to
+// in the kinematics output. `start` = boneStartPoints[bone], `end` =
+// boneEndPoints[bone]. Used by arc constraints with `anchor` set, and
+// by the "anchor pivot to joint" dropdown in the constraint settings UI.
+// Joint names are display-friendly so we can show them directly.
+//
+// Convention: shoulder = humerus start (glenohumeral); elbow = forearm
+// start (humeroulnar); wrist = forearm end; hip = femur start; knee =
+// tibia start; ankle = foot start; toe = foot end. Pelvis = spine
+// start; neck = spine end. Two central anchors plus L/R variants for
+// every limb joint.
+const JOINT_ANCHOR_POINTS: Record<string, { bone: string; end: 'start' | 'end' }> = {
+    'Pelvis':     { bone: 'spine',    end: 'start' },
+    'Neck':       { bone: 'spine',    end: 'end'   },
+    'Shoulder.L': { bone: 'lHumerus', end: 'start' },
+    'Shoulder.R': { bone: 'rHumerus', end: 'start' },
+    'Elbow.L':    { bone: 'lForearm', end: 'start' },
+    'Elbow.R':    { bone: 'rForearm', end: 'start' },
+    'Wrist.L':    { bone: 'lForearm', end: 'end'   },
+    'Wrist.R':    { bone: 'rForearm', end: 'end'   },
+    'Hip.L':      { bone: 'lFemur',   end: 'start' },
+    'Hip.R':      { bone: 'rFemur',   end: 'start' },
+    'Knee.L':     { bone: 'lTibia',   end: 'start' },
+    'Knee.R':     { bone: 'rTibia',   end: 'start' },
+    'Ankle.L':    { bone: 'lFoot',    end: 'start' },
+    'Ankle.R':    { bone: 'rFoot',    end: 'start' },
+    'Toe.L':      { bone: 'lFoot',    end: 'end'   },
+    'Toe.R':      { bone: 'rFoot',    end: 'end'   },
+};
+
+// Mirror an anchor joint name across the body's sagittal plane. Central
+// joints (Pelvis, Neck) are returned unchanged; left/right variants are
+// swapped. Used by the constraint mirror function so symmetry mode
+// keeps the anchor on the corresponding side.
+const mirrorJointName = (j: string): string => {
+    if (j.endsWith('.L')) return j.slice(0, -2) + '.R';
+    if (j.endsWith('.R')) return j.slice(0, -2) + '.L';
+    return j;
+};
 
 interface CapacityConfig {
     base: number;
@@ -1519,6 +1567,16 @@ const mirrorConstraintData = (c: BoneConstraint): Omit<BoneConstraint, 'id' | 'm
         axis: c.axis ? { x: -c.axis.x, y: c.axis.y, z: c.axis.z } : undefined,
         radius: c.radius,
         physicsEnabled: c.physicsEnabled,
+        // Direction mode (half-space / one-way / undefined=both) is a
+        // scalar-style flag with no spatial component, so it carries
+        // straight across without negation. Was previously dropped at
+        // mirror time, leaving the mirrored side stuck in 'both' mode
+        // even when the source had been switched to 'half-space'.
+        directional: c.directional,
+        // Joint-anchor for arc pivots: swap L↔R so the mirror anchors
+        // to the corresponding joint on the opposite side. Central
+        // joints (Pelvis, Neck) carry across unchanged.
+        anchor: c.anchor ? { joint: mirrorJointName(c.anchor.joint) } : undefined,
     };
 };
 
@@ -2412,78 +2470,229 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         },
     },
     // ========================================================================
-    // BARBELL ROW
+    // BB BENT OVER ROW
     // ========================================================================
-    // Bent-over row. Legs same throughout (10° knee flex), only arms move.
-    // Start = arms straight down (bar near shins). End = elbow ~90° flex
-    // with humerus pulled back ~30° (bar pulled toward stomach).
+    // Captured from a hand-built scene. Spine fixed at ~52° forward lean
+    // (held throughout the rep — femur is locked at hip + knee so the
+    // hinge angle doesn't change). Feet pinned heel + toe with
+    // directional half-space (Y up) so the floor pushes but doesn't
+    // pull. Forearms tracked along a vertical line (planar normal X +
+    // tilted normal {0,0.3,1}) — that's the bar's path. Spine tip
+    // pinned at the neck-base position to keep the head/neck stationary.
+    // Start = arms hanging long; end = elbows pulled out and back with
+    // forearms wrapped (humerus IR shifts from -59° to -62° as the
+    // shoulders externally rotate slightly into the top).
     {
-        id: 'bb-row',
-        name: 'BARBELL ROW',
+        id: 'bb_bent_over_row',
+        name: 'BB BENT OVER ROW',
         category: 'Pull',
         startPosture: {
-            lClavicle: { x: -25, y: 0, z: 0 },
-            rClavicle: { x: 25, y: 0, z: 0 },
-            spine: { x: 0, y: -0.5, z: -0.8660254037844386 },
-            lHumerus: { x: 0, y: 0.5, z: -0.8660254037844386 },
-            rHumerus: { x: 0, y: 0.5, z: -0.8660254037844386 },
-            lForearm: { x: 0, y: 1, z: 0 },
-            rForearm: { x: 0, y: 1, z: 0 },
-            lFemur: { x: 0, y: 1, z: 0 },
-            lTibia: { x: 0, y: 0.984807753012208, z: 0.17364817766693033 },
-            lFoot: { x: 0, y: 0, z: -1 },
-            rFemur: { x: 0, y: 1, z: 0 },
-            rTibia: { x: 0, y: 0.984807753012208, z: 0.17364817766693033 },
-            rFoot: { x: 0, y: 0, z: -1 },
+            spine: { x: 4.8203590771609627e-17, y: -0.6166666666666667, z: -0.7872243785746362 },
+            lClavicle: { x: -25, y: 2.01947021484375, z: -4 },
+            rClavicle: { x: 25, y: 2.01947021484375, z: -4 },
+            lHumerus: { x: -0.36573773565696277, y: 0.6680704664478252, z: -0.6480106176419513 },
+            lForearm: { x: 0, y: 0.9999511551478069, z: 0.009883689521970284 },
+            rHumerus: { x: 0.36573773565696277, y: 0.6680704664478251, z: -0.6480106176419512 },
+            rForearm: { x: 0, y: 0.9999511551478069, z: 0.009883689521970329 },
+            lFemur: { x: 7.5801017819076e-18, y: 0.8209762129473486, z: -0.5709623961125898 },
+            lTibia: { x: 0, y: 0.8624202105928235, z: 0.5061930267803282 },
+            lFoot: { x: 0, y: 0.07604316982719152, z: -0.997104526277277 },
+            rFemur: { x: -7.5801017819076e-18, y: 0.8209762129473486, z: -0.5709623961125898 },
+            rTibia: { x: 0, y: 0.8624202105928235, z: 0.5061930267803282 },
+            rFoot: { x: 0, y: 0.07604316982719152, z: -0.997104526277277 },
         },
         endPosture: {
-            lClavicle: { x: -25, y: 0, z: 0 },
-            rClavicle: { x: 25, y: 0, z: 0 },
-            spine: { x: 0, y: -0.5, z: -0.8660254037844386 },
-            // Humerus pulled back 30° (shoulder extension); spineFrame-local.
-            lHumerus: { x: 0, y: 0.8660254037844386, z: -0.5 },
-            rHumerus: { x: 0, y: 0.8660254037844386, z: -0.5 },
-            // Elbow ~90° flex in "other rotation direction" (handles forward
-            // of elbow from pulled-back humerus → hand lands at stomach).
-            lForearm: { x: 0, y: 0, z: -1 },
-            rForearm: { x: 0, y: 0, z: -1 },
-            lFemur: { x: 0, y: 1, z: 0 },
-            lTibia: { x: 0, y: 0.984807753012208, z: 0.17364817766693033 },
-            lFoot: { x: 0, y: 0, z: -1 },
-            rFemur: { x: 0, y: 1, z: 0 },
-            rTibia: { x: 0, y: 0.984807753012208, z: 0.17364817766693033 },
-            rFoot: { x: 0, y: 0, z: -1 },
+            spine: { x: 4.8203590771609627e-17, y: -0.6166666666666667, z: -0.7872243785746362 },
+            lClavicle: { x: -25, y: -2, z: 6 },
+            rClavicle: { x: 25, y: -2, z: 6 },
+            lHumerus: { x: -0.8479126942906863, y: 0.40841902562408855, z: 0.3379910684751588 },
+            lForearm: { x: 0, y: -0.18971906259418955, z: 0.9818384170974275 },
+            rHumerus: { x: 0.8479126942906863, y: 0.40841902562408855, z: 0.3379910684751588 },
+            rForearm: { x: 0, y: -0.18971906259418955, z: 0.9818384170974275 },
+            lFemur: { x: -0.00009566162885885208, y: 0.8205811766038078, z: -0.5715299847360268 },
+            lTibia: { x: 0, y: 0.8620400047342114, z: 0.506840241336302 },
+            lFoot: { x: 0, y: 0.07546068542729362, z: -0.9971487777432428 },
+            rFemur: { x: 0.00009566162885885208, y: 0.8205811766038078, z: -0.5715299847360268 },
+            rTibia: { x: 0, y: 0.8620400047342114, z: 0.506840241336302 },
+            rFoot: { x: 0, y: 0.07546068542729362, z: -0.9971487777432428 },
         },
         startTwists: {
-            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
-            lHumerus: 0, rHumerus: 0,
+            spine: 0,
+            pelvis: 0,
+            pelvisTx: 0,
+            pelvisTy: 9.82819433137131,
+            pelvisTz: 34.598975177050704,
+            lHumerus: -59.48051046989573,
+            rHumerus: 59.48051046989575,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
             lTibia: 0, rTibia: 0,
             lFoot: 0, rFoot: 0,
         },
         endTwists: {
-            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
-            lHumerus: 0, rHumerus: 0,
+            spine: 0.019494147277835466,
+            pelvis: -0.021670329371533858,
+            pelvisTx: -0.001183576275221258,
+            pelvisTy: 9.836638100150429,
+            pelvisTz: 34.6394670900202,
+            lHumerus: -62.164197143685044,
+            rHumerus: 62.164197143685044,
+            lFemur: -0.03205024741176889,
+            rFemur: 0.03205024741176889,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            { name: 'Force', boneId: 'rForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+            { name: 'Force', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+        ],
+        constraints: {
+            spine: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 3.694029575016619e-15, y: 2.8446394650004265, z: -12.611756976158034 }, physicsEnabled: false },
+            ],
+            rFoot: [
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20.010355573849886, y: 133.0172299210603, z: 0.013830956344949463 }, directional: 'half-space', position: 0 },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 20.010421536029774, y: 133.02771998977394, z: 0.029207740818594452 }, position: 0 },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20.010355573849886, y: 133.0172299210603, z: 0.013830956344949463 }, position: 0 },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20.026458190623245, y: 132.98024363059292, z: -20.022914467971425 }, directional: 'half-space', position: 1 },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 20.002832322517808, y: 133.03518082597984, z: -19.917752836836335 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 19.994677583473624, y: 133.01947924706047, z: -19.937942928796993 } },
+            ],
+            rFemur: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 84.16325444828078, z: 3.769471362771931 }, physicsEnabled: false },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 39.84463946500043, z: 34.62170573832014 }, position: 0, physicsEnabled: false },
+            ],
+            rForearm: [
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 55.04799504881175, y: 43.91082596592234, z: 8.758598042773402 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 0.3, z: 1 }, center: { x: 55.04799504881175, y: 43.91082596592234, z: 8.758598042773402 }, physicsEnabled: false },
+            ],
+            lFoot: [
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20.012702580542733, y: 133.02630516718358, z: 0.0357334592569547 }, position: 0, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: -20.00080559924827, y: 133.03666099840711, z: 0.055014879870954214 }, position: 0 },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -19.992809727950554, y: 133.02883321889436, z: 0.0319057498773736 }, position: 0 },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20.00002858704091, y: 133.02116029004273, z: -19.96780049117799 }, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: -20.00649103736864, y: 133.02844465433103, z: -19.94814733809645 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20.002013582971557, y: 132.9741372985945, z: -20.040668990391943 } },
+            ],
+            lFemur: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 84.16325444828078, z: 3.769471362771931 }, physicsEnabled: false },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 39.84463946500043, z: 34.62170573832014 }, position: 0, physicsEnabled: false },
+            ],
+            lForearm: [
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -55.04799504881175, y: 43.91082596592234, z: 8.758598042773402 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 0.3, z: 1 }, center: { x: -55.04799504881175, y: 43.91082596592234, z: 8.758598042773402 }, physicsEnabled: false },
+            ],
+        },
+    },
+    // ========================================================================
+    // BB OVERHEAD PRESS
+    // ========================================================================
+    // Captured from a hand-built scene. Spine vertical (upright). Start =
+    // bar at shoulder height with elbows tucked under (~80° elbow flex,
+    // humerus abducted ~47° in the frontal plane). End = bar pressed
+    // overhead with humerus flexed/abducted ~145° and elbows nearly
+    // locked. Forearms tracked along a tilted plane (normal {0.6, 0.1, 1}
+    // mirrored on the other side) — that's the bar's pressing path
+    // angled slightly forward toward the head as it goes up. Femurs
+    // pinned at the hip socket so the legs stay stationary throughout.
+    // Heel + toe foot pins keep the floor in place.
+    {
+        id: 'bb_overhead_press',
+        name: 'BB OVERHEAD PRESS',
+        category: 'Push',
+        startPosture: {
+            spine: { x: 0, y: -1, z: 0 },
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            lHumerus: { x: -0.7315956627918441, y: 0.4952044643770809, z: -0.46855130417615 },
+            lForearm: { x: 0, y: -0.35836794954530027, z: 0.9335804264972017 },
+            rHumerus: { x: 0.7315956627918441, y: 0.4952044643770809, z: -0.46855130417615 },
+            rForearm: { x: 0, y: -0.35836794954530027, z: 0.9335804264972017 },
+            lFemur: { x: 0, y: 0.9998714677114963, z: -0.016032718311577657 },
+            lTibia: { x: 0, y: 0.999072636443759, z: 0.04305655710012816 },
+            lFoot: { x: 0, y: 0.02575659673955875, z: -0.9996682438311201 },
+            rFemur: { x: 0, y: 0.9998714677114963, z: -0.016032718311577657 },
+            rTibia: { x: 0, y: 0.999072636443759, z: 0.04305655710012816 },
+            rFoot: { x: 0, y: 0.02575659673955875, z: -0.9996682438311201 },
+        },
+        endPosture: {
+            spine: { x: 0, y: -1, z: 0 },
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            lHumerus: { x: -0.5464620088167519, y: -0.8106270027276601, z: -0.21038805899748778 },
+            lForearm: { x: 0, y: 0.9767278139287666, z: 0.21448258087297617 },
+            rHumerus: { x: 0.5464620088167523, y: -0.81062700272766, z: -0.21038805899748758 },
+            rForearm: { x: 0, y: 0.9767278139287666, z: 0.21448258087297617 },
+            lFemur: { x: 0, y: 0.9998660571028399, z: -0.016366668983654648 },
+            lTibia: { x: 0, y: 0.999053274691954, z: 0.043503497874113825 },
+            lFoot: { x: 0, y: 0.007930294168336705, z: -0.9999685547227991 },
+            rFemur: { x: 0, y: 0.9998660571028399, z: -0.016366668983654648 },
+            rTibia: { x: 0, y: 0.999053274691954, z: 0.043503497874113825 },
+            rFoot: { x: 0, y: 0.007930294168336705, z: -0.9999685547227991 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0,
+            pelvisTx: 0, pelvisTy: -1.7423562415069478, pelvisTz: -0.47088942294926356,
+            lHumerus: 59.61602317069799, rHumerus: -59.61602317069799,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0,
+            pelvisTx: 0, pelvisTy: -1.729437592098109, pelvisTz: -0.44003880939445966,
+            lHumerus: -49.45550413873913, rHumerus: 49.45550413873919,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
             lTibia: 0, rTibia: 0,
             lFoot: 0, rFoot: 0,
         },
         forces: [
-            { name: 'Barbell weight (right hand)', boneId: 'rForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
-            { name: 'Barbell weight (left hand)', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+            { name: 'Force', boneId: 'rForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+            { name: 'Force', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
         ],
-        // Two pins per foot (heel / toe). Same leg geometry as RDL (10°
-        // knee flex): heel at (y=132.27, z=8.51), toe at (y=135.74, z=-11.19).
         constraints: {
-            lFoot: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 132.27, z: 8.51 }, position: 0 },
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 135.74, z: -11.19 }, position: 1 },
+            spine: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: -31.730557183065653, z: -0.4659980134084636 }, position: 1, physicsEnabled: false },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 28.269442816934347, z: -0.4659980134084636 }, position: 0, physicsEnabled: false },
             ],
             rFoot: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 132.27, z: 8.51 }, position: 0 },
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 135.74, z: -11.19 }, position: 1 },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: -20 }, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: 20, y: 133, z: -20 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 20, y: 133, z: -20 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
+                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
+            ],
+            rForearm: [
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: 62.919824498785054, y: -49.36530234259302, z: -22.95042633731106 } },
+                { active: true, type: 'planar', normal: { x: 0.6, y: 0.1, z: 1 }, center: { x: 62.919824498785054, y: -49.36530234259302, z: -22.95042633731106 }, physicsEnabled: false },
+            ],
+            rHumerus: [
+                { active: true, type: 'planar', normal: { x: 0.6, y: 0.1, z: 1 }, center: { x: 58.48507130050644, y: -10.667385070818803, z: -21 }, physicsEnabled: false },
+            ],
+            rFemur: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 82.26280939438354, z: -1.3123818702916292 }, physicsEnabled: false },
+            ],
+            lFoot: [
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: -20 }, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: -20, y: 133, z: -20 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -20, y: 133, z: -20 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
+                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
+            ],
+            lForearm: [
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: -62.919824498785054, y: -49.36530234259302, z: -22.95042633731106 } },
+                { active: true, type: 'planar', normal: { x: -0.6, y: 0.1, z: 1 }, center: { x: -62.919824498785054, y: -49.36530234259302, z: -22.95042633731106 }, physicsEnabled: false },
+            ],
+            lHumerus: [
+                { active: true, type: 'planar', normal: { x: -0.6, y: 0.1, z: 1 }, center: { x: -58.48507130050644, y: -10.667385070818803, z: -21 }, physicsEnabled: false },
+            ],
+            lFemur: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 82.26280939438354, z: -1.3123818702916292 }, physicsEnabled: false },
             ],
         },
     },
@@ -2503,6 +2712,15 @@ const BioModelPage: React.FC = () => {
   const [targetReferenceBone, setTargetReferenceBone] = useState<string | null>(null);
   
   const [symmetryMode, setSymmetryMode] = useState(false);
+  // Constraint id currently hovered in the settings panel (mouseenter
+  // on a row sets it, mouseleave clears it). Threaded into BioMan so
+  // the corresponding 3D marker gets the darkest highlight tier — lets
+  // the user trace a settings row to its physical marker without
+  // needing per-row click selection. Cleared when the selected bone
+  // changes, since the panel reflects only the new bone's rows and
+  // any stale hover would otherwise highlight an off-panel marker.
+  const [hoveredConstraintId, setHoveredConstraintId] = useState<string | null>(null);
+  useEffect(() => { setHoveredConstraintId(null); }, [selectedBone]);
   const [isPlaying, setIsPlaying] = useState(false);
   // Current ROM position for resistance profile evaluation. 0 = start pose,
   // 1 = end pose. Updated by pose-mode switch and playback animation.
@@ -2910,8 +3128,10 @@ const BioModelPage: React.FC = () => {
               if (!tip) continue;
               const L = BONE_LENGTHS[bid] || 0;
               const TOL = Math.max(SOLVER_MIN_TOL, L * SOLVER_TOL_SCALE);
-              if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
-                  const toTip = sub(tip, c.pivot);
+              if (c.type === 'arc' && c.axis && c.radius !== undefined) {
+                  const livePivot = resolveArcPivot(c, kin);
+                  if (!livePivot) continue;
+                  const toTip = sub(tip, livePivot);
                   const axisN = normalize(c.axis);
                   const axialDist = dotProduct(toTip, axisN);
                   const inPlane = sub(toTip, mul(axisN, axialDist));
@@ -2959,6 +3179,38 @@ const BioModelPage: React.FC = () => {
       const pivot = add(rawPivot, mul(axisN, offset));
       const radius = magnitude(sub(tip, pivot));
       return { pivot, radius };
+  };
+
+  // Look up the live world position of a joint anchor (knee, elbow, etc.)
+  // given the current kinematics. Returns null if the joint name doesn't
+  // resolve. Used by `resolveArcPivot` to override the stored pivot when
+  // an arc constraint is anchored to a body joint.
+  const getJointAnchorPos = (
+      jointName: string,
+      kin: ReturnType<typeof calculateKinematics>,
+  ): Vector3 | null => {
+      const m = JOINT_ANCHOR_POINTS[jointName];
+      if (!m) return null;
+      const map = m.end === 'start' ? kin.boneStartPoints : kin.boneEndPoints;
+      return map[m.bone] || null;
+  };
+
+  // Live pivot for an arc constraint: if `anchor.joint` is set and the
+  // joint resolves, return the joint's current world position; otherwise
+  // fall back to the stored `pivot`. Returns null if neither is
+  // available (caller should skip the constraint). All callers that
+  // read `c.pivot` for arc geometry should go through this helper so
+  // anchor-following constraints stay glued to their joint as the body
+  // moves through the ROM.
+  const resolveArcPivot = (
+      c: BoneConstraint,
+      kin: ReturnType<typeof calculateKinematics>,
+  ): Vector3 | null => {
+      if (c.anchor) {
+          const p = getJointAnchorPos(c.anchor.joint, kin);
+          if (p) return p;
+      }
+      return c.pivot || null;
   };
 
   // Determine source side from an edited bone id: 'l'/'r' prefix, else null.
@@ -3065,39 +3317,58 @@ const BioModelPage: React.FC = () => {
   const visualConstraintPlanes = useMemo<VisualPlane[]>(() => {
       const out: VisualPlane[] = [];
       const kin = calculateKinematics(posture, twists);
+      // Color palette is now driven by physicsEnabled, NOT by constraint
+      // type. Guide-only constraints (path tracking with no force
+      // reaction) use violet; physical constraints (full Phase B
+      // coupling, draw a reaction arrow) use rose. Arc, planar, and
+      // fixed all use the same palette so the visualization
+      // consistently communicates "what does this do to the physics?"
+      // rather than "what shape is it?".
+      const COL_PHYS  = 'rgba(244, 63, 94, 0.25)';   // rose-500 fill
+      const COL_GUIDE = 'rgba(139, 92, 246, 0.25)';  // violet-500 fill
       (Object.entries(constraints) as [string, BoneConstraint[]][]).forEach(([boneId, list]) => {
           list.forEach(c => {
               if (!c.active) return;
+              const isPhysics = c.physicsEnabled !== false;
+              const color = isPhysics ? COL_PHYS : COL_GUIDE;
               if (c.type === 'fixed') {
-                  // Fixed point: show 3 small orthogonal planes as a visual
-                  // "pin" marker at the locked position. Use a smaller size
-                  // and distinct color (rose) so it reads as "locked here."
+                  // Fixed point: 3 small orthogonal planes as a visual
+                  // "pin" marker at the locked position.
                   const pt = c.center;
                   const SZ = 20;
-                  out.push({ id: c.id + '-fx', center: pt, normal: { x: 1, y: 0, z: 0 }, size: SZ, color: 'rgba(244, 63, 94, 0.25)', boneId });
-                  out.push({ id: c.id + '-fy', center: pt, normal: { x: 0, y: 1, z: 0 }, size: SZ, color: 'rgba(244, 63, 94, 0.25)', boneId });
-                  out.push({ id: c.id + '-fz', center: pt, normal: { x: 0, y: 0, z: 1 }, size: SZ, color: 'rgba(244, 63, 94, 0.25)', boneId });
-              } else if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
+                  out.push({ id: c.id + '-fx', constraintId: c.id, center: pt, normal: { x: 1, y: 0, z: 0 }, size: SZ, color, boneId });
+                  out.push({ id: c.id + '-fy', constraintId: c.id, center: pt, normal: { x: 0, y: 1, z: 0 }, size: SZ, color, boneId });
+                  out.push({ id: c.id + '-fz', constraintId: c.id, center: pt, normal: { x: 0, y: 0, z: 1 }, size: SZ, color, boneId });
+              } else if (c.type === 'arc' && c.axis && c.radius !== undefined) {
+                  // Arc: pivot may be live-anchored to a joint; resolve here.
+                  const livePivot = resolveArcPivot(c, kin);
+                  if (!livePivot) return;
                   out.push({
                       id: c.id,
-                      center: c.pivot,
+                      constraintId: c.id,
+                      center: livePivot,
                       normal: c.axis,
                       size: c.radius * 2,
-                      color: 'rgba(245, 158, 11, 0.2)',
+                      color,
                       boneId,
                       type: 'arc',
-                      pivot: c.pivot,
+                      pivot: livePivot,
                       axis: c.axis,
                       radius: c.radius
                   });
               } else {
                   const tip = getConstraintPoint(boneId, c, kin) || c.center;
+                  // Planar marker is now ~30% larger than the fixed
+                  // constraint pins (26 vs 20) so they're still clearly
+                  // distinguishable but no longer dwarf the figure.
+                  const SZ_PLANAR = 26;
                   out.push({
                       id: c.id,
+                      constraintId: c.id,
                       center: tip,
                       normal: c.normal,
-                      size: 80,
-                      color: 'rgba(139, 92, 246, 0.2)',
+                      size: SZ_PLANAR,
+                      color,
                       boneId,
                       directional: c.directional,
                   });
@@ -3468,12 +3739,14 @@ const BioModelPage: React.FC = () => {
                           if (magnitude(n) > 0.1) normals.push(n);
                       } else if (c.type === 'fixed') {
                           normals.push({ x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 1 });
-                      } else if (c.type === 'arc' && c.axis && c.pivot && c.radius !== undefined) {
+                      } else if (c.type === 'arc' && c.axis && c.radius !== undefined) {
+                          const livePivot = resolveArcPivot(c, kin);
+                          if (!livePivot) continue;
                           const axisN = normalize(c.axis);
                           if (magnitude(axisN) > 0.1) normals.push(axisN);
                           const tipPt = getConstraintPoint(f.boneId, c, kin);
                           if (tipPt) {
-                              const relTip = sub(tipPt, c.pivot);
+                              const relTip = sub(tipPt, livePivot);
                               const axComp = dotProduct(relTip, axisN);
                               const radial = sub(relTip, mul(axisN, axComp));
                               const radMag = magnitude(radial);
@@ -3556,10 +3829,18 @@ const BioModelPage: React.FC = () => {
               if (act.isBoneAxis) {
                   if (!boneAxis) continue;
                   axis = boneAxis;
-              } else if (act.useWorldAxis) {
-                  // Skip jointFrame transform — axis is already in world space.
-                  axis = normalize(act.axis);
               } else if (jointFrame) {
+                  // Standard path for direction actions (flex/ext, abd/add,
+                  // horizontal ad/ab): transform the local action axis
+                  // through the bone's joint frame. For shoulder this is
+                  // spineFrame; for hip it's pelvisFrame; for hinges it's
+                  // the parent bone's transported frame. As of the
+                  // 2026-04-29 body-relative-horiz-ad/ab fix, useWorldAxis
+                  // no longer short-circuits this transform — the flag
+                  // now marks "this action's local axis is body-vertical
+                  // (joint-frame Y)" purely as a sign-convention hint for
+                  // downstream code; the geometric axis is always
+                  // joint-frame · local.
                   axis = normalize({
                       x: act.axis.x * jointFrame.x.x + act.axis.y * jointFrame.y.x + act.axis.z * jointFrame.z.x,
                       y: act.axis.x * jointFrame.x.y + act.axis.y * jointFrame.y.y + act.axis.z * jointFrame.z.y,
@@ -3794,16 +4075,18 @@ const BioModelPage: React.FC = () => {
                   } else if (c.type === 'planar') {
                       const n = normalize(c.normal);
                       if (magnitude(n) > 0.1) consRefs.push({ n, center: c.center, tip: tipB, constrainedBone: bid, ancestors });
-                  } else if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
+                  } else if (c.type === 'arc' && c.axis && c.radius !== undefined) {
+                      const livePivot = resolveArcPivot(c, kin2);
+                      if (!livePivot) continue;
                       const axisN = normalize(c.axis);
-                      if (magnitude(axisN) > 0.1) consRefs.push({ n: axisN, center: c.pivot, tip: tipB, constrainedBone: bid, ancestors });
-                      const relTip = sub(tipB, c.pivot);
+                      if (magnitude(axisN) > 0.1) consRefs.push({ n: axisN, center: livePivot, tip: tipB, constrainedBone: bid, ancestors });
+                      const relTip = sub(tipB, livePivot);
                       const axComp = dotProduct(relTip, axisN);
                       const radial = sub(relTip, mul(axisN, axComp));
                       const radMag = magnitude(radial);
                       if (radMag > 0.1) {
                           const radN = { x: radial.x / radMag, y: radial.y / radMag, z: radial.z / radMag };
-                          consRefs.push({ n: radN, center: c.pivot, tip: tipB, constrainedBone: bid, ancestors });
+                          consRefs.push({ n: radN, center: livePivot, tip: tipB, constrainedBone: bid, ancestors });
                       }
                   }
               }
@@ -3928,9 +4211,10 @@ const BioModelPage: React.FC = () => {
                       if (act.isBoneAxis) {
                           if (!boneAx) continue;
                           worldAxis = boneAx;
-                      } else if (act.useWorldAxis) {
-                          worldAxis = normalize(act.axis);
                       } else {
+                          // useWorldAxis no longer short-circuits — it's
+                          // now a sign-convention hint only. Geometric
+                          // axis is always joint-frame · local.
                           worldAxis = normalize({
                               x: act.axis.x*jf.x.x + act.axis.y*jf.y.x + act.axis.z*jf.z.x,
                               y: act.axis.x*jf.x.y + act.axis.y*jf.y.y + act.axis.z*jf.z.y,
@@ -4752,6 +5036,24 @@ const BioModelPage: React.FC = () => {
           const worldDir = localToWorld(rootFrame, dir);
           dir = worldToLocal(pelvisFrame, worldDir);
       }
+      // Humerus bones: same idea as femur. The stored direction is
+      // already in world coordinates, but the SHOULDER joint frame is
+      // spineFrame, not the world frame. For the angle formulas to be
+      // body-relative — i.e. so horizontal ad/ab tilts with the spine —
+      // convert humerus dir into spineFrame-local before measuring.
+      // Pre-2026-04-29 this conversion only happened for hip (femur);
+      // shoulder used world coordinates directly, which made horizontal
+      // ad/ab readings ignore spine tilt.
+      if (/Humerus/.test(boneId)) {
+          const spineRaw = curPosture['spine'] || { x: 0, y: -1, z: 0 };
+          const sMag = Math.sqrt(spineRaw.x*spineRaw.x + spineRaw.y*spineRaw.y + spineRaw.z*spineRaw.z) || 1;
+          const spineDirN = { x: spineRaw.x/sMag, y: spineRaw.y/sMag, z: spineRaw.z/sMag };
+          const pelvisYaw = curTwists['pelvis'] || 0;
+          const spineTwist = curTwists['spine'] || 0;
+          const spineFrameBase = createRootFrame({ x: -spineDirN.x, y: -spineDirN.y, z: -spineDirN.z });
+          const spineFrame = twistFrame(spineFrameBase, pelvisYaw + spineTwist);
+          dir = worldToLocal(spineFrame, dir);
+      }
       const ax = action.axis;
       const sideSign = boneId.startsWith('l') ? -1 : 1;
       const rad = 180 / Math.PI;
@@ -5058,7 +5360,6 @@ const BioModelPage: React.FC = () => {
       bone: string,
       kin: ReturnType<typeof calculateKinematics>,
   ): Vector3 | null => {
-      if (act.useWorldAxis) return normalize(act.axis);
       if (act.isBoneAxis) {
           const bs = kin.boneStartPoints[bone];
           const be = kin.boneEndPoints[bone];
@@ -5067,6 +5368,9 @@ const BioModelPage: React.FC = () => {
       }
       const jf = kin.jointFrames[bone];
       if (!jf) return null;
+      // useWorldAxis no longer short-circuits — geometric axis is
+      // always joint-frame · local. The flag is now a downstream
+      // sign-convention hint only.
       return normalize({
           x: act.axis.x*jf.x.x + act.axis.y*jf.y.x + act.axis.z*jf.z.x,
           y: act.axis.x*jf.x.y + act.axis.y*jf.y.y + act.axis.z*jf.z.y,
@@ -5500,52 +5804,11 @@ const BioModelPage: React.FC = () => {
   // fires after all the helpers it transitively depends on (via block
   // detection's call to solveConstraintsAccommodating) are initialized.
 
-  // Visual arcs showing the motion path for each joint action at the
-  // selected bone. Each action is a rotation about an axis — the bone
-  // endpoint traces a circle. We render these as arc constraints (BioMan
-  // already supports arc rendering).
-  const ACTION_AXIS_COLORS = ['rgba(239,68,68,0.5)', 'rgba(59,130,246,0.5)', 'rgba(34,197,94,0.5)', 'rgba(245,158,11,0.5)'];
-  const jointActionArcs = useMemo<VisualPlane[]>(() => {
-      if (!selectedBone) return [];
-      const jointGroup = BONE_TO_JOINT_GROUP[selectedBone];
-      if (!jointGroup) return [];
-      const actions = JOINT_ACTIONS[jointGroup];
-      if (!actions) return [];
-      const kin = calculateKinematics(posture, twists);
-      const jointFrame = kin.jointFrames[selectedBone];
-      const jointCenter = kin.boneStartPoints[selectedBone];
-      const boneEnd = kin.boneEndPoints[selectedBone];
-      if (!jointFrame || !jointCenter || !boneEnd) return [];
-
-      const boneLen = magnitude(sub(boneEnd, jointCenter));
-
-      return actions.map((act, i) => {
-          let axis: Vector3;
-          if (act.isBoneAxis) {
-              axis = normalize(sub(boneEnd, jointCenter));
-          } else if (act.useWorldAxis) {
-              axis = normalize(act.axis);
-          } else {
-              axis = normalize({
-                  x: act.axis.x * jointFrame.x.x + act.axis.y * jointFrame.y.x + act.axis.z * jointFrame.z.x,
-                  y: act.axis.x * jointFrame.x.y + act.axis.y * jointFrame.y.y + act.axis.z * jointFrame.z.y,
-                  z: act.axis.x * jointFrame.x.z + act.axis.y * jointFrame.y.z + act.axis.z * jointFrame.z.z,
-              });
-          }
-          return {
-              id: `action-arc-${i}`,
-              center: jointCenter,
-              normal: axis,
-              size: boneLen,
-              color: ACTION_AXIS_COLORS[i % ACTION_AXIS_COLORS.length],
-              boneId: selectedBone,
-              type: 'arc' as const,
-              pivot: jointCenter,
-              axis: axis,
-              radius: boneLen,
-          };
-      });
-  }, [selectedBone, posture, twists]);
+  // (Note: a previous in-tree iteration had a `jointActionArcs` memo
+  // here that produced VisualPlane[] arcs scaled to bone length and
+  // never hooked up to BioMan. Replaced by `jointAxisCircles` below,
+  // which uses a dedicated AxisCircle prop with fixed radius and
+  // proper labels.)
 
   // Scapula action indicators: straight lines for elevation/depression
   // and protraction/retraction (translations, not rotations).
@@ -5561,6 +5824,94 @@ const BioModelPage: React.FC = () => {
           { id: 'scap-prot', boneId: selectedBone, position: 1, vector: { x: 0, y: 0, z: -LEN }, color: '#3b82f6' },
           { id: 'scap-retr', boneId: selectedBone, position: 1, vector: { x: 0, y: 0, z: LEN }, color: '#3b82f6' },
       ];
+  }, [selectedBone, posture, twists]);
+
+  // Joint action axis rings around the selected joint. Each ring is a
+  // visual readout of the EXACT axis the analysis pipeline projects
+  // torque onto for that action. The transform path here mirrors
+  // calculateTorqueDistribution's per-action branch:
+  //   • isBoneAxis (IR/ER)  → world bone direction
+  //   • useWorldAxis (Horiz ad/ab) → literal action.axis (no frame)
+  //   • default             → jointFrame · action.axis (body-relative)
+  // The user can therefore visually confirm which axes track the
+  // spine and which stay world-fixed. Center is the proximal joint.
+  // Radius is fixed (not bone-length-scaled) per request.
+  //
+  // Color palette is per axis kind, not per action label, so the two
+  // labels for the same axis (Flexion/Extension, Abduction/Adduction)
+  // share one ring + one color.
+  const ACTION_AXIS_COLORS: Record<string, string> = {
+      'flexion':              'rgba(239, 68, 68, 0.85)',   // red — sagittal
+      'extension':            'rgba(239, 68, 68, 0.85)',
+      'abduction':            'rgba(34, 197, 94, 0.85)',   // green — frontal
+      'adduction':            'rgba(34, 197, 94, 0.85)',
+      'horizontalAbduction':  'rgba(59, 130, 246, 0.85)',  // blue — transverse
+      'horizontalAdduction':  'rgba(59, 130, 246, 0.85)',
+      'externalRotation':     'rgba(249, 115, 22, 0.85)',  // orange — bone axis
+      'internalRotation':     'rgba(249, 115, 22, 0.85)',
+      'elevation':            'rgba(168, 85, 247, 0.85)',  // purple — scapula vertical
+      'depression':           'rgba(168, 85, 247, 0.85)',
+      'protraction':          'rgba(20, 184, 166, 0.85)',  // teal — scapula horizontal
+      'retraction':           'rgba(20, 184, 166, 0.85)',
+      'lateralFlexionL':      'rgba(34, 197, 94, 0.85)',
+      'lateralFlexionR':      'rgba(34, 197, 94, 0.85)',
+      'rotationL':            'rgba(168, 85, 247, 0.85)',
+      'rotationR':            'rgba(168, 85, 247, 0.85)',
+      'dorsiFlexion':         'rgba(239, 68, 68, 0.85)',
+      'plantarFlexion':       'rgba(239, 68, 68, 0.85)',
+  };
+  const AXIS_RING_RADIUS = 14;
+
+  const jointAxisCircles = useMemo<AxisCircle[]>(() => {
+      if (!selectedBone) return [];
+      const group = BONE_TO_JOINT_GROUP[selectedBone];
+      if (!group) return [];
+      const actions = JOINT_ACTIONS[group];
+      if (!actions || actions.length === 0) return [];
+      const kin = calculateKinematics(posture, twists);
+      const center = kin.boneStartPoints[selectedBone];
+      if (!center) return [];
+      const jointFrame = kin.jointFrames[selectedBone];
+      const out: AxisCircle[] = [];
+      for (let i = 0; i < actions.length; i++) {
+          const act = actions[i];
+          let worldAxis: Vector3;
+          if (act.isBoneAxis) {
+              const bs = kin.boneStartPoints[selectedBone];
+              const be = kin.boneEndPoints[selectedBone];
+              if (!bs || !be) continue;
+              const dir = sub(be, bs);
+              if (magnitude(dir) < 1e-6) continue;
+              worldAxis = normalize(dir);
+          } else if (jointFrame) {
+              // Mirrors the torque pipeline: every direction action
+              // (including horizontal ad/ab — useWorldAxis is now a
+              // sign-convention flag only, not a geometric switch)
+              // routes through the joint-frame transform. So this
+              // ring will tilt with the spine for shoulder/hip
+              // horizontal ad/ab too.
+              worldAxis = normalize(localToWorld(jointFrame, act.axis));
+          } else {
+              continue;
+          }
+          const key = actionKey(act.positiveAction);
+          const color = ACTION_AXIS_COLORS[key] || 'rgba(100, 100, 100, 0.65)';
+          // Short composite label: "Flex/Ext", "Abd/Add", etc. Falls
+          // back to the positive-action name if the negative isn't a
+          // mirror (e.g. "Lateral Flexion L / Lateral Flexion R").
+          const posShort = act.positiveAction.split(' ').map(w => w.slice(0, 3)).join(' ');
+          const negShort = act.negativeAction.split(' ').map(w => w.slice(0, 3)).join(' ');
+          const label = `${posShort}/${negShort}`;
+          out.push({
+              id: `${selectedBone}-axis-${i}`,
+              center,
+              axis: worldAxis,
+              radius: AXIS_RING_RADIUS,
+              color,
+              label,
+          });
+      }
+      return out;
   }, [selectedBone, posture, twists]);
 
   const resolveFullPosture = (p: Posture, t: Record<string, number>, source: string): { posture: Posture, twists: Record<string, number> } => {
@@ -5638,8 +5989,10 @@ const BioModelPage: React.FC = () => {
               cost += dist2;
               const dist = Math.sqrt(dist2);
               if (dist > maxAbs) maxAbs = dist;
-          } else if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
-              const toTip = sub(tip, c.pivot);
+          } else if (c.type === 'arc' && c.axis && c.radius !== undefined) {
+              const livePivot = resolveArcPivot(c, kin);
+              if (!livePivot) continue;
+              const toTip = sub(tip, livePivot);
               const axisN = normalize(c.axis);
               const axialDist = dotProduct(toTip, axisN);
               const inPlane = sub(toTip, mul(axisN, axialDist));
@@ -6108,8 +6461,29 @@ const BioModelPage: React.FC = () => {
           }
 
           if (gradSqNorm < 1e-10) {
-              // Stationary point — either solved (handled above) or stuck.
-              break;
+              // Stationary point. If cost is at tolerance we'd already have
+              // returned above; reaching here means we're at a local minimum
+              // the solver can't escape via gradient steps. Two cases:
+              //   (a) constraints are mutually consistent and we're at the
+              //       true minimum (cost ≈ 0) — that branch fires above.
+              //   (b) constraints are slightly inconsistent (e.g. a fixed
+              //       pin's stored center doesn't quite match the bone tip
+              //       given the current spine pin's pelvis position), so
+              //       the cost surface bottoms out at some residual > tol.
+              // Pre-2026-04-29 the function returned null in case (b), which
+              // meant outer drag handlers (handleHingeChange, etc.) treated
+              // the call as a hard failure and step-halved repeatedly. The
+              // user-visible symptom: changing one bone (e.g. elbow flex)
+              // wouldn't propagate through to the rest of the chain because
+              // the solver kept refusing every step despite the residual
+              // being driven entirely by an unrelated lower-body
+              // inconsistency. Returning the current state here lets the
+              // drag advance — the user sees the locked bone move and can
+              // visually confirm that the chain accommodates it as best the
+              // solver can. The residual inconsistency stays fixed (it was
+              // there before the drag started), it just doesn't gate user
+              // interaction anymore.
+              return ok(posture, solvedTwists);
           }
 
           // Armijo backtracking line search. Initial alpha is chosen so the
@@ -6204,13 +6578,44 @@ const BioModelPage: React.FC = () => {
           }
 
           if (!accepted) {
-              // No descent step satisfies Armijo — impasse.
-              return null;
+              // Armijo backtracked all the way to the alpha floor without
+              // finding a step that satisfies sufficient-decrease. Two
+              // typical causes:
+              //   1. Curvature along the gradient direction is very high
+              //      (cost(α) shoots up faster than the linear estimate
+              //      predicts), so even tiny α overshoots the local
+              //      minimum, and once α drops below ~1e-9 the cost
+              //      change is dominated by floating-point noise rather
+              //      than the actual gradient. The gradient still tells
+              //      us the right descent direction; line search just
+              //      can't certify "strict" descent at FP-noise scale.
+              //   2. We're effectively at a saddle/minimum that the
+              //      gradient briefly disagrees with (e.g. discrete
+              //      hinge-limit clamping inside the line search).
+              // Pre-2026-04-29 this returned null. With over-determined
+              // constraint sets that's catastrophic for the outer drag
+              // loop: every step looks like a hard failure, the loop
+              // step-halves repeatedly, and the user's input never
+              // advances even though the solver had already found a
+              // descent step (just couldn't certify it strict enough).
+              // Returning the current state preserves whatever progress
+              // was made earlier in this solve and lets the outer
+              // adaptive loop accept the input. The maxAbs may still be
+              // > globalTol, but it can't be reduced further by this
+              // solver call regardless.
+              return ok(posture, solvedTwists);
           }
           if (maxAbs <= globalTol) return ok(posture, solvedTwists);
       }
 
-      return maxAbs <= globalTol ? ok(posture, solvedTwists) : null;
+      // MAX_ITERS exit: similar reasoning to the Armijo-failure return
+      // above. We've made all the progress we can in this call. If the
+      // solver was always able to fully converge in the past it'll
+      // still hit the early-exit `maxAbs <= globalTol` return inside
+      // the loop; reaching here means we're at a budgeted-iterations
+      // stopping point or against an over-determined constraint set.
+      // Return what we have rather than punishing the caller with null.
+      return ok(posture, solvedTwists);
   };
 
   // Standalone posture-level joint-limit check: returns true if ANY joint
@@ -6267,8 +6672,10 @@ const BioModelPage: React.FC = () => {
           if (c.type === 'fixed') {
               const dist = magnitude(sub(tip, c.center));
               if (dist > TOL) return true;
-          } else if (c.type === 'arc' && c.pivot && c.axis && c.radius !== undefined) {
-              const toTip = sub(tip, c.pivot);
+          } else if (c.type === 'arc' && c.axis && c.radius !== undefined) {
+              const livePivot = resolveArcPivot(c, kin);
+              if (!livePivot) continue;
+              const toTip = sub(tip, livePivot);
               const axisN = normalize(c.axis);
               const axialDist = dotProduct(toTip, axisN);
               const inPlane = sub(toTip, mul(axisN, axialDist));
@@ -6710,6 +7117,15 @@ const BioModelPage: React.FC = () => {
   interface TimelineAnalysisResult {
       peaks: TimelinePeak[];
       limitingPeak: TimelinePeak | null;
+      // Limiting JOINT — the (boneId, jointGroup) whose summed action
+      // effort reaches the timeline's max combined load, and the frame
+      // % at which that peak occurred. Used by the "Limiting Factor"
+      // header in the Timeline Peaks tab now that joints (not joint
+      // actions) are the unit of analysis. May differ from
+      // limitingPeak if the joint's load is split across multiple
+      // simultaneous actions (e.g. shoulder doing flex + hAdd at
+      // once may peak as a JOINT before any single action peaks).
+      limitingJoint: { boneId: string; jointGroup: JointGroup; peakFramePct: number } | null;
       framesAnalyzed: number;
       framesSkipped: number; // solver failures
       profile: TimelineProfilePoint[];
@@ -6942,15 +7358,24 @@ const BioModelPage: React.FC = () => {
       };
       // For each frame, sum action efforts grouped by joint. Take the
       // max joint effort across that frame, then max over all frames.
+      // Also track WHICH joint and WHICH frame produced that max — that
+      // pair is the timeline's limiting joint and its peak frame, used
+      // by the "Limiting Factor: <joint>, peaks at X%" header.
       let globalMaxJointEffort = 0;
+      let limitingJointInfo: { boneId: string; jointGroup: JointGroup; peakFrameIdx: number } | null = null;
       for (let i = 0; i < frameCount; i++) {
-          const jointEfforts = new Map<string, number>();
+          const jointEfforts = new Map<string, { effort: number; boneId: string; jointGroup: JointGroup }>();
           for (const s of actionSeries) {
               const k = jointKeyOf(s);
-              jointEfforts.set(k, (jointEfforts.get(k) || 0) + s.efforts[i]);
+              const cur = jointEfforts.get(k);
+              if (cur) cur.effort += s.efforts[i];
+              else jointEfforts.set(k, { effort: s.efforts[i], boneId: s.boneId, jointGroup: s.jointGroup });
           }
           for (const je of jointEfforts.values()) {
-              if (je > globalMaxJointEffort) globalMaxJointEffort = je;
+              if (je.effort > globalMaxJointEffort) {
+                  globalMaxJointEffort = je.effort;
+                  limitingJointInfo = { boneId: je.boneId, jointGroup: je.jointGroup, peakFrameIdx: i };
+              }
           }
       }
 
@@ -7040,7 +7465,15 @@ const BioModelPage: React.FC = () => {
           if (!limitingMuscle || mp.peakActivation > limitingMuscle.peakActivation) limitingMuscle = mp;
       }
 
-      return { peaks, limitingPeak, framesAnalyzed, framesSkipped, profile, actionSeries, musclePeaks, muscleSeries, limitingMuscle };
+      const limitingJoint = limitingJointInfo ? {
+          boneId: limitingJointInfo.boneId,
+          jointGroup: limitingJointInfo.jointGroup,
+          peakFramePct: frameCount > 1
+              ? (limitingJointInfo.peakFrameIdx / (frameCount - 1)) * 100
+              : 0,
+      } : null;
+
+      return { peaks, limitingPeak, limitingJoint, framesAnalyzed, framesSkipped, profile, actionSeries, musclePeaks, muscleSeries, limitingMuscle };
       // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, startPosture, endPosture, startTwists, endTwists, forces, constraints, jointCapacities, jointLimits, muscleAssignments, sectionScales, effortExponent, bracingFraction]);
 
@@ -7245,6 +7678,15 @@ const BioModelPage: React.FC = () => {
   const handlePointChange = (axis: keyof Vector3, newValue: number) => {
     if (!selectedBone || !targetPos || isNaN(newValue)) return;
     if (isPlaying) setIsPlaying(false);
+
+    // Symmetry mode: spine lateral flex (the X axis component of the
+    // spine's direction vector) is asymmetric by definition — bending
+    // sideways stretches one side and compresses the other. The slider
+    // is disabled in the UI; this is a belt-and-suspenders coercion in
+    // case anything bypasses that.
+    if (symmetryMode && selectedBone === 'spine' && axis === 'x') {
+        newValue = 0;
+    }
 
     if (selectedBone.includes('Clavicle')) {
         const newVec = { ...posture[selectedBone], [axis]: newValue };
@@ -7540,6 +7982,13 @@ const BioModelPage: React.FC = () => {
     if (!selectedBone || isNaN(val)) return;
     if (isPlaying) setIsPlaying(false);
 
+    // Symmetry mode: spine axial rotation is asymmetric by definition
+    // (twisting the torso left or right breaks bilateral symmetry).
+    // The slider is disabled in the UI; this coercion is a safety net.
+    if (symmetryMode && selectedBone === 'spine') {
+        val = 0;
+    }
+
     // Clamp against the External Rotation action limit for this bone's
     // joint group. Falls back to the static ROTATION_LIMITS table if the
     // bone doesn't belong to a configured joint group. Slider value is in
@@ -7698,7 +8147,39 @@ const BioModelPage: React.FC = () => {
     if (symmetryMode && srcSide) applyWholesaleSync(srcSide);
   };
 
-  const toggleSymmetry = () => setSymmetryMode(prev => !prev);
+  const toggleSymmetry = () => {
+    setSymmetryMode(prev => {
+        const next = !prev;
+        if (next) {
+            // Entering symmetry mode: scrub the spine clean of any
+            // asymmetric DOFs already in the scene. Lateral flex
+            // (spine.x) is dropped — the Y/Z components are
+            // re-normalized so the forward/back tilt amount is
+            // preserved. Spine axial twist (twists.spine) is zeroed.
+            // We apply this to all three pose contexts (live + start
+            // + end) so the figure stays consistent across timeline
+            // playback. Forces and constraints are then re-mirrored
+            // by applyWholesaleSync in the next user edit; we don't
+            // automatically pick a side here because the user hasn't
+            // told us which side is canonical yet.
+            const sagittalSpine = (p: Posture): Posture => {
+                const s = p['spine'];
+                if (!s) return p;
+                const yz = Math.sqrt(s.y * s.y + s.z * s.z);
+                if (yz < 1e-9) return p;
+                return { ...p, spine: { x: 0, y: s.y / yz, z: s.z / yz } };
+            };
+            const zeroSpineTwist = (t: Record<string, number>) => ({ ...t, spine: 0 });
+            setPosture(sagittalSpine);
+            setStartPosture(sagittalSpine);
+            setEndPosture(sagittalSpine);
+            setTwists(zeroSpineTwist);
+            setStartTwists(zeroSpineTwist);
+            setEndTwists(zeroSpineTwist);
+        }
+        return next;
+    });
+  };
 
   const resetModel = () => {
     setStartPosture(DEFAULT_POSTURE);
@@ -8181,9 +8662,9 @@ const BioModelPage: React.FC = () => {
 
       <div className="flex-1 flex gap-4 min-h-0">
         <div className="flex-1 bg-gray-50 rounded-[2rem] border border-gray-200 shadow-inner relative overflow-hidden group">
-          <BioMan 
-            posture={posture} 
-            twists={twists} 
+          <BioMan
+            posture={posture}
+            twists={twists}
             externalForces={forces.map(f => ({
                 id: f.id,
                 boneId: f.boneId,
@@ -8194,10 +8675,12 @@ const BioModelPage: React.FC = () => {
             }))}
             reactionForces={[...jointForceArrows, ...scapulaActionIndicators]}
             planes={visualConstraintPlanes}
+            axisCircles={jointAxisCircles}
             selectedBone={selectedBone}
-            onSelectBone={handleBoneSelect} 
-            targetPos={targetPos} 
-            targetReferenceBone={targetReferenceBone} 
+            onSelectBone={handleBoneSelect}
+            targetPos={targetPos}
+            targetReferenceBone={targetReferenceBone}
+            hoveredConstraintId={hoveredConstraintId}
           />
           <div className="absolute bottom-6 left-6 pointer-events-none">
             <span className="bg-white/90 backdrop-blur-md text-gray-500 text-xs font-bold px-4 py-2 rounded-full shadow-sm flex items-center gap-2 border border-gray-200"><Move3d className="w-4 h-4 text-gray-400" />Drag to Rotate</span>
@@ -8290,30 +8773,43 @@ const BioModelPage: React.FC = () => {
                                     <span>Chain IK Active: Moving {BONE_NAMES[selectedBone]} relative to {BONE_NAMES[targetReferenceBone]}</span>
                                 </div>
                             )}
-                            <div><div className="flex justify-between mb-2"><label className="font-bold text-gray-700 text-xs flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-red-500"></span>X Axis (Left/Right)</label><span className="font-mono text-gray-500 font-bold text-xs">{intentCoords.x}</span></div><input type="range" min="-150" max="150" step="1" value={intentCoords.x} onChange={(e) => handlePointChange('x', parseFloat(e.target.value))} className="bio-range w-full text-gray-900"/></div>
-                            <div><div className="flex justify-between mb-2"><label className="font-bold text-gray-700 text-xs flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-green-500"></span>Y Axis (Down/Up)</label><span className="font-mono text-gray-500 font-bold text-xs">{intentCoords.y}</span></div><input type="range" min="-150" max="150" step="1" value={intentCoords.y} onChange={(e) => handlePointChange('y', parseFloat(e.target.value))} className="bio-range w-full text-gray-900"/></div>
-                            <div><div className="flex justify-between mb-2"><label className="font-bold text-gray-700 text-xs flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-blue-500"></span>Z Axis (Ext/Flex)</label><span className="font-mono text-gray-500 font-bold text-xs">{intentCoords.z}</span></div><input type="range" min="-150" max="150" step="1" value={intentCoords.z} onChange={(e) => handlePointChange('z', parseFloat(e.target.value))} className="bio-range w-full text-gray-900"/></div>
-                            <div className="pt-4 mt-4 border-t border-gray-100">
-                                <div className="flex justify-between mb-2">
-                                    <label className="font-bold text-gray-700 text-xs flex items-center gap-2"><RefreshCw className="w-3 h-3 text-orange-500" />Rotation {selectedBone === 'spine' ? '(R/L)' : '(Int/Ext)'}</label>
-                                    <span className="font-mono text-gray-500 font-bold text-xs">{displayTwist}°</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min={ROTATION_LIMITS[selectedBone]?.min ?? -90}
-                                    max={ROTATION_LIMITS[selectedBone]?.max ?? 90}
-                                    step="1"
-                                    value={displayTwist}
-                                    onChange={(e) => handleRotationChange(parseFloat(e.target.value))}
-                                    className="bio-range w-full text-orange-500"
-                                />
-                                {ROTATION_LIMITS[selectedBone] && (
-                                    <div className="flex justify-between mt-1">
-                                        <span className="text-[9px] font-bold text-gray-400">{ROTATION_LIMITS[selectedBone].min}° ({selectedBone === 'spine' ? 'R' : 'Int'})</span>
-                                        <span className="text-[9px] font-bold text-gray-400">{ROTATION_LIMITS[selectedBone].max}° ({selectedBone === 'spine' ? 'L' : 'Ext'})</span>
+                            {/* Symmetry mode: spine lateral flex (X) and axial rotation are
+                                disabled because they're inherently asymmetric — bending
+                                or twisting the torso breaks bilateral symmetry. The
+                                handlers also clamp these inputs to 0 if anything sneaks
+                                past the disabled state. */}
+                            {(() => {
+                                const spineLocked = symmetryMode && selectedBone === 'spine';
+                                return (
+                                <>
+                                    <div><div className="flex justify-between mb-2"><label className={`font-bold text-xs flex items-center gap-2 ${spineLocked ? 'text-gray-300' : 'text-gray-700'}`}><span className="w-2 h-2 rounded-full bg-red-500"></span>X Axis (Left/Right){spineLocked && <span className="text-[9px] font-medium text-gray-400 normal-case">— locked by symmetry</span>}</label><span className={`font-mono font-bold text-xs ${spineLocked ? 'text-gray-300' : 'text-gray-500'}`}>{intentCoords.x}</span></div><input type="range" min="-150" max="150" step="1" disabled={spineLocked} value={intentCoords.x} onChange={(e) => handlePointChange('x', parseFloat(e.target.value))} className={`bio-range w-full text-gray-900 ${spineLocked ? 'opacity-40 cursor-not-allowed' : ''}`}/></div>
+                                    <div><div className="flex justify-between mb-2"><label className="font-bold text-gray-700 text-xs flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-green-500"></span>Y Axis (Down/Up)</label><span className="font-mono text-gray-500 font-bold text-xs">{intentCoords.y}</span></div><input type="range" min="-150" max="150" step="1" value={intentCoords.y} onChange={(e) => handlePointChange('y', parseFloat(e.target.value))} className="bio-range w-full text-gray-900"/></div>
+                                    <div><div className="flex justify-between mb-2"><label className="font-bold text-gray-700 text-xs flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-blue-500"></span>Z Axis (Ext/Flex)</label><span className="font-mono text-gray-500 font-bold text-xs">{intentCoords.z}</span></div><input type="range" min="-150" max="150" step="1" value={intentCoords.z} onChange={(e) => handlePointChange('z', parseFloat(e.target.value))} className="bio-range w-full text-gray-900"/></div>
+                                    <div className="pt-4 mt-4 border-t border-gray-100">
+                                        <div className="flex justify-between mb-2">
+                                            <label className={`font-bold text-xs flex items-center gap-2 ${spineLocked ? 'text-gray-300' : 'text-gray-700'}`}><RefreshCw className={`w-3 h-3 ${spineLocked ? 'text-gray-300' : 'text-orange-500'}`} />Rotation {selectedBone === 'spine' ? '(R/L)' : '(Int/Ext)'}{spineLocked && <span className="text-[9px] font-medium text-gray-400 normal-case">— locked by symmetry</span>}</label>
+                                            <span className={`font-mono font-bold text-xs ${spineLocked ? 'text-gray-300' : 'text-gray-500'}`}>{displayTwist}°</span>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            min={ROTATION_LIMITS[selectedBone]?.min ?? -90}
+                                            max={ROTATION_LIMITS[selectedBone]?.max ?? 90}
+                                            step="1"
+                                            disabled={spineLocked}
+                                            value={displayTwist}
+                                            onChange={(e) => handleRotationChange(parseFloat(e.target.value))}
+                                            className={`bio-range w-full text-orange-500 ${spineLocked ? 'opacity-40 cursor-not-allowed' : ''}`}
+                                        />
+                                        {ROTATION_LIMITS[selectedBone] && (
+                                            <div className="flex justify-between mt-1">
+                                                <span className="text-[9px] font-bold text-gray-400">{ROTATION_LIMITS[selectedBone].min}° ({selectedBone === 'spine' ? 'R' : 'Int'})</span>
+                                                <span className="text-[9px] font-bold text-gray-400">{ROTATION_LIMITS[selectedBone].max}° ({selectedBone === 'spine' ? 'L' : 'Ext'})</span>
+                                            </div>
+                                        )}
                                     </div>
-                                )}
-                            </div>
+                                </>
+                                );
+                            })()}
                         </>
                         )}
                         <div className="mt-4 pt-6 border-t border-gray-100 space-y-4">
@@ -8359,11 +8855,30 @@ const BioModelPage: React.FC = () => {
                               </button>
                           </div>
 
-                          {(constraints[selectedBone] || []).map((c, idx) => (
-                              <div key={c.id} className={`bg-white border rounded-2xl p-4 transition-all ${c.active ? (c.type === 'arc' ? 'border-amber-200' : c.type === 'fixed' ? 'border-rose-200' : 'border-violet-200') + ' shadow-sm' : 'border-gray-100 opacity-70'}`}>
+                          {(constraints[selectedBone] || []).map((c, idx) => {
+                              // Border + badge colors are now driven by the
+                              // physicsEnabled flag, NOT by constraint type. A
+                              // physical constraint (default) gets rose; a
+                              // guide-only constraint gets violet. This
+                              // matches the 3D marker palette so the panel
+                              // and the figure stay visually in sync.
+                              const isPhysics = c.physicsEnabled !== false;
+                              const borderClass = c.active
+                                  ? (isPhysics ? 'border-rose-200' : 'border-violet-200') + ' shadow-sm'
+                                  : 'border-gray-100 opacity-70';
+                              const badgeClass = !c.active
+                                  ? 'bg-gray-100 text-gray-500'
+                                  : isPhysics ? 'bg-rose-100 text-rose-700' : 'bg-violet-100 text-violet-700';
+                              return (
+                              <div
+                                key={c.id}
+                                className={`bg-white border rounded-2xl p-4 transition-all ${borderClass}`}
+                                onMouseEnter={() => setHoveredConstraintId(c.id)}
+                                onMouseLeave={() => setHoveredConstraintId(prev => prev === c.id ? null : prev)}
+                              >
                                   <div className="flex items-center justify-between mb-4">
                                       <div className="flex items-center gap-3">
-                                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs ${c.active ? (c.type === 'arc' ? 'bg-amber-100 text-amber-700' : c.type === 'fixed' ? 'bg-rose-100 text-rose-700' : 'bg-violet-100 text-violet-700') : 'bg-gray-100 text-gray-500'}`}>{c.type === 'fixed' ? <Lock className="w-3 h-3" /> : idx + 1}</div>
+                                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs ${badgeClass}`}>{c.type === 'fixed' ? <Lock className="w-3 h-3" /> : idx + 1}</div>
                                           <span className="font-bold text-gray-900 text-sm">{c.type === 'arc' ? 'Arc' : c.type === 'fixed' ? 'Fixed Point' : 'Planar'} {idx + 1}</span>
                                       </div>
                                       <div className="flex items-center gap-2">
@@ -8465,9 +8980,26 @@ const BioModelPage: React.FC = () => {
                                                       const end = kin.boneEndPoints[selectedBone];
                                                       if (seg && end) {
                                                           const newCenter = add(seg, mul(sub(end, seg), newPos));
-                                                          if (c.type === 'arc' && c.pivot && c.axis) {
-                                                              const snapped = snapArcToTip(c.pivot, c.axis, newCenter);
-                                                              updateConstraint(selectedBone, c.id, { position: newPos, center: newCenter, pivot: snapped.pivot, radius: snapped.radius });
+                                                          if (c.type === 'arc' && c.axis) {
+                                                              // Use live pivot for radius re-snap so
+                                                              // anchored constraints stay coherent
+                                                              // when the user drags the application
+                                                              // point along the bone.
+                                                              const curPivot = resolveArcPivot(c, kin) || c.pivot;
+                                                              if (curPivot) {
+                                                                  const snapped = snapArcToTip(curPivot, c.axis, newCenter);
+                                                                  if (c.anchor) {
+                                                                      // Anchored: radius is the only
+                                                                      // pivot-related field that
+                                                                      // updates; pivot itself is
+                                                                      // joint-driven.
+                                                                      updateConstraint(selectedBone, c.id, { position: newPos, center: newCenter, radius: snapped.radius });
+                                                                  } else {
+                                                                      updateConstraint(selectedBone, c.id, { position: newPos, center: newCenter, pivot: snapped.pivot, radius: snapped.radius });
+                                                                  }
+                                                              } else {
+                                                                  updateConstraint(selectedBone, c.id, { position: newPos, center: newCenter });
+                                                              }
                                                           } else {
                                                               updateConstraint(selectedBone, c.id, { position: newPos, center: newCenter });
                                                           }
@@ -8507,27 +9039,85 @@ const BioModelPage: React.FC = () => {
                                           </div>
                                       </div>
                                   )}
-                                  {c.active && c.type === 'arc' && c.pivot && c.axis && (
+                                  {c.active && c.type === 'arc' && c.axis && (() => {
+                                      // Resolve the live pivot once for this row's render.
+                                      // When `c.anchor` is set we display the live joint
+                                      // position as read-only; otherwise the user edits
+                                      // c.pivot directly.
+                                      const liveKin = calculateKinematics(posture, twists);
+                                      const livePivot = resolveArcPivot(c, liveKin) || c.pivot || { x: 0, y: 0, z: 0 };
+                                      const isAnchored = !!c.anchor;
+                                      return (
                                       <div className="space-y-4">
+                                          {/* Joint anchor: pivot follows a body joint as the
+                                              figure moves through the ROM. None = pivot is
+                                              fixed in world space (legacy behavior). */}
                                           <div>
                                               <div className="flex justify-between items-center mb-2">
-                                                  <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400">Pivot (x, y, z)</label>
+                                                  <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400">Anchor Pivot To Joint</label>
+                                                  {isAnchored && <span className="font-mono text-[9px] text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">live</span>}
+                                              </div>
+                                              <select
+                                                  value={c.anchor?.joint || ''}
+                                                  onChange={(e) => {
+                                                      const newJoint = e.target.value || null;
+                                                      const kin = calculateKinematics(posture, twists);
+                                                      const tip = kin.boneEndPoints[selectedBone];
+                                                      if (!tip || !c.axis) return;
+                                                      // Pivot snaps to the EXACT joint position
+                                                      // (no axial projection), so the dropdown
+                                                      // doubles as a "snap pivot to limb" tool:
+                                                      // pick a joint to position the pivot
+                                                      // there, then pick None to keep it frozen
+                                                      // at that position without live-tracking.
+                                                      // Radius = raw 3D distance from pivot to
+                                                      // tip, so the constraint can have axial
+                                                      // residual the solver will work to close.
+                                                      if (newJoint === null) {
+                                                          const cur = resolveArcPivot(c, kin) || c.pivot;
+                                                          if (!cur) return;
+                                                          const radius = magnitude(sub(tip, cur));
+                                                          updateConstraint(selectedBone, c.id, { anchor: undefined, pivot: cur, radius });
+                                                      } else {
+                                                          const jp = getJointAnchorPos(newJoint, kin);
+                                                          if (!jp) return;
+                                                          const radius = magnitude(sub(tip, jp));
+                                                          updateConstraint(selectedBone, c.id, { anchor: { joint: newJoint }, pivot: jp, radius });
+                                                      }
+                                                  }}
+                                                  className="w-full bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-medium text-gray-700"
+                                              >
+                                                  <option value="">— None (manual pivot) —</option>
+                                                  {Object.keys(JOINT_ANCHOR_POINTS).map(j => (
+                                                      <option key={j} value={j}>{j}</option>
+                                                  ))}
+                                              </select>
+                                              {isAnchored && (
+                                                  <p className="text-[9px] text-emerald-600 mt-1.5 leading-snug">
+                                                      Pivot follows <b>{c.anchor!.joint}</b> live as the figure moves.
+                                                  </p>
+                                              )}
+                                          </div>
+                                          <div>
+                                              <div className="flex justify-between items-center mb-2">
+                                                  <label className={`text-[9px] font-bold uppercase tracking-wide ${isAnchored ? 'text-gray-300' : 'text-gray-400'}`}>Pivot (x, y, z){isAnchored && <span className="ml-2 normal-case font-medium text-[8px] text-gray-300">— driven by anchor</span>}</label>
                                                   <span className="font-mono text-[9px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">r={Math.round(c.radius ?? 0)}</span>
                                               </div>
                                               <div className="space-y-2">
                                                   {(['x', 'y', 'z'] as const).map(axis => (
                                                       <div key={axis} className="flex items-center gap-2">
-                                                          <span className="text-[10px] font-bold text-gray-400 w-2 uppercase">{axis}</span>
-                                                          <input type="number" step="5" value={Math.round(c.pivot![axis])}
+                                                          <span className={`text-[10px] font-bold w-2 uppercase ${isAnchored ? 'text-gray-300' : 'text-gray-400'}`}>{axis}</span>
+                                                          <input type="number" step="5" disabled={isAnchored} value={Math.round(livePivot[axis])}
                                                               onChange={(e) => {
-                                                                  const rawPivot = { ...c.pivot!, [axis]: parseFloat(e.target.value) || 0 };
+                                                                  if (isAnchored || !c.pivot) return;
+                                                                  const rawPivot = { ...c.pivot, [axis]: parseFloat(e.target.value) || 0 };
                                                                   const kin = calculateKinematics(posture, twists);
                                                                   const tip = kin.boneEndPoints[selectedBone];
-                                                                  if (!tip) return;
-                                                                  const snapped = snapArcToTip(rawPivot, c.axis!, tip);
+                                                                  if (!tip || !c.axis) return;
+                                                                  const snapped = snapArcToTip(rawPivot, c.axis, tip);
                                                                   updateConstraint(selectedBone, c.id, { pivot: snapped.pivot, radius: snapped.radius });
                                                               }}
-                                                              className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-mono text-gray-700 text-center" />
+                                                              className={`flex-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-mono text-center ${isAnchored ? 'text-gray-300 cursor-not-allowed' : 'text-gray-700'}`} />
                                                       </div>
                                                   ))}
                                               </div>
@@ -8540,8 +9130,19 @@ const BioModelPage: React.FC = () => {
                                                           const kin = calculateKinematics(posture, twists);
                                                           const tip = kin.boneEndPoints[selectedBone];
                                                           if (!tip) return;
-                                                          const snapped = snapArcToTip(c.pivot!, p.v, tip);
-                                                          updateConstraint(selectedBone, c.id, { axis: p.v, pivot: snapped.pivot, radius: snapped.radius });
+                                                          // Use live pivot — works for both anchored
+                                                          // (joint position) and manual (stored pivot).
+                                                          const curPivot = resolveArcPivot(c, kin) || c.pivot;
+                                                          if (!curPivot) return;
+                                                          const snapped = snapArcToTip(curPivot, p.v, tip);
+                                                          // For anchored constraints, only update axis +
+                                                          // radius (pivot is anchor-driven). For manual,
+                                                          // update pivot too so the snap takes effect.
+                                                          if (isAnchored) {
+                                                              updateConstraint(selectedBone, c.id, { axis: p.v, radius: snapped.radius });
+                                                          } else {
+                                                              updateConstraint(selectedBone, c.id, { axis: p.v, pivot: snapped.pivot, radius: snapped.radius });
+                                                          }
                                                       }}
                                                           className="flex-1 py-1.5 bg-gray-50 hover:bg-amber-50 text-[10px] font-bold text-gray-600 rounded-lg border border-transparent hover:border-amber-200 transition-colors">{p.label}</button>
                                                   ))}
@@ -8559,8 +9160,14 @@ const BioModelPage: React.FC = () => {
                                                                   const kin = calculateKinematics(posture, twists);
                                                                   const tip = kin.boneEndPoints[selectedBone];
                                                                   if (!tip) return;
-                                                                  const snapped = snapArcToTip(c.pivot!, newAxis, tip);
-                                                                  updateConstraint(selectedBone, c.id, { axis: newAxis, pivot: snapped.pivot, radius: snapped.radius });
+                                                                  const curPivot = resolveArcPivot(c, kin) || c.pivot;
+                                                                  if (!curPivot) return;
+                                                                  const snapped = snapArcToTip(curPivot, newAxis, tip);
+                                                                  if (isAnchored) {
+                                                                      updateConstraint(selectedBone, c.id, { axis: newAxis, radius: snapped.radius });
+                                                                  } else {
+                                                                      updateConstraint(selectedBone, c.id, { axis: newAxis, pivot: snapped.pivot, radius: snapped.radius });
+                                                                  }
                                                               }}
                                                               className="bio-range w-full text-amber-500" />
                                                       </div>
@@ -8568,9 +9175,11 @@ const BioModelPage: React.FC = () => {
                                               </div>
                                           </div>
                                       </div>
-                                  )}
+                                      );
+                                  })()}
                               </div>
-                          ))}
+                              );
+                          })}
 
                           {(!constraints[selectedBone] || constraints[selectedBone].length === 0) && (
                               <div className="text-center py-8 text-gray-400 text-xs">No constraints yet.</div>
@@ -8818,26 +9427,37 @@ const BioModelPage: React.FC = () => {
                                    }
                                    return '';
                                };
-                               let scale = 1;
-                               if (torqueDisplayMode === '1rm-local') {
-                                   const jointEfforts: Record<string, number> = {};
-                                   for (const d of torqueDistribution.demands) {
-                                       const side = d.boneId === 'spine' ? '' :
-                                                    d.boneId.startsWith('l') ? 'L' :
-                                                    d.boneId.startsWith('r') ? 'R' : 'C';
-                                       const sub = subJointSuffix(d.jointGroup, d.action);
-                                       const k = d.boneId === 'spine' ? 'spine'
-                                                : sub ? `${d.jointGroup}-${side}-${sub}` : `${d.jointGroup}-${side}`;
-                                       jointEfforts[k] = (jointEfforts[k] || 0) + d.effort;
-                                   }
-                                   let maxJointEffort = 0;
-                                   for (const je of Object.values(jointEfforts)) {
-                                       if (je > maxJointEffort) maxJointEffort = je;
-                                   }
-                                   scale = maxJointEffort > 1e-9 ? 1 / maxJointEffort : 1;
+                               // Aggregate effort per (sub-)joint regardless of display mode
+                               // so we can identify the limiting JOINT (not joint action) for
+                               // the "Limiting Factor" header. In 1rm-local mode the same map
+                               // also gives us the normalization scale.
+                               type JointEffortInfo = { effort: number; boneId: string; jointGroup: JointGroup };
+                               const jointEfforts: Record<string, JointEffortInfo> = {};
+                               for (const d of torqueDistribution.demands) {
+                                   const side = d.boneId === 'spine' ? '' :
+                                                d.boneId.startsWith('l') ? 'L' :
+                                                d.boneId.startsWith('r') ? 'R' : 'C';
+                                   const sub = subJointSuffix(d.jointGroup, d.action);
+                                   const k = d.boneId === 'spine' ? 'spine'
+                                            : sub ? `${d.jointGroup}-${side}-${sub}` : `${d.jointGroup}-${side}`;
+                                   const cur = jointEfforts[k];
+                                   if (cur) cur.effort += d.effort;
+                                   else jointEfforts[k] = { effort: d.effort, boneId: d.boneId, jointGroup: d.jointGroup };
                                }
-                               // Build the limiting factor display using the highest raw
-                               // effort (which is invariant under uniform scaling).
+                               let maxJointEffort = 0;
+                               let limitingJointInfo: JointEffortInfo | null = null;
+                               for (const je of Object.values(jointEfforts)) {
+                                   if (je.effort > maxJointEffort) {
+                                       maxJointEffort = je.effort;
+                                       limitingJointInfo = je;
+                                   }
+                               }
+                               const scale = (torqueDisplayMode === '1rm-local' && maxJointEffort > 1e-9)
+                                   ? 1 / maxJointEffort
+                                   : 1;
+                               // Keep the action-level `limiting` around for the legacy
+                               // muscle-view scale below; it's no longer used for the
+                               // Limiting Factor header (which now reports the joint).
                                let limiting: JointActionDemand | null = null;
                                for (const d of torqueDistribution.demands) {
                                    if (!limiting || d.effort > limiting.effort) limiting = d;
@@ -8866,17 +9486,27 @@ const BioModelPage: React.FC = () => {
                                }
                                return (
                                    <>
-                                       {limiting && (
+                                       {limitingJointInfo && (() => {
+                                           // Limiting joint = whichever joint's
+                                           // SUMMED action effort is highest.
+                                           // Matches the joint-level bar that
+                                           // displays 100% in the grouped list
+                                           // below.
+                                           const lj = limitingJointInfo;
+                                           const side = lj.boneId.startsWith('l') ? 'Left ' : lj.boneId.startsWith('r') ? 'Right ' : '';
+                                           const jointLabel = side + lj.jointGroup;
+                                           return (
                                            <div className="bg-red-50 border border-red-100 p-4 rounded-xl">
                                                <p className="text-[9px] font-bold uppercase tracking-wide text-red-400 mb-1">Limiting Factor</p>
-                                               <p className="font-bold text-red-800 text-sm">{limiting.action}</p>
+                                               <p className="font-bold text-red-800 text-sm">{jointLabel}</p>
                                                <p className="text-[10px] text-red-500 font-medium">
                                                    {torqueDisplayMode === '1rm-local'
                                                        ? 'Highest demand at current pose · reads 100%'
-                                                       : `Raw effort: ${(limiting.effort * 100).toFixed(0)}% of capacity`}
+                                                       : `Raw effort: ${(lj.effort * 100).toFixed(0)}% of capacity`}
                                                </p>
                                            </div>
-                                       )}
+                                           );
+                                       })()}
                                        {/* Muscle activation roll-up. Splits each
                                          * joint-action demand across its assigned
                                          * muscles using their angle-weighted
@@ -9014,16 +9644,27 @@ const BioModelPage: React.FC = () => {
                                   Muscles
                               </button>
                           </div>
-                          {/* Limiting factor swaps with view: limiting joint action vs limiting muscle. */}
-                          {timelineView === 'joint' && timelineAnalysis.limitingPeak && (
+                          {/* Limiting factor: the JOINT (not joint-action) whose
+                              SUMMED action effort reaches the timeline's max load.
+                              Both the label and the "peaks at X% of range" reflect
+                              the joint-level peak — so if a joint's load is split
+                              across two simultaneous actions, the displayed peak
+                              frame matches when the joint's combined effort tops
+                              out, not when any single action does. */}
+                          {timelineView === 'joint' && timelineAnalysis.limitingJoint && (() => {
+                              const lj = timelineAnalysis.limitingJoint;
+                              const side = lj.boneId.startsWith('l') ? 'Left ' : lj.boneId.startsWith('r') ? 'Right ' : '';
+                              const jointLabel = side + lj.jointGroup;
+                              return (
                               <div className="bg-red-50 border border-red-100 p-4 rounded-xl">
                                   <p className="text-[9px] font-bold uppercase tracking-wide text-red-400 mb-1">Limiting Factor</p>
-                                  <p className="font-bold text-red-800 text-sm">{timelineAnalysis.limitingPeak.action}</p>
+                                  <p className="font-bold text-red-800 text-sm">{jointLabel}</p>
                                   <p className="text-[10px] text-red-500 font-medium">
-                                      Peaks at {timelineAnalysis.limitingPeak.peakFramePct.toFixed(0)}% of range
+                                      Peaks at {lj.peakFramePct.toFixed(0)}% of range
                                   </p>
                               </div>
-                          )}
+                              );
+                          })()}
                           {timelineView === 'muscle' && timelineAnalysis.limitingMuscle && (
                               <div className="bg-red-50 border border-red-100 p-4 rounded-xl">
                                   <p className="text-[9px] font-bold uppercase tracking-wide text-red-400 mb-1">Most Activated Muscle</p>

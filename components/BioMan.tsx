@@ -21,6 +21,11 @@ export interface VisualForce {
 
 export interface VisualPlane {
   id: string;
+  // Underlying BoneConstraint id this plane belongs to. For fixed
+  // constraints (which emit 3 planes per constraint) this is the SAME
+  // value across all 3 visual planes, so hover-highlighting from the
+  // settings panel can light up all of them as one group.
+  constraintId?: string;
   center: Vector3;
   normal: Vector3;
   size: number;
@@ -39,6 +44,22 @@ export interface VisualPlane {
   directional?: 'half-space' | 'one-way';
 }
 
+// Decorative debug ring drawn around a joint to visualize the
+// world-space axis of a single joint action (e.g. shoulder flexion =
+// rotation about a body-lateral axis). Plane is perpendicular to
+// `axis`; circle is rendered as a thin stroked path with no fill.
+// `axis` should already be in world coordinates — caller is responsible
+// for applying the action's joint frame / world-axis / bone-axis case.
+// The label is rendered just outside the ring on the +axis side.
+export interface AxisCircle {
+  id: string;
+  center: Vector3;     // joint center (e.g. boneStartPoints[bone])
+  axis: Vector3;       // unit world-space axis the action rotates about
+  radius: number;      // fixed pixel radius (world units)
+  color: string;       // CSS color for the ring + label
+  label?: string;      // optional short label (e.g. "Flex/Ext")
+}
+
 interface BioManProps {
   posture: Posture;
   twists?: Record<string, number>;
@@ -49,6 +70,16 @@ interface BioManProps {
   onSelectBone: (boneId: string) => void;
   targetPos?: Vector3 | null;
   targetReferenceBone?: string | null; // NEW: If set, targetPos is relative to this bone's start
+  // Constraint id currently being hovered in the settings panel. When
+  // set, the corresponding 3D constraint visual gets the darkest
+  // highlight tier (above selected-limb, above idle). Lets the user
+  // visually trace which row in the panel maps to which marker.
+  hoveredConstraintId?: string | null;
+  // Joint action axis rings for the currently-selected joint. Caller
+  // computes them via the same transform path as the torque pipeline
+  // (jointFrame / useWorldAxis / isBoneAxis) so the user can verify
+  // visually whether each axis is correctly tilting with the body.
+  axisCircles?: AxisCircle[];
 }
 
 // Coordinate Frame (Right, Direction/Y, Back/Z)
@@ -130,7 +161,7 @@ const applyShortestArcRotation = (src: Vector3, dst: Vector3, toRotate: Vector3)
     return rotateAroundAxis(toRotate, axis, angleDeg);
 };
 
-const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, planes, selectedBone, onSelectBone, targetPos, targetReferenceBone }: BioManProps) => {
+const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, planes, selectedBone, onSelectBone, targetPos, targetReferenceBone, hoveredConstraintId, axisCircles }: BioManProps) => {
   // --- CONFIGURATION ---
   const CONFIG = {
     TORSO_LEN: 60,
@@ -551,9 +582,21 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
     if (planes) {
         planes.forEach(plane => {
             const camCenter = applyCamera(plane.center);
+            // Three-tier highlight system:
+            //   idle      — constraint on a non-selected limb. Faint.
+            //   selected  — constraint on the currently-selected limb,
+            //               but the user isn't pointing at its row in
+            //               the settings panel. Mid-tier so the user
+            //               can see all the limb's constraints at
+            //               once without one stealing attention.
+            //   hovered   — user is mousing over this constraint's row
+            //               in the settings panel. Darkest tier so it
+            //               clearly stands out against its sibling
+            //               selected-limb constraints.
+            const isHovered = !!plane.constraintId && plane.constraintId === hoveredConstraintId;
             const isSelected = plane.boneId === selectedBone;
-            const opacity = isSelected ? 0.25 : 0.05;
-            const strokeOpacity = isSelected ? 0.6 : 0.15;
+            const opacity = isHovered ? 0.45 : (isSelected ? 0.18 : 0.05);
+            const strokeOpacity = isHovered ? 0.95 : (isSelected ? 0.45 : 0.15);
 
             if (plane.type === 'arc' && plane.pivot && plane.axis && plane.radius) {
                 // Render arc as a circle of line segments
@@ -580,19 +623,26 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
                         d: dPath,
                         fill: 'none',
                         stroke: plane.color ? plane.color.replace(/[\d.]+\)$/, `${strokeOpacity})`) : `rgba(245, 158, 11, ${strokeOpacity})`,
-                        strokeWidth: isSelected ? 2.5 : 1.5,
+                        strokeWidth: isHovered ? 3 : (isSelected ? 2.5 : 1.5),
                         style: { pointerEvents: 'none' }
                     }
                 });
-                // Draw pivot dot
+                // Draw pivot dot — color now follows the constraint's
+                // physics/guide palette (carried in plane.color) instead
+                // of the legacy amber hard-code, so the dot stays
+                // consistent with the arc ring.
                 const pivotProj = project(applyCamera(plane.pivot));
+                const dotOpacity = isHovered ? 0.95 : (isSelected ? 0.65 : 0.3);
+                const dotColor = plane.color
+                    ? plane.color.replace(/[\d.]+\)$/, `${dotOpacity})`)
+                    : `rgba(245, 158, 11, ${dotOpacity})`;
                 items.push({
                     type: 'circle',
                     id: `${plane.id}-pivot`,
                     z: camCenter.z - 49,
                     props: {
-                        cx: pivotProj.x, cy: pivotProj.y, r: 4,
-                        fill: `rgba(245, 158, 11, ${isSelected ? 0.8 : 0.3})`,
+                        cx: pivotProj.x, cy: pivotProj.y, r: isHovered ? 5 : 4,
+                        fill: dotColor,
                         stroke: 'none',
                         style: { pointerEvents: 'none' }
                     }
@@ -621,7 +671,7 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
                         d: dPath,
                         fill: plane.color ? plane.color.replace(/[\d.]+\)$/, `${opacity})`) : `rgba(139, 92, 246, ${opacity})`,
                         stroke: plane.color ? plane.color.replace(/[\d.]+\)$/, `${strokeOpacity})`) : `rgba(139, 92, 246, ${strokeOpacity})`,
-                        strokeWidth: 1.5,
+                        strokeWidth: isHovered ? 2.5 : 1.5,
                         style: { pointerEvents: 'none' }
                     }
                 });
@@ -636,11 +686,14 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
                     const tailProj = project(applyCamera(arrowTail));
                     const headProj = project(applyCamera(arrowHead));
                     // Color: rose for half-space (static wall), amber for
-                    // one-way (ratchet — same hue family as the existing
-                    // arc constraint indicators).
+                    // one-way (ratchet). The hue communicates direction
+                    // mode independent of the constraint's
+                    // physics/guide color, since the arrow is purely
+                    // informational about which side is blocked.
+                    const arrowAlpha = isHovered ? 1.0 : (isSelected ? 0.85 : 0.55);
                     const arrowColor = plane.directional === 'one-way'
-                        ? `rgba(245, 158, 11, ${isSelected ? 0.95 : 0.55})`
-                        : `rgba(244, 63, 94, ${isSelected ? 0.95 : 0.55})`;
+                        ? `rgba(245, 158, 11, ${arrowAlpha})`
+                        : `rgba(244, 63, 94, ${arrowAlpha})`;
                     // Shaft
                     items.push({
                         type: 'line',
@@ -650,7 +703,7 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
                             x1: tailProj.x, y1: tailProj.y,
                             x2: headProj.x, y2: headProj.y,
                             stroke: arrowColor,
-                            strokeWidth: isSelected ? 2.5 : 1.8,
+                            strokeWidth: isHovered ? 3 : (isSelected ? 2.5 : 1.8),
                             style: { pointerEvents: 'none' }
                         }
                     });
@@ -708,6 +761,78 @@ const BioMan = React.memo(({ posture, twists, externalForces, reactionForces, pl
             }
         });
     }
+
+    // ====================================================================
+    // Joint action axis rings
+    // ====================================================================
+    // Decorative debug visuals: one ring per joint action, drawn around
+    // the joint center, lying in the plane perpendicular to the action's
+    // world-space axis. The caller (BioModelPage) builds these by
+    // running the SAME transform the analysis code uses:
+    //   isBoneAxis  → axis = world bone direction
+    //   useWorldAxis → axis = literal axis (world Y for horiz ad/ab)
+    //   default     → axis = jointFrame · localAxis  (body-relative)
+    // This way the user can visually verify which axes properly tilt
+    // with the spine and which don't.
+    if (axisCircles) {
+        axisCircles.forEach(circle => {
+            const camCenter = applyCamera(circle.center);
+            const axisN = normalize(circle.axis);
+            // Build an in-plane basis (tangent, bitangent) from any
+            // vector that isn't parallel to the axis.
+            let tang: Vector3 = { x: 1, y: 0, z: 0 };
+            if (Math.abs(dotProduct(axisN, tang)) > 0.9) tang = { x: 0, y: 1, z: 0 };
+            const bitang = normalize(crossProduct(axisN, tang));
+            tang = normalize(crossProduct(bitang, axisN));
+            const SEGS = 36;
+            const pts: { x: number; y: number }[] = [];
+            for (let i = 0; i <= SEGS; i++) {
+                const angle = (i / SEGS) * Math.PI * 2;
+                const cos = Math.cos(angle);
+                const sin = Math.sin(angle);
+                const worldPt = add(circle.center, add(mul(tang, cos * circle.radius), mul(bitang, sin * circle.radius)));
+                pts.push(project(applyCamera(worldPt)));
+            }
+            const dPath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ') + ' Z';
+            items.push({
+                type: 'path',
+                id: circle.id,
+                // Z slightly behind the bones (positive z = further) so
+                // the rings don't occlude the figure.
+                z: camCenter.z + 30,
+                props: {
+                    d: dPath,
+                    fill: 'none',
+                    stroke: circle.color,
+                    strokeWidth: 1.5,
+                    strokeDasharray: '3 2',
+                    style: { pointerEvents: 'none' }
+                }
+            });
+            // Small tick along the +axis side so the user can read the
+            // axis orientation, plus the label text.
+            if (circle.label) {
+                const tickEnd = add(circle.center, mul(axisN, circle.radius * 1.25));
+                const tickStart = circle.center;
+                const ts = project(applyCamera(tickStart));
+                const te = project(applyCamera(tickEnd));
+                items.push({
+                    type: 'line',
+                    id: `${circle.id}-tick`,
+                    z: camCenter.z + 29,
+                    props: {
+                        x1: ts.x, y1: ts.y,
+                        x2: te.x, y2: te.y,
+                        stroke: circle.color,
+                        strokeWidth: 1,
+                        strokeDasharray: '2 2',
+                        style: { pointerEvents: 'none' }
+                    }
+                });
+            }
+        });
+    }
+
 
     if (reactionForces) {
         reactionForces.forEach((f, idx) => {
