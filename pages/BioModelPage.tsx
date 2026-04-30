@@ -838,48 +838,53 @@ const m = (base: number, peak: number, angle: number, steepness: number = 1): Mu
 // of absolute force magnitude. User can still override per-section via
 // the Scale input in the Muscles tab.
 const DEFAULT_SECTION_SCALES: Record<string, number> = {
-    // Scapula (angles ≈ 0 structurally; scale = sum of targets).
-    'Scapula.elevation':             3.1,
-    'Scapula.depression':            3.5,
-    'Scapula.protraction':           2.8,
-    'Scapula.retraction':            3.3,
+    // Each scale = sum of user-spec target percentages for the section's
+    // muscles (1.0 for 100%, 0.8 for 80%, etc.). At the angle where the
+    // primary muscle hits its bell peak, Σ(bells) approaches the sum of
+    // peaks, so primary delta = peak/Σ * scale ≈ 1.0 (clamped at 100%
+    // by the display layer); secondaries scale proportionally to their
+    // bell value at the same angle.
+    //
+    // Re-verified against the user-supplied muscle spec.
+    // Scapula.
+    'Scapula.elevation':             3.1,    // 1.0 + 1.0 + 0.7 + 0.4
+    'Scapula.depression':            3.5,    // 1.0 + 1.0 + 0.7 + 0.5 + 0.3
+    'Scapula.protraction':           2.8,    // 1.0 + 0.8 + 0.5 + 0.5
+    'Scapula.retraction':            3.1,    // 1.0 + 1.0 + 0.8 + 0.3
     // Shoulder.
-    'Shoulder.flexion':              3.45,
-    'Shoulder.extension':            4.09,
-    'Shoulder.abduction':            3.27,
-    'Shoulder.adduction':            4.39,
-    'Shoulder.horizontalAbduction':  3.92,
-    'Shoulder.horizontalAdduction':  3.85,
-    'Shoulder.externalRotation':     2.99,
-    'Shoulder.internalRotation':     6.07,
+    'Shoulder.flexion':              4.8,    // 1.0+1.0+0.6+0.6+0.6+0.6+0.4 (incl. pec-sternal)
+    'Shoulder.extension':            5.3,    // 1.0+1.0+1.0+1.0+0.8+0.5
+    'Shoulder.abduction':            4.2,    // 1.0+1.0+0.8+0.6+0.6+0.2
+    'Shoulder.adduction':            4.6,    // 1.0+1.0+0.8+0.8+0.6+0.4
+    'Shoulder.horizontalAbduction':  4.0,    // 1.0+1.0+1.0+0.5+0.5
+    'Shoulder.horizontalAdduction':  4.0,    // 1.0+0.9+0.7+0.5+0.5+0.4
+    'Shoulder.externalRotation':     3.0,    // 1.0+1.0+0.6+0.4
+    'Shoulder.internalRotation':     6.1,    // 1.0+1.0+1.0+1.0+0.8+0.8+0.5
     // Elbow.
-    'Elbow.flexion':                 2.84,
-    'Elbow.extension':               1.96,
-    // Spine — each scale = sum of peaks across muscles assigned to the
-    // section, so at max action effort the muscle with peak=1.0 reads
-    // 100% MVC, peak=0.8 reads 80%, etc. before any downstream 1RM
-    // rescale. See DEFAULT_MUSCLE_MAPPINGS spine block for the peaks.
-    'Spine.flexion':                 3.1,    // 1.0 + 0.8 + 0.8 + 0.5 (rectus/obl-ext/obl-int/iliopsoas)
-    'Spine.extension':               1.175,  // 1.0 + 0.175 (erector/QL)
-    'Spine.lateralFlexionL':         4.7,    // 1.0 + 1.0 + 1.0 + 0.7 + 0.5 + 0.5
-    'Spine.lateralFlexionR':         4.7,    // same set as L
-    'Spine.rotationL':               3.0,    // 1.0 + 1.0 + 0.6 + 0.4 (obl-ext/obl-int/erector/lats)
-    'Spine.rotationR':               3.0,    // same set as L
+    'Elbow.flexion':                 3.0,    // 1.0+1.0+1.0
+    'Elbow.extension':               2.0,    // 1.0+1.0
+    // Spine.
+    'Spine.flexion':                 3.1,    // 1.0+0.8+0.8+0.5
+    'Spine.extension':               1.4,    // 1.0+0.4 (erector + QL per spec)
+    'Spine.lateralFlexionL':         4.7,    // 1.0+1.0+1.0+0.7+0.5+0.5
+    'Spine.lateralFlexionR':         4.7,
+    'Spine.rotationL':               3.0,    // 1.0+1.0+0.6+0.4
+    'Spine.rotationR':               3.0,
     // Hip.
-    'Hip.flexion':                   3.12,
-    'Hip.extension':                 3.28,
-    'Hip.abduction':                 3.25,
-    'Hip.adduction':                 1.99,
-    'Hip.horizontalAbduction':       3.1,
-    'Hip.horizontalAdduction':       1.8,
-    'Hip.externalRotation':          4.8,
-    'Hip.internalRotation':          4.0,
+    'Hip.flexion':                   3.6,    // 1.0+1.0+0.8+0.8
+    'Hip.extension':                 3.7,    // 1.0+1.0+1.0+0.4+0.3
+    'Hip.abduction':                 3.9,    // 1.0+1.0+0.8+0.6+0.5 (incl. glute-max)
+    'Hip.adduction':                 2.0,    // 1.0+1.0
+    'Hip.horizontalAbduction':       2.8,    // 1.0+1.0+0.4+0.4
+    'Hip.horizontalAdduction':       1.7,    // 1.0+0.7
+    'Hip.externalRotation':          4.8,    // 1.0+1.0+0.8+0.8+0.6+0.6
+    'Hip.internalRotation':          4.0,    // 1.0+1.0+1.0+0.6+0.4
     // Knee.
-    'Knee.flexion':                  2.94,
-    'Knee.extension':                1.99,
+    'Knee.flexion':                  3.2,    // 1.0+1.0+0.7+0.5
+    'Knee.extension':                2.0,    // 1.0+1.0
     // Ankle.
     'Ankle.dorsiFlexion':            1.0,
-    'Ankle.plantarFlexion':          1.8,
+    'Ankle.plantarFlexion':          2.0,    // 1.0+1.0
 };
 
 // Default cross-joint modifications — user-editable in the Modifications tab.
@@ -1049,13 +1054,20 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
 
     'Shoulder.flexion': {
         // Calibration range: -60° to 180° (flexion frame).
+        // Per user spec: 100% delt-front + pec-clav; 60% delt-side, traps-lower,
+        // serratus-anterior, pec-sternal (deep-extension only — drops to 0
+        // past ~+10° flex); 40% biceps. NOTE: traps-upper removed per spec.
         'delt-front':        m(1.024, 0.439, 30, 1.15),   // inverted bell preserved; effective max ≈ 1.0 at +180°
         'pec-clavicular':    m(0, 1.0, 37, 2),
         'delt-side':         m(0.12, 0.6, 120, 2),
         'traps-lower':       m(-0.094, 0.6, 140, 2.2),
         'serratus-anterior': m(-0.107, 0.6, 140, 2.2),
+        // Pec-sternal helps pull arm forward only when arm is BEHIND body
+        // (deep extension). Bell peak at -45° with steepness 6 makes the
+        // contribution near full at -45° to -60° but fall off rapidly past
+        // ~+10° flexion (small bell value at +10°, near 0 by +30°).
+        'pec-sternal':       m(0, 0.6, -45, 6),
         'biceps-brachii':    m(0.117, 0.4, 60, 1.6),
-        'traps-upper':       m(0.08, 0.4, 150, 2),
     },
     'Shoulder.extension': {
         // Calibration range: -180° to 60° (flexion frame negated).
@@ -1068,13 +1080,15 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     },
     'Shoulder.abduction': {
         // Calibration range: 0° to 180° (abduction frame).
+        // Per user spec: 100% delt-side + supraspinatus; 80% delt-front;
+        // 60% traps-lower + serratus-anterior; 20% biceps. NOTE: traps-upper
+        // removed per spec.
         'delt-side':         m(0.392, 1.0, 72, 2.75),
         'supraspinatus':     m(0.214, 1.0, 15, 2.2),
+        'delt-front':        m(0.099, 0.8, 180, 1.9),     // peak 0.6→0.8 per spec
         'traps-lower':       m(-0.044, 0.6, 130, 3.2),
         'serratus-anterior': m(-0.045, 0.6, 130, 3.2),
-        'delt-front':        m(0.074, 0.6, 180, 1.9),
-        'traps-upper':       m(0.04, 0.4, 150, 2),
-        'biceps-brachii':    m(-0.040, 0.3, 120, 2),
+        'biceps-brachii':    m(-0.027, 0.2, 120, 2),      // peak 0.3→0.2 per spec
     },
     'Shoulder.adduction': {
         // Calibration range: -180° to 0° (abduction frame negated).
@@ -1087,12 +1101,14 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     },
     'Shoulder.horizontalAdduction': {
         // Calibration range: -45° to 135° (hAdd frame; neg = behind body).
+        // Per user spec: 100% pec-sternal; 90% delt-front; 70% pec-clavicular;
+        // 50% serratus-anterior + pec-minor; 40% biceps.
         'pec-sternal':       m(0.169, 1.0, 70, 1.5),
         'delt-front':        m(0.023, 0.9, 56, 2.6),
         'pec-clavicular':    m(-0.050, 0.7, 40, 2),
         'serratus-anterior': m(0, 0.5, 60, 1.8),
         'pec-minor':         m(0.1, 0.5, 60, 2),
-        'biceps-brachii':    m(-0.01, 0.3, 60, 1.8),
+        'biceps-brachii':    m(-0.013, 0.4, 60, 1.8),     // peak 0.3→0.4 per spec
     },
     'Shoulder.horizontalAbduction': {
         // Calibration range: -135° to 45° (hAdd frame negated).
@@ -1180,9 +1196,12 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     },
     'Hip.abduction': {
         // Calibration range: -30° to 45° (abduction frame).
+        // Per user spec: 100% glute-med + glute-min; 80% tfl; 60% glute-max;
+        // 50% sartorius. glute-max ADDED per spec.
         'glute-med': m(0.16, 1.0, 30, 1.5),
         'glute-min': m(0.17, 1.0, 30, 1.5),
         'tfl':       m(0.133, 0.8, 15, 1.6),
+        'glute-max': m(0.1, 0.6, 30, 1.5),                // NEW per spec
         'sartorius': m(0.042, 0.5, 0, 1.8),
     },
     'Hip.adduction': {
@@ -1192,15 +1211,17 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     },
     'Hip.horizontalAbduction': {
         // Calibration range: -30° to 45° (hAbd frame; neg = cross-body).
+        // Per user spec: 100% glute-med + glute-min; 40% tfl + glute-max.
         'glute-med': m(0.114, 1.0, 0, 1.4),
         'glute-min': m(0.107, 1.0, 0, 1.5),
-        'glute-max': m(0.038, 0.7, 0, 1.6),
+        'glute-max': m(0.022, 0.4, 0, 1.6),               // peak 0.7→0.4 per spec
         'tfl':       m(0.052, 0.4, 0, 1.4),
     },
     'Hip.horizontalAdduction': {
         // Calibration range: -45° to 30° (hAbd frame negated).
+        // Per user spec: 100% adductors; 70% adductor-magnus-posterior.
         'adductors':                 m(0.117, 1.013, 42, 1.4),   // peak OUTSIDE range; effective max at edge
-        'adductor-magnus-posterior': m(0.095, 0.819, 45, 1.5),   // peak OUTSIDE range
+        'adductor-magnus-posterior': m(0.082, 0.7, 30, 1.5),     // peak 0.819→0.7 per spec
     },
     'Hip.externalRotation': {
         // Calibration range: -35° to 45° (ER frame).
@@ -1270,12 +1291,13 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     },
     'Spine.extension': {
         // Calibration range: -80° to 30°.
-        // Primary: erectors. Minor: QL. The broader "assists" (traps,
-        // glutes) that used to live here were routing spinal-extension
-        // demand to muscles that don't actually spinal-extend, inflating
-        // their activation in hip-hinge exercises — removed.
+        // Per user spec: 100% erector-spinae; 40% quadratus-lumborum.
+        // The broader "assists" (traps, glutes) that used to live here
+        // were routing spinal-extension demand to muscles that don't
+        // actually spinal-extend, inflating their activation in hip-
+        // hinge exercises — removed.
         'erector-spinae':     m(0.37, 1.0, 0, 1),
-        'quadratus-lumborum': m(0.07, 0.175, 0, 1),
+        'quadratus-lumborum': m(0.16, 0.4, 0, 1),         // peak 0.175→0.4 per spec
     },
     'Spine.lateralFlexionL': {
         // Calibration range: -35° to 35°.
@@ -1337,10 +1359,12 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'pec-clavicular':    m(0.2, 0.5, 0, 1),      // NEW — per user spec
     },
     'Scapula.retraction': {
+        // Per user spec: 100% rhomboids + traps-mid; 80% traps-upper;
+        // 30% traps-lower.
         'traps-mid':   m(0.39, 1.0, 0, 1),
         'rhomboids':   m(0.36, 1.0, 0, 1),
-        'traps-lower': m(0.32, 0.8, 0, 1),
-        'traps-upper': m(0.2, 0.5, 0, 1),
+        'traps-upper': m(0.32, 0.8, 0, 1),                // peak 0.5→0.8 per spec
+        'traps-lower': m(0.12, 0.3, 0, 1),                // peak 0.8→0.3 per spec
     },
 };
 
