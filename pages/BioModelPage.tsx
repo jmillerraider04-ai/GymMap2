@@ -636,12 +636,24 @@ const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
         'extension':            createCap(105, 230, -60)
     },
     'Ankle': {
-        // PF peak 150 Nm @ +15° dorsi (soleus/gastroc stretched — Sale 1982).
-        // Base 60 ~40% of peak (steep curve — big torque loss at full PF).
-        'plantarFlexion':       createCap(60, 150, 15),
-        // DF peak 45 Nm @ -10° PF (tib anterior stretched when foot PF'd).
-        // PF/DF ≈ 3.3 — ankle plantarflexion is dramatically stronger.
-        'dorsiFlexion':         createCap(20, 45,  -10)
+        // ROM ±50° (symmetric). Section frames after positiveAction=Plantar:
+        // plantarFlexion frame: + = plantar physical, - = dorsi physical.
+        // dorsiFlexion frame:   + = dorsi physical,   - = plantar physical.
+        //
+        // PF peak ~150 Nm at slight dorsi (~10° DF physical = -10° in
+        // plantar frame): gastroc/soleus at favorable length-tension
+        // (Sale 1982, Maganaris 2001). Base 30 (≈20% of peak) and
+        // steepness 2 model the strong active-insufficiency drop at full
+        // plantarflexion (+50° in plantar frame) — gastroc shortens to
+        // its weakest point. At full dorsi (-50°) the muscle is
+        // length-tension favourable so capacity stays higher.
+        'plantarFlexion': { base: 30, specific: 150, angle: -10, steepness: 2 },
+        // DF peak ~45 Nm at slight plantar (~10° PF physical = -10° in
+        // dorsi frame): tib anterior at favorable length. Steepness 2 +
+        // base 12 give a strong drop at full dorsiflexion where tib
+        // anterior is shortened. PF/DF ≈ 3.3 — ankle plantarflexion is
+        // ~3× stronger than dorsiflexion.
+        'dorsiFlexion':   { base: 12, specific: 45, angle: -10, steepness: 2 },
     },
     'Scapula': {
         // Scapular capacities are stand-ins for translation forces (scapula
