@@ -11079,7 +11079,14 @@ const BioModelPage: React.FC = () => {
                               ? getActionRange(mod.sourceJoint, srcAx.axis, srcAx.isPositive)
                               : { min: -180, max: 180 };
                           const clampedMidX = Math.max(range.min, Math.min(range.max, mod.midX));
+                          // Both-side live readouts. Spine sources read the same
+                          // angle for either side (the spine bone is unsided), so
+                          // the two values will be identical and the markers will
+                          // overlap. For bilateral source joints they may diverge
+                          // when the figure is in an asymmetric pose.
+                          const srcAngleLeft = getModificationSourceAngle(mod, 'left', posture, twists);
                           const srcAngleRight = getModificationSourceAngle(mod, 'right', posture, twists);
+                          const curveYLeft = srcAngleLeft !== null ? evaluateCurveY(mod, range, srcAngleLeft) : 0;
                           const curveYRight = srcAngleRight !== null ? evaluateCurveY(mod, range, srcAngleRight) : 0;
 
                           const setMod = (patch: Partial<CrossJointModification>) =>
@@ -11105,7 +11112,13 @@ const BioModelPage: React.FC = () => {
                           const yMv = yScale(mod.midY);
                           const yR = yScale(mod.rightY);
                           const polyPoints = `${xL},${yScale(0)} ${xL},${yL} ${xM},${yMv} ${xR},${yR} ${xR},${yScale(0)}`;
-                          const livePtX = srcAngleRight !== null ? xScale(Math.max(range.min, Math.min(range.max, srcAngleRight))) : null;
+                          const livePtXRight = srcAngleRight !== null ? xScale(Math.max(range.min, Math.min(range.max, srcAngleRight))) : null;
+                          const livePtXLeft = srcAngleLeft !== null ? xScale(Math.max(range.min, Math.min(range.max, srcAngleLeft))) : null;
+                          // Suppress duplicate marker when both sides land at the
+                          // same X (spine sources, symmetric poses, or any case
+                          // where the angles coincide within rendering precision).
+                          const sidesCoincide = livePtXLeft !== null && livePtXRight !== null
+                              && Math.abs(livePtXLeft - livePtXRight) < 0.5;
 
                           return (
                               <div key={mod.id} className="bg-white border border-gray-200 rounded-xl p-3 space-y-3">
@@ -11184,9 +11197,16 @@ const BioModelPage: React.FC = () => {
                                           <circle cx={xL} cy={yL} r="3.5" fill="#f59e0b" stroke="white" strokeWidth="1" />
                                           <circle cx={xM} cy={yMv} r="3.5" fill="#f59e0b" stroke="white" strokeWidth="1" />
                                           <circle cx={xR} cy={yR} r="3.5" fill="#f59e0b" stroke="white" strokeWidth="1" />
-                                          {/* Live source-angle marker (right side) */}
-                                          {livePtX !== null && (
-                                              <line x1={livePtX} x2={livePtX} y1={PAD} y2={PAD + plotH} stroke="#ef4444" strokeWidth="1" strokeDasharray="2 2" opacity="0.7" />
+                                          {/* Live source-angle markers — one per side.
+                                              Right is red, left is blue. When both
+                                              land at the same X (spine source or
+                                              symmetric pose), only the right marker
+                                              is drawn to avoid stacking. */}
+                                          {livePtXLeft !== null && !sidesCoincide && (
+                                              <line x1={livePtXLeft} x2={livePtXLeft} y1={PAD} y2={PAD + plotH} stroke="#3b82f6" strokeWidth="1" strokeDasharray="2 2" opacity="0.7" />
+                                          )}
+                                          {livePtXRight !== null && (
+                                              <line x1={livePtXRight} x2={livePtXRight} y1={PAD} y2={PAD + plotH} stroke="#ef4444" strokeWidth="1" strokeDasharray="2 2" opacity="0.7" />
                                           )}
                                           {/* Axis labels */}
                                           <text x={PAD} y={GH + 10} fontSize="8" fill="#9ca3af">{Math.round(range.min)}°</text>
@@ -11195,7 +11215,17 @@ const BioModelPage: React.FC = () => {
                                           <text x={PAD} y={yScale(0) - 2} fontSize="8" fill="#9ca3af">0%</text>
                                       </svg>
                                       <p className="text-[9px] font-mono text-gray-400 mt-1">
-                                          Current (R): {srcAngleRight !== null ? `${Math.round(srcAngleRight)}°` : '—'} → curve at {curveYRight.toFixed(0)}%
+                                          {sidesCoincide ? (
+                                              // Same value for both sides (spine source or
+                                              // symmetric pose) — show one combined readout.
+                                              <>Current: {srcAngleRight !== null ? `${Math.round(srcAngleRight)}°` : '—'} → curve at {curveYRight.toFixed(0)}%</>
+                                          ) : (
+                                              <>
+                                                  <span className="text-blue-500">L: {srcAngleLeft !== null ? `${Math.round(srcAngleLeft)}°` : '—'} → {curveYLeft.toFixed(0)}%</span>
+                                                  {' · '}
+                                                  <span className="text-red-500">R: {srcAngleRight !== null ? `${Math.round(srcAngleRight)}°` : '—'} → {curveYRight.toFixed(0)}%</span>
+                                              </>
+                                          )}
                                       </p>
 
                                       {/* Per-point inputs */}
@@ -11263,10 +11293,12 @@ const BioModelPage: React.FC = () => {
                                               const assignedForTarget = muscleAssignments[sectionKey] || {};
                                               const muscleIdsInSection = Object.keys(assignedForTarget);
                                               const comboValue = `${t.jointGroup}::${t.actionKey}`;
-                                              // Preview: what multiplier does THIS target produce right now, given the curve + current source angle?
-                                              const previewMult = srcAngleRight !== null
-                                                  ? applyTargetScaling(curveYRight, t)
-                                                  : 1;
+                                              // Preview: what multiplier does THIS target produce
+                                              // right now, given the curve + current source angle?
+                                              // Per side, since left and right may diverge in
+                                              // asymmetric scenes.
+                                              const previewMultLeft  = srcAngleLeft  !== null ? applyTargetScaling(curveYLeft,  t) : 1;
+                                              const previewMultRight = srcAngleRight !== null ? applyTargetScaling(curveYRight, t) : 1;
 
                                               const setTarget = (patch: Partial<ModificationTarget>) => setMod({
                                                   targets: mod.targets.map((tt, ti) => ti === tIdx ? { ...tt, ...patch } : tt),
@@ -11375,7 +11407,10 @@ const BioModelPage: React.FC = () => {
                                                               />
                                                           </div>
                                                           <span className="ml-auto text-[9px] font-mono text-gray-400">
-                                                              × {previewMult.toFixed(2)}
+                                                              {Math.abs(previewMultLeft - previewMultRight) < 0.005
+                                                                  ? <>× {previewMultRight.toFixed(2)}</>
+                                                                  : <><span className="text-blue-500">× {previewMultLeft.toFixed(2)}</span>{' / '}<span className="text-red-500">× {previewMultRight.toFixed(2)}</span></>
+                                                              }
                                                           </span>
                                                       </div>
                                                       {/* Row 3 (muscle only): isolated / relative mode. */}
