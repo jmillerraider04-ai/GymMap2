@@ -1477,10 +1477,9 @@ const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
     'Knee.action.Extension': { min: 0, max: 140 },
 
     // --- Ankle hinge. positiveAction = Plantar Flexion. ---
-    // Plantar flexion ROM is much wider than dorsi (anatomical: ~50° vs
-    // ~20°), so labeling positive direction as Plantar matches the
-    // dominant ROM and reads naturally (max = 50 = plantar limit).
-    'Ankle.action.Plantar Flexion': { min: -20, max: 50 },
+    // Symmetric ±50° ROM (per user request — generous dorsi range to
+    // accommodate setups where the foot needs to dorsiflex deeply).
+    'Ankle.action.Plantar Flexion': { min: -50, max: 50 },
 };
 
 const normalize = (v: Vector3): Vector3 => {
