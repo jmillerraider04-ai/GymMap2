@@ -838,53 +838,62 @@ const m = (base: number, peak: number, angle: number, steepness: number = 1): Mu
 // of absolute force magnitude. User can still override per-section via
 // the Scale input in the Muscles tab.
 const DEFAULT_SECTION_SCALES: Record<string, number> = {
-    // Each scale = sum of user-spec target percentages for the section's
-    // muscles (1.0 for 100%, 0.8 for 80%, etc.). At the angle where the
-    // primary muscle hits its bell peak, Σ(bells) approaches the sum of
-    // peaks, so primary delta = peak/Σ * scale ≈ 1.0 (clamped at 100%
-    // by the display layer); secondaries scale proportionally to their
-    // bell value at the same angle.
+    // Section scale = MAX over muscles of (target_M / max_share_M_in_ROM),
+    // where max_share_M is the muscle's highest share value across the
+    // user-spec'd ROM under share-distribution math. Effect: when the
+    // joint action is loaded in isolation (no co-firing from other
+    // sections), each muscle reaches AT LEAST its target % at its peak
+    // share angle. The limiting muscle (the one needing the most boost
+    // to hit its target) hits exactly; muscles with larger max shares
+    // overshoot and clamp at 100% MVC.
     //
-    // Re-verified against the user-supplied muscle spec.
+    // Computed by /tmp/scales_only.py given the current bell shapes.
+    // If you change a bell, re-run the script and update.
+    //
+    // Spine + Scapula sections have degenerate ROM (all bells peak at
+    // angle 0), so their scale = sum of target percentages for the
+    // section — which is the same value the MAX formula gives when all
+    // muscles share the same max-share angle.
+
     // Scapula.
-    'Scapula.elevation':             3.1,    // 1.0 + 1.0 + 0.7 + 0.4
-    'Scapula.depression':            3.5,    // 1.0 + 1.0 + 0.7 + 0.5 + 0.3
-    'Scapula.protraction':           2.8,    // 1.0 + 0.8 + 0.5 + 0.5
-    'Scapula.retraction':            3.1,    // 1.0 + 1.0 + 0.8 + 0.3
+    'Scapula.elevation':             3.1,
+    'Scapula.depression':            3.5,
+    'Scapula.protraction':           2.8,
+    'Scapula.retraction':            3.1,
     // Shoulder.
-    'Shoulder.flexion':              4.8,    // 1.0+1.0+0.6+0.6+0.6+0.6+0.4 (incl. pec-sternal)
-    'Shoulder.extension':            5.3,    // 1.0+1.0+1.0+1.0+0.8+0.5
-    'Shoulder.abduction':            4.2,    // 1.0+1.0+0.8+0.6+0.6+0.2
-    'Shoulder.adduction':            4.6,    // 1.0+1.0+0.8+0.8+0.6+0.4
-    'Shoulder.horizontalAbduction':  4.0,    // 1.0+1.0+1.0+0.5+0.5
-    'Shoulder.horizontalAdduction':  4.0,    // 1.0+0.9+0.7+0.5+0.5+0.4
-    'Shoulder.externalRotation':     3.0,    // 1.0+1.0+0.6+0.4
-    'Shoulder.internalRotation':     6.1,    // 1.0+1.0+1.0+1.0+0.8+0.8+0.5
+    'Shoulder.flexion':              3.0766,
+    'Shoulder.extension':            4.0872,
+    'Shoulder.abduction':            2.9354,
+    'Shoulder.adduction':            4.1276,
+    'Shoulder.horizontalAbduction':  3.5888,
+    'Shoulder.horizontalAdduction':  3.9494,
+    'Shoulder.externalRotation':     2.9261,
+    'Shoulder.internalRotation':     6.0316,
     // Elbow.
-    'Elbow.flexion':                 3.0,    // 1.0+1.0+1.0
-    'Elbow.extension':               2.0,    // 1.0+1.0
+    'Elbow.flexion':                 2.5482,
+    'Elbow.extension':               1.9359,
     // Spine.
-    'Spine.flexion':                 3.1,    // 1.0+0.8+0.8+0.5
-    'Spine.extension':               1.4,    // 1.0+0.4 (erector + QL per spec)
-    'Spine.lateralFlexionL':         4.7,    // 1.0+1.0+1.0+0.7+0.5+0.5
+    'Spine.flexion':                 3.1,
+    'Spine.extension':               1.4,
+    'Spine.lateralFlexionL':         4.7,
     'Spine.lateralFlexionR':         4.7,
-    'Spine.rotationL':               3.0,    // 1.0+1.0+0.6+0.4
+    'Spine.rotationL':               3.0,
     'Spine.rotationR':               3.0,
     // Hip.
-    'Hip.flexion':                   3.6,    // 1.0+1.0+0.8+0.8
-    'Hip.extension':                 3.7,    // 1.0+1.0+1.0+0.4+0.3
-    'Hip.abduction':                 3.9,    // 1.0+1.0+0.8+0.6+0.5 (incl. glute-max)
-    'Hip.adduction':                 2.0,    // 1.0+1.0
-    'Hip.horizontalAbduction':       2.8,    // 1.0+1.0+0.4+0.4
-    'Hip.horizontalAdduction':       1.7,    // 1.0+0.7
-    'Hip.externalRotation':          4.8,    // 1.0+1.0+0.8+0.8+0.6+0.6
-    'Hip.internalRotation':          4.0,    // 1.0+1.0+1.0+0.6+0.4
+    'Hip.flexion':                   2.8258,
+    'Hip.extension':                 3.0673,
+    'Hip.abduction':                 3.7411,
+    'Hip.adduction':                 1.9439,
+    'Hip.horizontalAbduction':       2.8,
+    'Hip.horizontalAdduction':       1.7005,
+    'Hip.externalRotation':          4.8,
+    'Hip.internalRotation':          4.0,
     // Knee.
-    'Knee.flexion':                  3.2,    // 1.0+1.0+0.7+0.5
-    'Knee.extension':                2.0,    // 1.0+1.0
+    'Knee.flexion':                  2.7721,
+    'Knee.extension':                1.9939,
     // Ankle.
     'Ankle.dorsiFlexion':            1.0,
-    'Ankle.plantarFlexion':          2.0,    // 1.0+1.0
+    'Ankle.plantarFlexion':          1.7854,
 };
 
 // Default cross-joint modifications — user-editable in the Modifications tab.
