@@ -11058,12 +11058,19 @@ const BioModelPage: React.FC = () => {
 
                   <div className="flex-1 overflow-y-auto pr-2 space-y-3">
                       {modifications.map((mod, modIdx) => {
-                          // Source action options.
+                          // Source action options — one entry per DOF axis, labeled
+                          // with the positive-direction action only. The two action
+                          // names per axis (e.g., flexion / extension) read the same
+                          // physical angle with opposite signs, so showing both in
+                          // the source dropdown would be redundant. Curves can still
+                          // express "modifier active at the negative end" by
+                          // placing the peak on the negative side of the X range
+                          // (e.g., midX = -45° on a Flexion source means the
+                          // modifier fires when the joint is in extension).
                           const srcActs = JOINT_ACTIONS[mod.sourceJoint] || [];
                           const srcActionOptions: { key: string; label: string }[] = [];
                           for (const ax of srcActs) {
                               srcActionOptions.push({ key: actionKey(ax.positiveAction), label: ax.positiveAction });
-                              srcActionOptions.push({ key: actionKey(ax.negativeAction), label: ax.negativeAction });
                           }
 
                           // X range from the source action's joint limits.
@@ -11419,8 +11426,11 @@ const BioModelPage: React.FC = () => {
                           onClick={() => {
                               const defaultJg: JointGroup = 'Knee';
                               const firstAx = (JOINT_ACTIONS[defaultJg] || [])[0];
-                              const defaultKey = firstAx ? actionKey(firstAx.negativeAction) : 'flexion';
-                              const ax = firstAx ? { axis: firstAx, isPositive: false } : null;
+                              // Default to positive-direction action — matches the
+                              // unified-axis source dropdown, which only lists the
+                              // positive direction per DOF.
+                              const defaultKey = firstAx ? actionKey(firstAx.positiveAction) : 'flexion';
+                              const ax = firstAx ? { axis: firstAx, isPositive: true } : null;
                               const newRange = ax ? getActionRange(defaultJg, ax.axis, ax.isPositive) : { min: 0, max: 90 };
                               setModifications(mods => [...mods, {
                                   id: `mod-${Date.now()}`,
