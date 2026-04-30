@@ -903,7 +903,7 @@ const DEFAULT_SECTION_SCALES: Record<string, number> = {
     'Knee.extension':                1.4693,
     // Ankle.
     'Ankle.dorsiFlexion':            1.0,
-    'Ankle.plantarFlexion':          1.2325,
+    'Ankle.plantarFlexion':          1.597,
 };
 
 // Default cross-joint modifications — user-editable in the Modifications tab.
@@ -1276,9 +1276,14 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'tibialis-anterior': m(0.381, 1, 10, 1),
     },
     'Ankle.plantarFlexion': {
-        // Spec ROM: -50° to 50° (symmetric).
-        'gastrocnemius': m(0, 1.4333, -30, 5),
-        'soleus':        m(0.1299, 0.7256, 8, 5),
+        // Spec ROM: -50° to 50° (symmetric). Steepness 5 → 2.5 broadens
+        // bells so neither muscle dominates as extremely at its peak
+        // angle. Gastroc base raised so it still contributes meaningfully
+        // at deep plantar instead of dropping to near-zero. Length-tension
+        // bias preserved (gastroc favours dorsi side, soleus more central)
+        // but less sharply expressed.
+        'gastrocnemius': m(0.2123, 1.1042, -30, 2.5),
+        'soleus':        m(0.2826, 0.9418, 8, 2.5),
     },
 
     // =========================================================================
