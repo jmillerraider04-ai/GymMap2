@@ -7224,9 +7224,20 @@ const BioModelPage: React.FC = () => {
               const key = `${d.boneId}::${d.action}`;
               frameActions.add(key);
 
-              // Peak tracking (unchanged).
+              // Peak tracking — compare on EFFORT (τ/capacity), not raw
+              // torque. Capacity varies with joint angle (cosine bell
+              // between base and specific), so the frame with the highest
+              // torque often isn't the frame where the muscle is working
+              // hardest. Lateral raise is the canonical example: torque
+              // is maximal near horizontal (long moment arm) but capacity
+              // is also peaking there, while at the start of the lift
+              // torque is tiny but capacity is at its worst-angle base —
+              // effort can actually peak at the bottom of the ROM. Using
+              // torque as the comparator hid that and caused the action's
+              // displayed peak to disagree with the joint sparkline (which
+              // iterates the raw effort series and finds the true peak).
               const prev = peakMap.get(key);
-              if (!prev || d.torqueMagnitude > prev.peakTorque) {
+              if (!prev || d.effort > prev.peakEffort) {
                   peakMap.set(key, {
                       boneId: d.boneId,
                       jointGroup: d.jointGroup,
