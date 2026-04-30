@@ -891,7 +891,7 @@ const DEFAULT_SECTION_SCALES: Record<string, number> = {
     'Knee.extension':                1.4693,
     // Ankle.
     'Ankle.dorsiFlexion':            1.0,
-    'Ankle.plantarFlexion':          1.31,
+    'Ankle.plantarFlexion':          1.2325,
 };
 
 // Default cross-joint modifications — user-editable in the Modifications tab.
@@ -1260,13 +1260,13 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // =========================================================================
 
     'Ankle.dorsiFlexion': {
-        // Spec ROM: -50° to 20°.
+        // Spec ROM: -50° to 50° (symmetric).
         'tibialis-anterior': m(0.381, 1, 10, 1),
     },
     'Ankle.plantarFlexion': {
-        // Spec ROM: -20° to 50°.
-        'gastrocnemius': m(0, 1.6554, -30, 5),
-        'soleus':        m(0.1125, 0.6283, 8, 5),
+        // Spec ROM: -50° to 50° (symmetric).
+        'gastrocnemius': m(0, 1.4333, -30, 5),
+        'soleus':        m(0.1299, 0.7256, 8, 5),
     },
 
     // =========================================================================
