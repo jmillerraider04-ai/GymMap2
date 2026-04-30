@@ -9958,16 +9958,14 @@ const BioModelPage: React.FC = () => {
                               });
                           })()}
                           {timelineView === 'muscle' && (() => {
-                              // Group muscle peaks by anatomical region.
-                              // Mirrors the joint view's "Side JointGroup"
-                              // grouping but uses MUSCLE_CATALOG.region.
-                              const regionMap = new Map<string, MusclePeak[]>();
-                              for (const mp of timelineAnalysis.musclePeaks) {
-                                  const region = MUSCLE_CATALOG.find(m => m.id === mp.muscleId)?.region || 'Other';
-                                  if (!regionMap.has(region)) regionMap.set(region, []);
-                                  regionMap.get(region)!.push(mp);
-                              }
-                              if (regionMap.size === 0) {
+                              // Flat list of all muscles, sorted by peak
+                              // activation descending. No region grouping —
+                              // the user wants the hardest-working muscles
+                              // up top regardless of anatomical category.
+                              const sortedPeaks = [...timelineAnalysis.musclePeaks]
+                                  .sort((a, b) => b.peakActivation - a.peakActivation);
+
+                              if (sortedPeaks.length === 0) {
                                   return (
                                       <div className="bg-white border border-gray-100 rounded-2xl p-6 text-center">
                                           <p className="text-xs text-gray-400">No muscle activation across this timeline. Make sure the loaded joint actions have assigned muscles in the Muscles tab.</p>
@@ -10012,36 +10010,35 @@ const BioModelPage: React.FC = () => {
                                   );
                               };
 
-                              // Stable region order: walk the catalog so
-                              // the UI ordering is deterministic regardless
-                              // of which muscles happen to be active.
-                              const regionOrder = Array.from(new Set(MUSCLE_CATALOG.map(m => m.region)));
-                              const orderedRegions = regionOrder.filter(r => regionMap.has(r));
+                              const nFrames = timelineAnalysis.profile.length;
 
-                              return orderedRegions.map(regionName => {
-                                  const peaks = regionMap.get(regionName)!;
-                                  const sorted = [...peaks].sort((a, b) => b.peakActivation - a.peakActivation);
-                                  const nFrames = timelineAnalysis.profile.length;
-
-                                  // Region aggregate sparkline: max muscle
-                                  // activation in this region per frame.
-                                  const regionAgg = new Array(nFrames).fill(0);
-                                  for (const mp of sorted) {
-                                      const series = muscleSeriesLookup.get(`${mp.side}|${mp.muscleId}`);
-                                      if (!series) continue;
-                                      for (let i = 0; i < Math.min(nFrames, series.activations.length); i++) {
-                                          if (series.activations[i] > regionAgg[i]) regionAgg[i] = series.activations[i];
-                                      }
+                              // Global aggregate sparkline: max muscle activation
+                              // per frame across the entire muscle list. Replaces
+                              // the per-region aggregates.
+                              const globalAgg = new Array(nFrames).fill(0);
+                              for (const mp of sortedPeaks) {
+                                  const series = muscleSeriesLookup.get(`${mp.side}|${mp.muscleId}`);
+                                  if (!series) continue;
+                                  for (let i = 0; i < Math.min(nFrames, series.activations.length); i++) {
+                                      if (series.activations[i] > globalAgg[i]) globalAgg[i] = series.activations[i];
                                   }
+                              }
 
-                                  return (
-                                      <div key={`muscle-region-${regionName}`} className="bg-white border border-gray-100 rounded-2xl p-4">
-                                          <h4 className="font-bold text-gray-900 text-sm mb-1">{regionName}</h4>
+                              // Bracing slider visibility: spine-extension demand
+                              // anywhere on the timeline. Used to be conditionally
+                              // rendered inside the Core region card; lives in the
+                              // single flat card now.
+                              const hasSpineExt = timelineAnalysis.peaks.some(p =>
+                                  p.jointGroup === 'Spine' && /Extension/.test(p.action) && p.peakEffort > 1e-6
+                              );
+
+                              return (
+                                      <div className="bg-white border border-gray-100 rounded-2xl p-4">
                                           <div className="mb-3 rounded overflow-hidden">
-                                              {renderSparkline(regionAgg, '#6b7280', 'rgba(107, 114, 128, 0.1)', 20)}
+                                              {renderSparkline(globalAgg, '#6b7280', 'rgba(107, 114, 128, 0.1)', 20)}
                                           </div>
                                           <div className="space-y-3">
-                                              {sorted.map((mp, i) => {
+                                              {sortedPeaks.map((mp, i) => {
                                                   const pct = mp.peakActivation * 100;
                                                   const lineColor = mp.peakActivation > 0.8 ? '#f87171' : mp.peakActivation > 0.5 ? '#fbbf24' : '#34d399';
                                                   const fillColor = mp.peakActivation > 0.8 ? 'rgba(248, 113, 113, 0.15)' : mp.peakActivation > 0.5 ? 'rgba(251, 191, 36, 0.15)' : 'rgba(52, 211, 153, 0.15)';
@@ -10108,18 +10105,13 @@ const BioModelPage: React.FC = () => {
                                                   );
                                               })}
                                           </div>
-                                          {/* Bracing slider — under the Core region only.
-                                              Abdominal bracing represents the portion of Spine
-                                              Extension demand off-loaded to rectus abdominis
-                                              (via intra-abdominal pressure) instead of being
-                                              carried purely by the erectors. Only relevant
-                                              when Spine Extension is active in the timeline. */}
-                                          {regionName === 'Core' && (() => {
-                                              // Detect any spine-extension activity in timeline.
-                                              const hasSpineExt = timelineAnalysis.peaks.some(p =>
-                                                  p.jointGroup === 'Spine' && /Extension/.test(p.action) && p.peakEffort > 1e-6
-                                              );
-                                              if (!hasSpineExt) return null;
+                                          {/* Bracing slider — only when spine extension is
+                                              active anywhere on the timeline. Abdominal
+                                              bracing represents the portion of Spine Extension
+                                              demand off-loaded to rectus abdominis (via
+                                              intra-abdominal pressure) instead of being carried
+                                              purely by the erectors. */}
+                                          {hasSpineExt && (() => {
                                               const bPct = Math.round(bracingFraction * 100);
                                               const ePct = 100 - bPct;
                                               return (
@@ -10150,7 +10142,6 @@ const BioModelPage: React.FC = () => {
                                           })()}
                                       </div>
                                   );
-                              });
                           })()}
                       </div>
                   )}
