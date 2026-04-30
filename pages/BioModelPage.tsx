@@ -838,22 +838,20 @@ const m = (base: number, peak: number, angle: number, steepness: number = 1): Mu
 // of absolute force magnitude. User can still override per-section via
 // the Scale input in the Muscles tab.
 const DEFAULT_SECTION_SCALES: Record<string, number> = {
-    // Section scale = MAX over muscles of (target_M / max_share_M_in_ROM),
-    // where max_share_M is the muscle's highest share value across the
-    // user-spec'd ROM under share-distribution math. Effect: when the
-    // joint action is loaded in isolation (no co-firing from other
-    // sections), each muscle reaches AT LEAST its target % at its peak
-    // share angle. The limiting muscle (the one needing the most boost
-    // to hit its target) hits exactly; muscles with larger max shares
-    // overshoot and clamp at 100% MVC.
+    // Bells in DEFAULT_MUSCLE_ASSIGNMENTS were calibrated by
+    // /tmp/calibrate_capped.py with per-muscle k_M clipped to [0.5, 2.0]
+    // so that, after multiplying by these section scales, each muscle's
+    // max activation across the spec'd ROM equals its target %. The
+    // calibration converged to 0.0pp deviation in 30 of 32 sections.
     //
-    // Computed by /tmp/scales_only.py given the current bell shapes.
-    // If you change a bell, re-run the script and update.
+    // Two sections have residual rhomboids overshoots
+    // (Shoulder.extension and Shoulder.horizontalAbduction) — rhomboids'
+    // bell shape gives it a max-share larger than its 0.5 target ratio
+    // implies even at the k=0.5 cap. Resolving fully would require
+    // narrowing rhomboids' bell (steepness or base reduction) — left
+    // as-is per user preference to preserve curve shapes.
     //
-    // Spine + Scapula sections have degenerate ROM (all bells peak at
-    // angle 0), so their scale = sum of target percentages for the
-    // section — which is the same value the MAX formula gives when all
-    // muscles share the same max-share angle.
+    // Re-run /tmp/calibrate_capped.py if any bell shape changes.
 
     // Scapula.
     'Scapula.elevation':             3.1,
@@ -861,17 +859,17 @@ const DEFAULT_SECTION_SCALES: Record<string, number> = {
     'Scapula.protraction':           2.8,
     'Scapula.retraction':            3.1,
     // Shoulder.
-    'Shoulder.flexion':              3.0766,
-    'Shoulder.extension':            4.0872,
-    'Shoulder.abduction':            2.9354,
-    'Shoulder.adduction':            4.1276,
-    'Shoulder.horizontalAbduction':  3.5888,
-    'Shoulder.horizontalAdduction':  3.9494,
-    'Shoulder.externalRotation':     2.9261,
-    'Shoulder.internalRotation':     6.0316,
+    'Shoulder.flexion':              2.3457,
+    'Shoulder.extension':            3.0113,
+    'Shoulder.abduction':            2.1272,
+    'Shoulder.adduction':            3.0314,
+    'Shoulder.horizontalAbduction':  2.8261,
+    'Shoulder.horizontalAdduction':  3.1645,
+    'Shoulder.externalRotation':     2.7838,
+    'Shoulder.internalRotation':     5.5471,
     // Elbow.
-    'Elbow.flexion':                 2.5482,
-    'Elbow.extension':               1.9359,
+    'Elbow.flexion':                 2.4757,
+    'Elbow.extension':               1.5187,
     // Spine.
     'Spine.flexion':                 3.1,
     'Spine.extension':               1.4,
@@ -880,20 +878,20 @@ const DEFAULT_SECTION_SCALES: Record<string, number> = {
     'Spine.rotationL':               3.0,
     'Spine.rotationR':               3.0,
     // Hip.
-    'Hip.flexion':                   2.8258,
-    'Hip.extension':                 3.0673,
-    'Hip.abduction':                 3.7411,
-    'Hip.adduction':                 1.9439,
-    'Hip.horizontalAbduction':       2.8,
-    'Hip.horizontalAdduction':       1.7005,
-    'Hip.externalRotation':          4.8,
-    'Hip.internalRotation':          4.0,
+    'Hip.flexion':                   2.5303,
+    'Hip.extension':                 2.3477,
+    'Hip.abduction':                 3.6597,
+    'Hip.adduction':                 1.9018,
+    'Hip.horizontalAbduction':       2.7831,
+    'Hip.horizontalAdduction':       1.642,
+    'Hip.externalRotation':          4.7678,
+    'Hip.internalRotation':          3.9709,
     // Knee.
-    'Knee.flexion':                  2.7721,
-    'Knee.extension':                1.9939,
+    'Knee.flexion':                  2.3927,
+    'Knee.extension':                1.4693,
     // Ankle.
     'Ankle.dorsiFlexion':            1.0,
-    'Ankle.plantarFlexion':          1.7854,
+    'Ankle.plantarFlexion':          1.31,
 };
 
 // Default cross-joint modifications — user-editable in the Modifications tab.
@@ -1061,88 +1059,91 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // default to the standard cosine shape. To re-tune, edit here or edit
     // in the app and re-capture.
 
+    // Bells calibrated by /tmp/calibrate_capped.py with per-muscle k_M
+    // clipped to [0.5, 2.0]. Each muscle's max activation across the
+    // spec'd ROM equals its target % when section scale below is applied.
+    // Cap on k preserves bell shapes — no extreme magnification or
+    // narrowing outside the ROM. Two sections (Shoulder.extension and
+    // Shoulder.horizontalAbduction) have residual rhomboids overshoots
+    // because rhomboids' bell shape gives it a max-share larger than
+    // its target ratio implies even at k=0.5 — those would need bell-
+    // shape changes to fully resolve.
+
     'Shoulder.flexion': {
-        // Calibration range: -60° to 180° (flexion frame).
-        // Per user spec: 100% delt-front + pec-clav; 60% delt-side, traps-lower,
-        // serratus-anterior, pec-sternal (deep-extension only — drops to 0
-        // past ~+10° flex); 40% biceps. NOTE: traps-upper removed per spec.
-        'delt-front':        m(1.024, 0.439, 30, 1.15),   // inverted bell preserved; effective max ≈ 1.0 at +180°
-        'pec-clavicular':    m(0, 1.0, 37, 2),
-        'delt-side':         m(0.12, 0.6, 120, 2),
-        'traps-lower':       m(-0.094, 0.6, 140, 2.2),
-        'serratus-anterior': m(-0.107, 0.6, 140, 2.2),
-        // Pec-sternal helps pull arm forward only when arm is BEHIND body
-        // (deep extension). Bell peak at -45° with steepness 6 makes the
-        // contribution near full at -45° to -60° but fall off rapidly past
-        // ~+10° flexion (small bell value at +10°, near 0 by +30°).
-        'pec-sternal':       m(0, 0.6, -45, 6),
-        'biceps-brachii':    m(0.117, 0.4, 60, 1.6),
+        // Spec ROM: -60° to 180°.
+        'delt-front':        m(0.7796, 0.3342, 30, 1.15),
+        'pec-clavicular':    m(0, 0.7520, 37, 2),
+        'delt-side':         m(0.1782, 0.8908, 120, 2),
+        'traps-lower':       m(-0.1444, 0.9217, 140, 2.2),
+        'serratus-anterior': m(-0.1645, 0.9222, 140, 2.2),
+        // Pec-sternal helps pull arm forward only at deep extension —
+        // drops near 0 by +10° flex (steepness 6 narrow bell at -45°).
+        'pec-sternal':       m(0, 0.3690, -45, 6),
+        'biceps-brachii':    m(0.0948, 0.3240, 60, 1.6),
     },
     'Shoulder.extension': {
-        // Calibration range: -180° to 60° (flexion frame negated).
-        'lats':           m(-0.83, 1.0, -67, 1.05),
-        'teres-major':    m(-0.221, 1.0, -60, 1.7),
-        'delt-rear':      m(0.643, 1.0, -20, 2.95),
-        'pec-sternal':    m(-0.138, 1.0, -169, 3.35),
-        'triceps-long':   m(-0.056, 0.8, -86, 2.6),
-        'rhomboids':      m(0.222, 0.5, -60, 1),
+        // Spec ROM: -180° to 60°. RESIDUAL: rhomboids overshoots target 50%
+        // (reaches ~88% — clamped to that level). Bell shape gives it more
+        // dominance than its 0.5 target ratio implies.
+        'lats':         m(-1.66, 2.0, -67, 1.05),
+        'teres-major':  m(-0.442, 2.0, -60, 1.7),
+        'delt-rear':    m(0.3215, 0.5, -20, 2.95),
+        'pec-sternal':  m(-0.0703, 0.5097, -169, 3.35),
+        'triceps-long': m(-0.112, 1.6, -86, 2.6),
+        'rhomboids':    m(0.111, 0.25, -60, 1),
     },
     'Shoulder.abduction': {
-        // Calibration range: 0° to 180° (abduction frame).
-        // Per user spec: 100% delt-side + supraspinatus; 80% delt-front;
-        // 60% traps-lower + serratus-anterior; 20% biceps. NOTE: traps-upper
-        // removed per spec.
-        'delt-side':         m(0.392, 1.0, 72, 2.75),
-        'supraspinatus':     m(0.214, 1.0, 15, 2.2),
-        'delt-front':        m(0.099, 0.8, 180, 1.9),     // peak 0.6→0.8 per spec
-        'traps-lower':       m(-0.044, 0.6, 130, 3.2),
-        'serratus-anterior': m(-0.045, 0.6, 130, 3.2),
-        'biceps-brachii':    m(-0.027, 0.2, 120, 2),      // peak 0.3→0.2 per spec
+        // Spec ROM: 0° to 180°.
+        'delt-side':         m(0.2821, 0.7197, 72, 2.75),
+        'supraspinatus':     m(0.107, 0.5, 15, 2.2),
+        'delt-front':        m(0.1233, 0.9964, 180, 1.9),
+        'traps-lower':       m(-0.0792, 1.0798, 130, 3.2),
+        'serratus-anterior': m(-0.081, 1.0798, 130, 3.2),
+        'biceps-brachii':    m(-0.0441, 0.3268, 120, 2),
     },
     'Shoulder.adduction': {
-        // Calibration range: -180° to 0° (abduction frame negated).
-        'lats':           m(-0.093, 1.0, -81, 2.5),
-        'teres-major':    m(-0.0625, 1.0, -80, 1.6),
-        'triceps-long':   m(0.019, 0.8, -107, 2.2),
-        'pec-sternal':    m(0.8, 0.511, -35, 5),          // inverted bell preserved
-        'delt-rear':      m(0.063, 0.6, -120, 1.8),
-        'rhomboids':      m(0.138, 0.4, -75, 1.45),
+        // Spec ROM: -180° to 0°.
+        'lats':         m(-0.1472, 1.5824, -81, 2.5),
+        'teres-major':  m(-0.0818, 1.3091, -80, 1.6),
+        'triceps-long': m(0.0257, 1.0802, -107, 2.2),
+        'pec-sternal':  m(0.4371, 0.2792, -35, 5),     // inverted bell preserved
+        'delt-rear':    m(0.0539, 0.5136, -120, 1.8),
+        'rhomboids':    m(0.1055, 0.3057, -75, 1.45),
     },
     'Shoulder.horizontalAdduction': {
-        // Calibration range: -45° to 135° (hAdd frame; neg = behind body).
-        // Per user spec: 100% pec-sternal; 90% delt-front; 70% pec-clavicular;
-        // 50% serratus-anterior + pec-minor; 40% biceps.
-        'pec-sternal':       m(0.169, 1.0, 70, 1.5),
-        'delt-front':        m(0.023, 0.9, 56, 2.6),
-        'pec-clavicular':    m(-0.050, 0.7, 40, 2),
-        'serratus-anterior': m(0, 0.5, 60, 1.8),
-        'pec-minor':         m(0.1, 0.5, 60, 2),
-        'biceps-brachii':    m(-0.013, 0.4, 60, 1.8),     // peak 0.3→0.4 per spec
+        // Spec ROM: -45° to 135°.
+        'pec-sternal':       m(0.1256, 0.7434, 70, 1.5),
+        'delt-front':        m(0.0288, 1.1255, 56, 2.6),
+        'pec-clavicular':    m(-0.0486, 0.6797, 40, 2),
+        'serratus-anterior': m(0, 0.5705, 60, 1.8),
+        'pec-minor':         m(0.0827, 0.4135, 60, 2),
+        'biceps-brachii':    m(-0.0153, 0.4695, 60, 1.8),
     },
     'Shoulder.horizontalAbduction': {
-        // Calibration range: -135° to 45° (hAdd frame negated).
-        'delt-rear':     m(0.042, 1.0, 15, 1.8),
-        'infraspinatus': m(-0.061, 1.0, 0, 2),
-        'teres-minor':   m(-0.071, 1.0, 0, 2),
-        'rhomboids':     m(0.181, 0.5, 25, 2.5),
-        'lats':          m(-0.05, 0.5, 30, 2),
+        // Spec ROM: -135° to 45°. RESIDUAL: rhomboids overshoots target 50%
+        // (clamps to 100%) — same shape-vs-target issue as in extension.
+        'delt-rear':     m(0.0546, 1.301, 15, 1.8),
+        'infraspinatus': m(-0.122, 2.0, 0, 2),
+        'teres-minor':   m(-0.142, 2.0, 0, 2),
+        'rhomboids':     m(0.0905, 0.25, 25, 2.5),
+        'lats':          m(-0.1, 1.0, 30, 2),
     },
     'Shoulder.internalRotation': {
-        // Calibration range: -90° to 70° (ER frame negated).
-        'subscapularis':  m(0.286, 1.0, 15, 1.5),
-        'pec-sternal':    m(0.171, 1.0, 0, 1.3),
-        'lats':           m(0.188, 1.0, -5, 1.3),
-        'teres-major':    m(0.185, 1.0, 0, 1.3),
-        'delt-front':     m(0.152, 0.8, 15, 1.4),
-        'pec-clavicular': m(0.133, 0.8, 0, 1.4),
-        'biceps-brachii': m(0.0625, 0.5, 0, 1.5),
+        // Spec ROM: -90° to 90°.
+        'subscapularis':  m(0.2572, 0.8992, 15, 1.5),
+        'pec-sternal':    m(0.178, 1.0411, 0, 1.3),
+        'lats':           m(0.1789, 0.9516, -5, 1.3),
+        'teres-major':    m(0.1896, 1.0246, 0, 1.3),
+        'delt-front':     m(0.1431, 0.7532, 15, 1.4),
+        'pec-clavicular': m(0.1428, 0.8591, 0, 1.4),
+        'biceps-brachii': m(0.0677, 0.5417, 0, 1.5),
     },
     'Shoulder.externalRotation': {
-        // Calibration range: -70° to 90° (ER frame).
-        'infraspinatus': m(0.238, 1.0, 10, 1.5),
-        'teres-minor':   m(0.196, 1.0, 10, 1.5),
-        'delt-rear':     m(0.103, 0.6, 0, 1.4),
-        'supraspinatus': m(0.04, 0.4, 0, 1.6),
+        // Spec ROM: -90° to 90°.
+        'infraspinatus': m(0.2329, 0.9786, 10, 1.5),
+        'teres-minor':   m(0.1997, 1.0191, 10, 1.5),
+        'delt-rear':     m(0.0986, 0.5743, 0, 1.4),
+        'supraspinatus': m(0.0419, 0.4191, 0, 1.6),
     },
 
     // =========================================================================
@@ -1155,15 +1156,15 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // at negative = muscle strong when elbow bent (stretched).
 
     'Elbow.flexion': {
-        // Calibration range: 0° to 145°.
-        'biceps-brachii':  m(0.224, 1.0, 45, 1.5),
-        'brachialis':      m(0.5, 1.0, 90, 0.85),
-        'brachioradialis': m(0.053, 1.0, 120, 0.55),
+        // Spec ROM: 0° to 145°.
+        'biceps-brachii':  m(0.23, 1.0266, 45, 1.5),
+        'brachialis':      m(0.5115, 1.023, 90, 0.85),
+        'brachioradialis': m(0.0505, 0.9522, 120, 0.55),
     },
     'Elbow.extension': {
-        // Calibration range: -145° to 0°.
-        'triceps-long':           m(-0.030, 1.0, -100, 1.4),
-        'triceps-lateral-medial': m(0.625, 1.0, -53, 0.85),
+        // Spec ROM: -145° to 0°.
+        'triceps-long':           m(-0.0403, 1.3432, -100, 1.4),
+        'triceps-lateral-medial': m(0.4653, 0.7445, -53, 0.85),
     },
 
     // =========================================================================
@@ -1175,79 +1176,62 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // Adduction: 0=standing, -30-ish=leg abducted.
 
     'Hip.flexion': {
-        // Calibration range: -20° to 120° (flexion frame).
-        'iliopsoas':       m(0.125, 1.0, 100, 2.2),
-        'rectus-femoris':  m(0.1, 1.0, 30, 2),
-        'tfl':             m(0.056, 0.8, 15, 1.7),
-        'sartorius':       m(0.128, 0.8, 60, 1.4),
+        // Spec ROM: -20° to 120°.
+        'iliopsoas':      m(0.1029, 0.8232, 100, 2.2),
+        'rectus-femoris': m(0.1167, 1.1668, 30, 2),
+        'tfl':            m(0.0542, 0.7742, 15, 1.7),
+        'sartorius':      m(0.1377, 0.8607, 60, 1.4),
     },
     'Hip.extension': {
-        // Calibration range: -120° to 20° (flexion frame negated;
-        // positive = more extension, negative = hip in flex).
-        //
-        // Hamstrings peak at -65° (centered in the 50-80° hip-flex
-        // range where they're at longest length and carry the most
-        // of the hip-extension load — sprint starts, deadlift bottom,
-        // seated good-morning). Steepness 2.5 makes the bell narrow
-        // enough that the hamstrings dominate the -80° → -50° sweet
-        // spot but fall off noticeably toward mid-range and
-        // hyperextension, where glute-max and adductor-magnus-posterior
-        // take over. glute-max and adductor-magnus-posterior steepness
-        // raised from 3.15/1 to 4/1.5 for cleaner hand-offs between
-        // the three primaries. Each primary still returns 1.0 at its
-        // own peak angle, preserving the 1:1:1 peak ratio; glute-med
-        // and glute-min's 0.4/0.3 secondary ratios also unchanged.
-        'glute-max':                 m(0.367, 1.0, -15, 4),
-        'hamstrings-biarticular':    m(0.1, 1.0, -65, 2.5),
-        'adductor-magnus-posterior': m(-0.121, 1.0, -100, 1.5),
-        'glute-med':                 m(0.16, 0.4, 0, 1),
-        'glute-min':                 m(0.12, 0.3, 0, 1),
+        // Spec ROM: -120° to 20°. Hamstrings still peak at -65°
+        // (longest length, most extension load).
+        'glute-max':                 m(0.3406, 0.9279, -15, 4),
+        'hamstrings-biarticular':    m(0.1545, 1.545, -65, 2.5),
+        'adductor-magnus-posterior': m(-0.1476, 1.2195, -100, 1.5),
+        'glute-med':                 m(0.121, 0.3025, 0, 1),
+        'glute-min':                 m(0.0908, 0.2269, 0, 1),
     },
     'Hip.abduction': {
-        // Calibration range: -30° to 45° (abduction frame).
-        // Per user spec: 100% glute-med + glute-min; 80% tfl; 60% glute-max;
-        // 50% sartorius. glute-max ADDED per spec.
-        'glute-med': m(0.16, 1.0, 30, 1.5),
-        'glute-min': m(0.17, 1.0, 30, 1.5),
-        'tfl':       m(0.133, 0.8, 15, 1.6),
-        'glute-max': m(0.1, 0.6, 30, 1.5),                // NEW per spec
-        'sartorius': m(0.042, 0.5, 0, 1.8),
+        // Spec ROM: -30° to 45°.
+        'glute-med': m(0.1658, 1.0363, 30, 1.5),
+        'glute-min': m(0.1761, 1.036, 30, 1.5),
+        'tfl':       m(0.1321, 0.7945, 15, 1.6),
+        'glute-max': m(0.1036, 0.6217, 30, 1.5),
+        'sartorius': m(0.038, 0.4526, 0, 1.8),
     },
     'Hip.adduction': {
-        // Calibration range: -45° to 30° (abduction frame negated).
-        'adductors':                 m(0.119, 1.0, -16, 1.4),
-        'adductor-magnus-posterior': m(0.156, 1.0, -30, 1.5),
+        // Spec ROM: -45° to 30°.
+        'adductors':                 m(0.1163, 0.9774, -16, 1.4),
+        'adductor-magnus-posterior': m(0.1596, 1.0231, -30, 1.5),
     },
     'Hip.horizontalAbduction': {
-        // Calibration range: -30° to 45° (hAbd frame; neg = cross-body).
-        // Per user spec: 100% glute-med + glute-min; 40% tfl + glute-max.
-        'glute-med': m(0.114, 1.0, 0, 1.4),
-        'glute-min': m(0.107, 1.0, 0, 1.5),
-        'glute-max': m(0.022, 0.4, 0, 1.6),               // peak 0.7→0.4 per spec
-        'tfl':       m(0.052, 0.4, 0, 1.4),
+        // Spec ROM: -30° to 45°.
+        'glute-med': m(0.1135, 0.9954, 0, 1.4),
+        'glute-min': m(0.1077, 1.0065, 0, 1.5),
+        'glute-max': m(0.0221, 0.4026, 0, 1.6),
+        'tfl':       m(0.0516, 0.3967, 0, 1.4),
     },
     'Hip.horizontalAdduction': {
-        // Calibration range: -45° to 30° (hAbd frame negated).
-        // Per user spec: 100% adductors; 70% adductor-magnus-posterior.
-        'adductors':                 m(0.117, 1.013, 42, 1.4),   // peak OUTSIDE range; effective max at edge
-        'adductor-magnus-posterior': m(0.082, 0.7, 30, 1.5),     // peak 0.819→0.7 per spec
+        // Spec ROM: -45° to 30°.
+        'adductors':                 m(0.1222, 1.0581, 42, 1.4),
+        'adductor-magnus-posterior': m(0.0785, 0.6702, 30, 1.5),
     },
     'Hip.externalRotation': {
-        // Calibration range: -35° to 45° (ER frame).
-        'glute-max':                 m(0.231, 1.0, 0, 1.2),
-        'glute-med':                 m(0.179, 1.0, 0, 1.4),
-        'sartorius':                 m(0.128, 0.8, 0, 1.4),
-        'adductor-magnus-posterior': m(0.15, 0.8, 0, 1.5),       // NEW — stretch-position ER assist
-        'biceps-femoris-short':      m(0.1, 0.6, 0, 1.5),        // NEW — per user spec
-        'glute-min':                 m(0.1, 0.6, 0, 1.4),
+        // Spec ROM: -35° to 45°.
+        'glute-max':                 m(0.2248, 0.9731, 0, 1.2),
+        'glute-med':                 m(0.18, 1.0055, 0, 1.4),
+        'sartorius':                 m(0.1287, 0.8044, 0, 1.4),
+        'adductor-magnus-posterior': m(0.1508, 0.8044, 0, 1.5),
+        'biceps-femoris-short':      m(0.1005, 0.6033, 0, 1.5),
+        'glute-min':                 m(0.1005, 0.6033, 0, 1.4),
     },
     'Hip.internalRotation': {
-        // Calibration range: -45° to 35° (ER frame negated).
-        'tfl':                    m(0.129, 1.0, 0, 1.4),
-        'glute-min':              m(0.118, 1.0, 0, 1.4),
-        'glute-med':              m(0.128, 1.0, 0, 1.4),
-        'adductors':              m(0.048, 0.6, 0, 1.5),
-        'hamstrings-biarticular': m(0, 0.4, 0, 1.6),
+        // Spec ROM: -45° to 35°.
+        'tfl':                    m(0.1284, 0.9952, 0, 1.4),
+        'glute-min':              m(0.1177, 0.9978, 0, 1.4),
+        'glute-med':              m(0.1274, 0.9954, 0, 1.4),
+        'adductors':              m(0.0483, 0.6035, 0, 1.5),
+        'hamstrings-biarticular': m(0, 0.4023, 0, 1.6),
     },
 
     // =========================================================================
@@ -1259,16 +1243,16 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // Knee.extension: 0=straight, -160=full flex (stretched quads).
 
     'Knee.flexion': {
-        // Calibration range: 0° to 140°.
-        'hamstrings-biarticular': m(0.108, 1.0, 70, 1.4),
-        'biceps-femoris-short':   m(0.324, 1.0, 11, 1.5),
-        'gastrocnemius':          m(0.025, 0.7, 15, 4.15),
-        'sartorius':              m(0.038, 0.5, 60, 1.6),
+        // Spec ROM: 0° to 140°.
+        'hamstrings-biarticular': m(0.0845, 0.7824, 70, 1.4),
+        'biceps-femoris-short':   m(0.3706, 1.1439, 11, 1.5),
+        'gastrocnemius':          m(0.0302, 0.8461, 15, 4.15),
+        'sartorius':              m(0.0351, 0.4622, 60, 1.6),
     },
     'Knee.extension': {
-        // Calibration range: -140° to 0°.
-        'quads-vasti':    m(0.16, 1.0, -120, 0.25),
-        'rectus-femoris': m(0.167, 1.026, -180, 0.25),   // peak OUTSIDE range; declared peak inflated
+        // Spec ROM: -140° to 0°.
+        'quads-vasti':    m(0.1099, 0.6872, -120, 0.25),
+        'rectus-femoris': m(0.243, 1.4931, -180, 0.25),
     },
 
     // =========================================================================
@@ -1276,13 +1260,13 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // =========================================================================
 
     'Ankle.dorsiFlexion': {
-        // Calibration range: -50° to 20° (DF frame).
-        'tibialis-anterior': m(0.381, 1.0, 10, 1),
+        // Spec ROM: -50° to 20°.
+        'tibialis-anterior': m(0.381, 1, 10, 1),
     },
     'Ankle.plantarFlexion': {
-        // Calibration range: -20° to 50° (PF frame; neg = DF-stretched).
-        'gastrocnemius': m(0, 1.04, -30, 5),     // peak OUTSIDE range; slightly inflated
-        'soleus':        m(0.179, 1.0, 8, 5),
+        // Spec ROM: -20° to 50°.
+        'gastrocnemius': m(0, 1.6554, -30, 5),
+        'soleus':        m(0.1125, 0.6283, 8, 5),
     },
 
     // =========================================================================
