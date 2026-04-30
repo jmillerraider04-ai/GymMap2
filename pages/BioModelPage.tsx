@@ -2588,15 +2588,15 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
     // ========================================================================
     // BB OVERHEAD PRESS
     // ========================================================================
-    // Captured from a hand-built scene. Spine vertical (upright). Start =
-    // bar at shoulder height with elbows tucked under (~80° elbow flex,
-    // humerus abducted ~47° in the frontal plane). End = bar pressed
-    // overhead with humerus flexed/abducted ~145° and elbows nearly
-    // locked. Forearms tracked along a tilted plane (normal {0.6, 0.1, 1}
-    // mirrored on the other side) — that's the bar's pressing path
-    // angled slightly forward toward the head as it goes up. Femurs
+    // Captured from a hand-built scene. Spine vertical (upright). Femurs
     // pinned at the hip socket so the legs stay stationary throughout.
-    // Heel + toe foot pins keep the floor in place.
+    // Heel + toe foot pins keep the floor in place. Each forearm tracks a
+    // pressing-path plane (normal {0, 0.1, 1}) — bar moves vertically with
+    // a slight forward tilt as it travels up. Humerus pinned to the same
+    // tilted plane so elbow + shoulder are coupled along the bar path.
+    // Spine fixed at top + bottom (y=±30) keeps the torso rigid and
+    // upright. Start = arms tucked low (humerus abducted ~47° forward,
+    // elbow flexed ~125°). End = arms locked overhead.
     {
         id: 'bb_overhead_press',
         name: 'BB OVERHEAD PRESS',
@@ -2605,36 +2605,36 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             spine: { x: 0, y: -1, z: 0 },
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
-            lHumerus: { x: -0.7315956627918441, y: 0.4952044643770809, z: -0.46855130417615 },
-            lForearm: { x: 0, y: -0.35836794954530027, z: 0.9335804264972017 },
-            rHumerus: { x: 0.7315956627918441, y: 0.4952044643770809, z: -0.46855130417615 },
-            rForearm: { x: 0, y: -0.35836794954530027, z: 0.9335804264972017 },
-            lFemur: { x: 0, y: 0.9998714677114963, z: -0.016032718311577657 },
-            lTibia: { x: 0, y: 0.999072636443759, z: 0.04305655710012816 },
-            lFoot: { x: 0, y: 0.02575659673955875, z: -0.9996682438311201 },
-            rFemur: { x: 0, y: 0.9998714677114963, z: -0.016032718311577657 },
-            rTibia: { x: 0, y: 0.999072636443759, z: 0.04305655710012816 },
-            rFoot: { x: 0, y: 0.02575659673955875, z: -0.9996682438311201 },
+            lHumerus: { x: -0.7281821373850168, y: 0.6381620286364493, z: -0.25 },
+            lForearm: { x: 0, y: -0.587785252292473, z: 0.8090169943749475 },
+            rHumerus: { x: 0.7281821373850168, y: 0.6381620286364493, z: -0.25 },
+            rForearm: { x: 0, y: -0.587785252292473, z: 0.8090169943749475 },
+            lFemur: { x: 0, y: 1, z: 0 },
+            lTibia: { x: 0, y: 1, z: 0 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
+            rTibia: { x: 0, y: 1, z: 0 },
+            rFoot: { x: 0, y: 0, z: -1 },
         },
         endPosture: {
             spine: { x: 0, y: -1, z: 0 },
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
-            lHumerus: { x: -0.5464620088167519, y: -0.8106270027276601, z: -0.21038805899748778 },
-            lForearm: { x: 0, y: 0.9767278139287666, z: 0.21448258087297617 },
-            rHumerus: { x: 0.5464620088167523, y: -0.81062700272766, z: -0.21038805899748758 },
-            rForearm: { x: 0, y: 0.9767278139287666, z: 0.21448258087297617 },
-            lFemur: { x: 0, y: 0.9998660571028399, z: -0.016366668983654648 },
-            lTibia: { x: 0, y: 0.999053274691954, z: 0.043503497874113825 },
-            lFoot: { x: 0, y: 0.007930294168336705, z: -0.9999685547227991 },
-            rFemur: { x: 0, y: 0.9998660571028399, z: -0.016366668983654648 },
-            rTibia: { x: 0, y: 0.999053274691954, z: 0.043503497874113825 },
-            rFoot: { x: 0, y: 0.007930294168336705, z: -0.9999685547227991 },
+            lHumerus: { x: -0.4768924243019085, y: -0.8771577364781854, z: -0.056284287149390794 },
+            lForearm: { x: 0, y: 0.990856744242169, z: 0.1349181692353141 },
+            rHumerus: { x: 0.4768924243019083, y: -0.8771577364781854, z: -0.05628428714939083 },
+            rForearm: { x: 0, y: 0.990856744242169, z: 0.13491816923531416 },
+            lFemur: { x: 0, y: 0.999989576547268, z: 0.004565829258272133 },
+            lTibia: { x: 0, y: 1, z: 0 },
+            lFoot: { x: 0, y: -0.000007336247492707808, z: -0.9999999999730897 },
+            rFemur: { x: 0, y: 0.999989576547268, z: 0.00456582925827216 },
+            rTibia: { x: 0, y: 1, z: 0 },
+            rFoot: { x: 0, y: -0.000007336247492704681, z: -0.9999999999730897 },
         },
         startTwists: {
             spine: 0, pelvis: 0,
-            pelvisTx: 0, pelvisTy: -1.7423562415069478, pelvisTz: -0.47088942294926356,
-            lHumerus: 59.61602317069799, rHumerus: -59.61602317069799,
+            pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 75, rHumerus: -75,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
             lTibia: 0, rTibia: 0,
@@ -2642,8 +2642,8 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         },
         endTwists: {
             spine: 0, pelvis: 0,
-            pelvisTx: 0, pelvisTy: -1.729437592098109, pelvisTz: -0.44003880939445966,
-            lHumerus: -49.45550413873913, rHumerus: 49.45550413873919,
+            pelvisTx: 0, pelvisTy: -0.06874340274935214, pelvisTz: -0.425189627322031,
+            lHumerus: -48, rHumerus: 48,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
             lTibia: 0, rTibia: 0,
@@ -2655,44 +2655,44 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         ],
         constraints: {
             spine: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: -31.730557183065653, z: -0.4659980134084636 }, position: 1, physicsEnabled: false },
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 28.269442816934347, z: -0.4659980134084636 }, position: 0, physicsEnabled: false },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: -30, z: 0 }, physicsEnabled: false },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 30, z: 0 }, position: 0, physicsEnabled: false },
             ],
             rFoot: [
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: -20 }, directional: 'half-space' },
-                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: 20, y: 133, z: -20 } },
-                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 20, y: 133, z: -20 } },
                 { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0, directional: 'half-space' },
-                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
                 { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: -20 }, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 20, y: 133, z: -20 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 20, y: 133, z: -20 } },
             ],
             rForearm: [
-                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: 62.919824498785054, y: -49.36530234259302, z: -22.95042633731106 } },
-                { active: true, type: 'planar', normal: { x: 0.6, y: 0.1, z: 1 }, center: { x: 62.919824498785054, y: -49.36530234259302, z: -22.95042633731106 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 60.05169507318585, y: -40.78389140720491, z: -9.736907761001135 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 0.1, z: 1 }, center: { x: 60.05169507318585, y: -40.78389140720491, z: -9.736907761001135 }, physicsEnabled: false },
             ],
             rHumerus: [
-                { active: true, type: 'planar', normal: { x: 0.6, y: 0.1, z: 1 }, center: { x: 58.48507130050644, y: -10.667385070818803, z: -21 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 0, y: 0.1, z: 1 }, center: { x: 57.04001404494075, y: -1.920870739996225, z: -11 }, physicsEnabled: false },
             ],
             rFemur: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 82.26280939438354, z: -1.3123818702916292 }, physicsEnabled: false },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 84, z: 0 }, physicsEnabled: false },
             ],
             lFoot: [
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: -20 }, directional: 'half-space' },
-                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: -20, y: 133, z: -20 } },
-                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -20, y: 133, z: -20 } },
                 { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0, directional: 'half-space' },
-                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
                 { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: -20 }, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -20, y: 133, z: -20 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -20, y: 133, z: -20 } },
             ],
             lForearm: [
-                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: -62.919824498785054, y: -49.36530234259302, z: -22.95042633731106 } },
-                { active: true, type: 'planar', normal: { x: -0.6, y: 0.1, z: 1 }, center: { x: -62.919824498785054, y: -49.36530234259302, z: -22.95042633731106 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -60.05169507318585, y: -40.78389140720491, z: -9.736907761001135 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 0.1, z: 1 }, center: { x: -60.05169507318585, y: -40.78389140720491, z: -9.736907761001135 }, physicsEnabled: false },
             ],
             lHumerus: [
-                { active: true, type: 'planar', normal: { x: -0.6, y: 0.1, z: 1 }, center: { x: -58.48507130050644, y: -10.667385070818803, z: -21 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 0, y: 0.1, z: 1 }, center: { x: -57.04001404494075, y: -1.920870739996225, z: -11 }, physicsEnabled: false },
             ],
             lFemur: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 82.26280939438354, z: -1.3123818702916292 }, physicsEnabled: false },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 84, z: 0 }, physicsEnabled: false },
             ],
         },
     },
