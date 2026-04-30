@@ -1476,8 +1476,11 @@ const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
     // --- Knee hinge. Same as Elbow — limit is in slider space (0=straight, 160=full flex). ---
     'Knee.action.Extension': { min: 0, max: 140 },
 
-    // --- Ankle hinge. positiveAction = Dorsi Flexion. ---
-    'Ankle.action.Dorsi Flexion': { min: -50, max: 20 },
+    // --- Ankle hinge. positiveAction = Plantar Flexion. ---
+    // Plantar flexion ROM is much wider than dorsi (anatomical: ~50° vs
+    // ~20°), so labeling positive direction as Plantar matches the
+    // dominant ROM and reads naturally (max = 50 = plantar limit).
+    'Ankle.action.Plantar Flexion': { min: -20, max: 50 },
 };
 
 const normalize = (v: Vector3): Vector3 => {
@@ -4956,7 +4959,7 @@ const BioModelPage: React.FC = () => {
         { positiveAction: 'Extension', negativeAction: 'Flexion', axis: {x:1,y:0,z:0} },
     ],
     'Ankle': [
-        { positiveAction: 'Dorsi Flexion', negativeAction: 'Plantar Flexion', axis: {x:1,y:0,z:0} },
+        { positiveAction: 'Plantar Flexion', negativeAction: 'Dorsi Flexion', axis: {x:1,y:0,z:0} },
     ],
   };
 
@@ -5149,11 +5152,16 @@ const BioModelPage: React.FC = () => {
   ): number => {
       const rawAngle = getActionAngle(boneId, action, curPosture, curTwists);
       const isElbow = /Forearm/.test(boneId);
-      const isKneeOrAnkle = /Tibia|Foot/.test(boneId);
+      const isKnee = /Tibia/.test(boneId);
+      const isAnkle = /Foot/.test(boneId);
+      // Ankle has positiveAction = Plantar Flexion, and rawAngle+ = plantar
+      // physical → actionSign = +1 (raw and direction agree). Knee has
+      // positiveAction = Extension, but rawAngle+ = flexion → actionSign = -1.
       const actionSign = action.isBoneAxis ? 1 :
                          action.useWorldAxis ? -1 :
                          isElbow ? 1 :
-                         isKneeOrAnkle ? -1 :
+                         isAnkle ? 1 :
+                         isKnee ? -1 :
                          1;
       return rawAngle * actionSign * (isPositive ? 1 : -1);
   };
@@ -5254,8 +5262,12 @@ const BioModelPage: React.FC = () => {
   //   3. Fallback: 0–180.
   const getActionRange = (group: JointGroup, ax: ActionAxis, isPositive: boolean): { min: number; max: number } => {
       const isHinge = group === 'Knee' || group === 'Elbow' || group === 'Ankle';
+      // Ankle is a hinge but positiveAction = Plantar Flexion has rawAngle+
+      // matching its positive direction (unlike Knee/Elbow where rawAngle+
+      // is the negative-action direction). actionSign for Ankle = +1.
       const actionSign = ax.isBoneAxis ? 1 :
                          ax.useWorldAxis ? -1 :
+                         group === 'Ankle' ? 1 :
                          isHinge ? -1 : 1;
       const flip = actionSign * (isPositive ? 1 : -1);
 
@@ -6888,10 +6900,12 @@ const BioModelPage: React.FC = () => {
           //     action. actionSign = −1.
           //   • Twist (isBoneAxis): positive = ER = positive action.
           //     actionSign = +1.
-          //   • Hinge KNEE/ANKLE (atan2(z,y) on tibia | atan2(y,-z) on
-          //     foot): positive rawAngle = flexion for knee, plantar for
-          //     ankle. Both are NEGATIVE actions (positiveAction = Extension
-          //     / Dorsi Flexion). actionSign = −1.
+          //   • Hinge KNEE (atan2(z,y) on tibia): positive rawAngle =
+          //     flexion. positiveAction = Extension is the OPPOSITE
+          //     direction → actionSign = −1.
+          //   • Hinge ANKLE (atan2(y,-z) on foot): positive rawAngle =
+          //     plantar flexion. positiveAction = Plantar Flexion matches
+          //     the raw direction → actionSign = +1.
           //   • Hinge ELBOW: forearm rotates in OPPOSITE local-Z sense from
           //     tibia (forearm flexes forward → −Z; tibia flexes backward →
           //     +Z), so atan2(z,y) on the forearm gives NEGATIVE rawAngle
@@ -6906,11 +6920,13 @@ const BioModelPage: React.FC = () => {
           // Net: positive directionAngle = more of this section's action,
           // for every section type.
           const isElbow = /Forearm/.test(d.boneId);
-          const isKneeOrAnkle = /Tibia|Foot/.test(d.boneId);
+          const isKnee = /Tibia/.test(d.boneId);
+          const isAnkle = /Foot/.test(d.boneId);
           const actionSign = ax.isBoneAxis ? 1 :
                              ax.useWorldAxis ? -1 :
                              isElbow ? 1 :
-                             isKneeOrAnkle ? -1 :
+                             isAnkle ? 1 :
+                             isKnee ? -1 :
                              1;
           const directionAngle = rawAngle * actionSign * (isPositive ? 1 : -1);
 
