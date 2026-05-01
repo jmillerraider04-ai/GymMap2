@@ -1785,8 +1785,16 @@ const getAbsoluteRotation = (boneId: string, currentPosture: Posture, currentTwi
 // component body) is invoked from a useMemo that fires before the in-body
 // const declarations run, so these need to live outside the closure to
 // avoid a Temporal Dead Zone error.
-const SOLVER_TOL_SCALE = 0.0005;
-const SOLVER_MIN_TOL = 0.01;
+// Tightened 5× from previous values (TOL_SCALE 0.0005 → 0.0001;
+// MIN_TOL 0.01 → 0.002). The previous values let bones drift up to
+// ~3% of their length per constraint before the solver early-exited
+// (e.g., a 60-unit bone could be ~3 units off-target — visible as
+// "a few pixels" of constraint violation in playback). Small residual
+// violations also broke bilateral symmetry at intermediate frames in
+// timeline analysis, surfacing as spurious spine demands at any one
+// frame where left/right residuals didn't cancel.
+const SOLVER_TOL_SCALE = 0.0001;
+const SOLVER_MIN_TOL = 0.002;
 
 // --- HINGE BONE HELPERS ---
 // Hinge bones (forearm/tibia/foot) live on a 1-DOF arc in the parent's local
@@ -6401,7 +6409,12 @@ const BioModelPage: React.FC = () => {
 
       if (freeBones2D.length === 0 && freeBones1D.length === 0 && freeBonesHinge.length === 0 && freeBonesTwist.length === 0 && freeBonesPosTrans.length === 0) return null;
 
-      const MAX_ITERS = 150;
+      // Bumped 150 → 300: tighter SOLVER_MIN_TOL needs more iterations
+      // for the gradient-descent step + Armijo backtracking to actually
+      // reach convergence on multi-constraint scenes (e.g., the OHP preset
+      // with 22 active constraints where the previous 150-iter cap left
+      // residuals at the early-exit threshold).
+      const MAX_ITERS = 300;
       const EPS = 0.0015;          // tangent-coord finite-difference step
       const EPS_THETA = 0.0015;    // axis-locked angular finite-difference
       const ARMIJO_C1 = 0.1;       // sufficient-descent constant
