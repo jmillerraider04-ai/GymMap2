@@ -871,11 +871,11 @@ const DEFAULT_SECTION_SCALES: Record<string, number> = {
     'Scapula.protraction':           2.8,
     'Scapula.retraction':            3.1,
     // Shoulder.
-    'Shoulder.flexion':              2.3457,
-    'Shoulder.extension':            3.0113,
-    'Shoulder.abduction':            2.1272,
+    'Shoulder.flexion':              2.2936,
+    'Shoulder.extension':            3.0167,
+    'Shoulder.abduction':            2.3684,
     'Shoulder.adduction':            3.0314,
-    'Shoulder.horizontalAbduction':  2.8261,
+    'Shoulder.horizontalAbduction':  2.8018,
     'Shoulder.horizontalAdduction':  3.1645,
     'Shoulder.externalRotation':     2.7838,
     'Shoulder.internalRotation':     5.5471,
@@ -1082,36 +1082,42 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     // shape changes to fully resolve.
 
     'Shoulder.flexion': {
-        // Spec ROM: -60° to 180°.
-        'delt-front':        m(0.7796, 0.3342, 30, 1.15),
-        'pec-clavicular':    m(0, 0.7520, 37, 2),
-        'delt-side':         m(0.1782, 0.8908, 120, 2),
-        'traps-lower':       m(-0.1444, 0.9217, 140, 2.2),
-        'serratus-anterior': m(-0.1645, 0.9222, 140, 2.2),
+        // Spec ROM: -60° to 180°. delt-front mid-ROM contribution lifted
+        // ~30% by raising inverted-bell dip parameter (raw 0.439 → 0.57);
+        // peaks at -60° / 180° unchanged (raw base = 1.024). delt-side
+        // overall reduced 20% (target 0.6 → 0.48).
+        'delt-front':        m(0.7469, 0.4157, 30, 1.15),
+        'pec-clavicular':    m(0, 0.8066, 37, 2),
+        'delt-side':         m(0.14, 0.6998, 120, 2),
+        'traps-lower':       m(-0.1366, 0.8719, 140, 2.2),
+        'serratus-anterior': m(-0.1556, 0.8725, 140, 2.2),
         // Pec-sternal helps pull arm forward only at deep extension —
         // drops near 0 by +10° flex (steepness 6 narrow bell at -45°).
-        'pec-sternal':       m(0, 0.3690, -45, 6),
-        'biceps-brachii':    m(0.0948, 0.3240, 60, 1.6),
+        'pec-sternal':       m(0, 0.3853, -45, 6),
+        'biceps-brachii':    m(0.1005, 0.3436, 60, 1.6),
     },
     'Shoulder.extension': {
-        // Spec ROM: -180° to 60°. RESIDUAL: rhomboids overshoots target 50%
-        // (reaches ~88% — clamped to that level). Bell shape gives it more
-        // dominance than its 0.5 target ratio implies.
+        // Spec ROM: -180° to 60°. delt-rear and rhomboids bell bases
+        // raised (delt-rear 0.643 → 0.9, rhomboids 0.222 → 0.36) so each
+        // bell is much flatter across the ROM — less volatile activation.
+        // RESIDUAL: rhomboids still overshoots target 50% (reaches ~91%)
+        // because of bell-shape vs. share-distribution dynamics.
         'lats':         m(-1.66, 2.0, -67, 1.05),
         'teres-major':  m(-0.442, 2.0, -60, 1.7),
-        'delt-rear':    m(0.3215, 0.5, -20, 2.95),
-        'pec-sternal':  m(-0.0703, 0.5097, -169, 3.35),
+        'delt-rear':    m(0.45, 0.5, -20, 2.95),
+        'pec-sternal':  m(-0.0895, 0.6484, -169, 3.35),
         'triceps-long': m(-0.112, 1.6, -86, 2.6),
-        'rhomboids':    m(0.111, 0.25, -60, 1),
+        'rhomboids':    m(0.18, 0.25, -60, 1),
     },
     'Shoulder.abduction': {
-        // Spec ROM: 0° to 180°.
-        'delt-side':         m(0.2821, 0.7197, 72, 2.75),
-        'supraspinatus':     m(0.107, 0.5, 15, 2.2),
-        'delt-front':        m(0.1233, 0.9964, 180, 1.9),
-        'traps-lower':       m(-0.0792, 1.0798, 130, 3.2),
-        'serratus-anterior': m(-0.081, 1.0798, 130, 3.2),
-        'biceps-brachii':    m(-0.0441, 0.3268, 120, 2),
+        // Spec ROM: 0° to 180°. delt-front: peak 0.8 → 0.9 and base lifted
+        // 3× so contribution stays meaningful through low-abduction angles.
+        'delt-side':         m(0.2987, 0.7619, 72, 2.75),
+        'supraspinatus':     m(0.1175, 0.5492, 15, 2.2),
+        'delt-front':        m(0.2823, 0.8553, 180, 1.9),
+        'traps-lower':       m(-0.0603, 0.8227, 130, 3.2),
+        'serratus-anterior': m(-0.0617, 0.8227, 130, 3.2),
+        'biceps-brachii':    m(-0.0361, 0.2675, 120, 2),
     },
     'Shoulder.adduction': {
         // Spec ROM: -180° to 0°.
@@ -1132,13 +1138,14 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'biceps-brachii':    m(-0.0153, 0.4695, 60, 1.8),
     },
     'Shoulder.horizontalAbduction': {
-        // Spec ROM: -135° to 45°. RESIDUAL: rhomboids overshoots target 50%
-        // (clamps to 100%) — same shape-vs-target issue as in extension.
-        'delt-rear':     m(0.0546, 1.301, 15, 1.8),
+        // Spec ROM: -135° to 45°. lats max reduced 0.5 → 0.3 per spec.
+        // RESIDUAL: rhomboids overshoots target 50% (clamps to 100%) —
+        // bell-shape-vs-share-distribution issue, unchanged.
+        'delt-rear':     m(0.0564, 1.3425, 15, 1.8),
         'infraspinatus': m(-0.122, 2.0, 0, 2),
         'teres-minor':   m(-0.142, 2.0, 0, 2),
         'rhomboids':     m(0.0905, 0.25, 25, 2.5),
-        'lats':          m(-0.1, 1.0, 30, 2),
+        'lats':          m(-0.06, 0.6, 30, 2),
     },
     'Shoulder.internalRotation': {
         // Spec ROM: -90° to 90°.
