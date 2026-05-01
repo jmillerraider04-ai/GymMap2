@@ -2631,15 +2631,14 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
     // ========================================================================
     // BB OVERHEAD PRESS
     // ========================================================================
-    // Captured from a hand-built scene. Spine vertical (upright). Femurs
-    // pinned at the hip socket so the legs stay stationary throughout.
-    // Heel + toe foot pins keep the floor in place. Each forearm tracks a
-    // pressing-path plane (normal {0, 0.1, 1}) — bar moves vertically with
-    // a slight forward tilt as it travels up. Humerus pinned to the same
+    // Captured from current preview state. Spine vertical (upright). Femurs
+    // pinned at hip sockets, heel + toe foot pins keep floor stationary.
+    // Each forearm tracks a pressing-path plane (normal {0, 0.2, 1}) — bar
+    // moves vertically with slight forward tilt. Humerus pinned to the same
     // tilted plane so elbow + shoulder are coupled along the bar path.
-    // Spine fixed at top + bottom (y=±30) keeps the torso rigid and
-    // upright. Start = arms tucked low (humerus abducted ~47° forward,
-    // elbow flexed ~125°). End = arms locked overhead.
+    // Spine fixed at top + bottom (y=±30) keeps torso rigid and upright.
+    // Start = arms tucked low (humerus abducted ~50° forward, elbow flexed
+    // deeply). End = arms locked overhead.
     {
         id: 'bb_overhead_press',
         name: 'BB OVERHEAD PRESS',
@@ -2648,10 +2647,10 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             spine: { x: 0, y: -1, z: 0 },
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
-            lHumerus: { x: -0.7281821373850168, y: 0.6381620286364493, z: -0.25 },
-            lForearm: { x: 0, y: -0.587785252292473, z: 0.8090169943749475 },
-            rHumerus: { x: 0.7281821373850168, y: 0.6381620286364493, z: -0.25 },
-            rForearm: { x: 0, y: -0.587785252292473, z: 0.8090169943749475 },
+            lHumerus: { x: -0.747931030541106, y: 0.4365766525522397, z: -0.5 },
+            lForearm: { x: 0, y: -0.29237170472273666, z: 0.9563047559630355 },
+            rHumerus: { x: 0.747931030541106, y: 0.4365766525522397, z: -0.5 },
+            rForearm: { x: 0, y: -0.29237170472273666, z: 0.9563047559630355 },
             lFemur: { x: 0, y: 1, z: 0 },
             lTibia: { x: 0, y: 1, z: 0 },
             lFoot: { x: 0, y: 0, z: -1 },
@@ -2663,21 +2662,21 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             spine: { x: 0, y: -1, z: 0 },
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
-            lHumerus: { x: -0.4768924243019085, y: -0.8771577364781854, z: -0.056284287149390794 },
-            lForearm: { x: 0, y: 0.990856744242169, z: 0.1349181692353141 },
-            rHumerus: { x: 0.4768924243019083, y: -0.8771577364781854, z: -0.05628428714939083 },
-            rForearm: { x: 0, y: 0.990856744242169, z: 0.13491816923531416 },
-            lFemur: { x: 0, y: 0.999989576547268, z: 0.004565829258272133 },
+            lHumerus: { x: -0.597599102125478, y: -0.7694482245835919, z: -0.22544343597448357 },
+            lForearm: { x: 0, y: 0.9380262519854508, z: 0.34656420846089653 },
+            rHumerus: { x: 0.5975991021254786, y: -0.7694482245835916, z: -0.225443435974482 },
+            rForearm: { x: 0, y: 0.9380262519854508, z: 0.3465642084608963 },
+            lFemur: { x: 0, y: 0.99999025731741, z: 0.00441421230348835 },
             lTibia: { x: 0, y: 1, z: 0 },
-            lFoot: { x: 0, y: -0.000007336247492707808, z: -0.9999999999730897 },
-            rFemur: { x: 0, y: 0.999989576547268, z: 0.00456582925827216 },
+            lFoot: { x: 0, y: -0.00031255621549564674, z: -0.9999999511543048 },
+            rFemur: { x: 0, y: 0.99999025731741, z: 0.0044142123034882986 },
             rTibia: { x: 0, y: 1, z: 0 },
-            rFoot: { x: 0, y: -0.000007336247492704681, z: -0.9999999999730897 },
+            rFoot: { x: 0, y: -0.0003125562154956851, z: -0.9999999511543048 },
         },
         startTwists: {
             spine: 0, pelvis: 0,
             pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
-            lHumerus: 75, rHumerus: -75,
+            lHumerus: 63, rHumerus: -63,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
             lTibia: 0, rTibia: 0,
@@ -2685,8 +2684,8 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         },
         endTwists: {
             spine: 0, pelvis: 0,
-            pelvisTx: 0, pelvisTy: -0.06874340274935214, pelvisTz: -0.425189627322031,
-            lHumerus: -48, rHumerus: 48,
+            pelvisTx: 0, pelvisTy: -0.08548262318749959, pelvisTz: -0.40813631325005023,
+            lHumerus: -9, rHumerus: 9,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
             lTibia: 0, rTibia: 0,
@@ -2710,11 +2709,11 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
                 { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 20, y: 133, z: -20 } },
             ],
             rForearm: [
-                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 60.05169507318585, y: -40.78389140720491, z: -9.736907761001135 } },
-                { active: true, type: 'planar', normal: { x: 0, y: 0.1, z: 1 }, center: { x: 60.05169507318585, y: -40.78389140720491, z: -9.736907761001135 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 65.26382327369274, y: -49.089084175284526, z: -21.633578301457874 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 0.2, z: 1 }, center: { x: 65.26382327369274, y: -49.089084175284526, z: -21.633578301457874 }, physicsEnabled: false },
             ],
             rHumerus: [
-                { active: true, type: 'planar', normal: { x: 0, y: 0.1, z: 1 }, center: { x: 57.04001404494075, y: -1.920870739996225, z: -11 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 0, y: 0.2, z: 1 }, center: { x: 57.90896534380867, y: -10.79062728770145, z: -22 }, physicsEnabled: false },
             ],
             rFemur: [
                 { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 84, z: 0 }, physicsEnabled: false },
@@ -2728,11 +2727,11 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
                 { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -20, y: 133, z: -20 } },
             ],
             lForearm: [
-                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -60.05169507318585, y: -40.78389140720491, z: -9.736907761001135 } },
-                { active: true, type: 'planar', normal: { x: 0, y: 0.1, z: 1 }, center: { x: -60.05169507318585, y: -40.78389140720491, z: -9.736907761001135 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -65.26382327369274, y: -49.089084175284526, z: -21.633578301457874 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 0.2, z: 1 }, center: { x: -65.26382327369274, y: -49.089084175284526, z: -21.633578301457874 }, physicsEnabled: false },
             ],
             lHumerus: [
-                { active: true, type: 'planar', normal: { x: 0, y: 0.1, z: 1 }, center: { x: -57.04001404494075, y: -1.920870739996225, z: -11 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 0, y: 0.2, z: 1 }, center: { x: -57.90896534380867, y: -10.79062728770145, z: -22 }, physicsEnabled: false },
             ],
             lFemur: [
                 { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 84, z: 0 }, physicsEnabled: false },
