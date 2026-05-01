@@ -873,7 +873,7 @@ const DEFAULT_SECTION_SCALES: Record<string, number> = {
     // Shoulder.
     'Shoulder.flexion':              2.2936,
     'Shoulder.extension':            3.0167,
-    'Shoulder.abduction':            2.3684,
+    'Shoulder.abduction':            2.4350,
     'Shoulder.adduction':            3.0314,
     'Shoulder.horizontalAbduction':  2.8018,
     'Shoulder.horizontalAdduction':  3.1645,
@@ -1023,28 +1023,27 @@ const DEFAULT_MODIFICATIONS: CrossJointModification[] = [
         ],
     },
     {
-        id: 'front-delt-share-at-shoulder-er',
-        name: 'Anterior deltoid share of abduction at shoulder ER',
+        id: 'front-delt-share-at-shoulder-ir',
+        name: 'Anterior deltoid share of abduction at shoulder IR',
         sourceJoint: 'Shoulder',
         sourceActionKey: 'externalRotation',
-        // ER range is -90° (full internal rotation) to +90° (full
-        // external rotation). Effect is 0 through IR and neutral, then
-        // ramps up from neutral to 100% at full ER. Rationale: as the
-        // humerus externally rotates, the anterior deltoid's line of
-        // pull migrates outward and aligns more with the abduction
-        // moment axis, so its mechanical share of abduction grows at
-        // the expense of middle/rear delt and supraspinatus.
-        leftY: 0,
+        // ER source range is -90° (full IR) to +90° (full ER). Curve
+        // peaks at the LEFT (full IR) and falls to 0 by neutral, staying
+        // 0 through the ER side. Rationale: as the humerus internally
+        // rotates, the anterior deltoid's line of pull rolls inward and
+        // becomes less aligned with the abduction moment axis, so its
+        // mechanical share of abduction shrinks; middle/rear delt and
+        // supraspinatus pick up the slack.
+        leftY: 100,
         midX: 0,
         midY: 0,
-        rightY: 100,
+        rightY: 0,
         targets: [
-            // Front delt's share of shoulder abduction increases up to
-            // 50% at full ER. 'relative' means middle delt, rear delt,
-            // and supraspinatus pick up a smaller share as a consequence
-            // (the joint's total abduction capacity is unchanged — this
-            // is a redistribution, not a capacity shift).
-            { kind: 'muscle', jointGroup: 'Shoulder', actionKey: 'abduction', muscleId: 'delt-front', maxChange: 50, direction: 'increase', muscleMode: 'relative' },
+            // Front delt's share of shoulder abduction reduces up to 50%
+            // at full IR. 'relative' means middle delt, rear delt, and
+            // supraspinatus pick up the slack (joint's total abduction
+            // capacity unchanged — pure redistribution).
+            { kind: 'muscle', jointGroup: 'Shoulder', actionKey: 'abduction', muscleId: 'delt-front', maxChange: 50, direction: 'reduce', muscleMode: 'relative' },
         ],
     },
 ];
@@ -1110,14 +1109,15 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'rhomboids':    m(0.18, 0.25, -60, 1),
     },
     'Shoulder.abduction': {
-        // Spec ROM: 0° to 180°. delt-front: peak 0.8 → 0.9 and base lifted
-        // 3× so contribution stays meaningful through low-abduction angles.
-        'delt-side':         m(0.2987, 0.7619, 72, 2.75),
-        'supraspinatus':     m(0.1175, 0.5492, 15, 2.2),
-        'delt-front':        m(0.2823, 0.8553, 180, 1.9),
-        'traps-lower':       m(-0.0603, 0.8227, 130, 3.2),
-        'serratus-anterior': m(-0.0617, 0.8227, 130, 3.2),
-        'biceps-brachii':    m(-0.0361, 0.2675, 120, 2),
+        // Spec ROM: 0° to 180°. delt-front now co-equal primary at 100%
+        // (target raised 0.9 → 1.0); base lifted ~3× so contribution
+        // stays meaningful through low-abduction angles.
+        'delt-side':         m(0.2971, 0.7579, 72, 2.75),
+        'supraspinatus':     m(0.1175, 0.549, 15, 2.2),
+        'delt-front':        m(0.3198, 0.969, 180, 1.9),
+        'traps-lower':       m(-0.0602, 0.8206, 130, 3.2),
+        'serratus-anterior': m(-0.0615, 0.8206, 130, 3.2),
+        'biceps-brachii':    m(-0.0358, 0.2652, 120, 2),
     },
     'Shoulder.adduction': {
         // Spec ROM: -180° to 0°.
