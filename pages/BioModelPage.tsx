@@ -2639,34 +2639,104 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
     // ========================================================================
     // BB OVERHEAD PRESS
     // ========================================================================
-    // Captured from current preview state. Spine vertical (upright). Femurs
-    // pinned at hip sockets, heel + toe foot pins keep floor stationary.
-    // Each forearm tracks a pressing-path plane (normal {0, 0.2, 1}) — bar
-    // moves vertically with slight forward tilt. Humerus pinned to the same
-    // tilted plane so elbow + shoulder are coupled along the bar path.
-    // Spine fixed at top + bottom (y=±30) keeps torso rigid and upright.
-    // Start = arms tucked low (humerus abducted ~50° forward, elbow flexed
-    // deeply). End = arms locked overhead.
+    // Standing barbell overhead press with proper layback. The lifter starts
+    // with the bar in the front rack and a layback that clears the chin
+    // path; the bar travels close to the face as the chest moves backward
+    // out of the way. As the bar passes the head, the lifter "punches
+    // through" to lockout — head between the arms, bar over the mid-foot.
+    //
+    // Layback distribution — the lean is shared across multiple joints:
+    //   - Thoracic / spinal extension: spine direction tilts ~10° back
+    //     (chest moves back relative to the pelvis). Loads the spinal
+    //     erectors / antagonist abdominals as bracing.
+    //   - Hip extension: pelvis translates ~3 units forward (pelvisTz =
+    //     -3) — "hip drive" that counterbalances the chest going back so
+    //     COM stays over the feet. The femur tilts a few degrees back to
+    //     keep the knee over the ankle, which registers as hip extension
+    //     in pelvis-frame and loads the glutes / hamstrings.
+    //   - Knee + ankle: ankle is held flat by exercise-specific transverse
+    //     guide pins on heel and toe (real OHP form keeps both in contact
+    //     with the floor — no heel-rocking, no toe-rocking — even though
+    //     the underlying physics floor would allow either). The femur
+    //     knee pin is gone, so the femur direction and tibia hinge are
+    //     free DOFs the solver can use, but with both ends of the foot
+    //     transversely locked the ankle joint angle is effectively at
+    //     90°. Ankle dorsiflexion demand reflects the bar's forward
+    //     moment arm to the foot rather than any joint motion — TA
+    //     resists it isometrically.
+    //
+    // Bar / arm guide constraints (all guide-only, no physics demand):
+    //   - Forearm path plane (normal {0, 0.2, 1}) — bar tip stays on a
+    //     slightly-tilted vertical plane, producing the typical OHP
+    //     J-curve (bar slightly forward at the bottom, drifting back as
+    //     it rises overhead). Without this the slerped arm direction +
+    //     linearly-interpolated humerus twist can produce ugly mid-rep
+    //     forearm orientations.
+    //   - Humerus path plane (same normal, different center) — elbow tip
+    //     rides a parallel plane so the elbow trajectory stays coordinated
+    //     with the bar.
+    //   - Lateral forearm pins (physics, normal {±1, 0, 0}) — bar is rigid
+    //     at hand-width 65 per side. Spine tilt around the world X axis
+    //     leaves the X coordinate invariant, so this stays satisfied
+    //     throughout the rep.
+    //
+    // Physics-bearing constraints:
+    //   - Foot constraint complex (heel + toe each side) modeling a real
+    //     floor:
+    //       · X (frontal) hard pin at each end — friction prevents
+    //         lateral slip
+    //       · Z (sagittal) hard pin at each end — friction prevents
+    //         forward / backward slip
+    //       · Y (vertical) HALF-SPACE at each end — floor pushes up only,
+    //         feet can't penetrate. (Half-spaces dodge the multi-pin trap
+    //         from CLAUDE.md note 9: Phase B can't concentrate Y-reaction
+    //         arbitrarily on one pin if the other can become slack.)
+    //   - Lateral forearm pins — see above.
+    //
+    // Guide-only constraints (kinematic but no demand):
+    //   - Forearm + humerus path planes — see above.
+    //   - Transverse Y pins at heel and toe — kinematic flat-foot for OHP
+    //     form. The physics floor (Y half-spaces) would allow heel or toe
+    //     to lift if it cheapened total demand, but for this exercise the
+    //     lifter wouldn't actually do that — these guides enforce form.
+    //   - (No femur knee pin — leg chain is free above the foot, but with
+    //     the foot fully transversely locked the ankle effectively can't
+    //     bend. The free leg DOFs still let pelvis Tz / hip drive operate
+    //     without fighting an over-constrained system.)
     {
         id: 'bb_overhead_press',
         name: 'BB OVERHEAD PRESS',
         category: 'Push',
         startPosture: {
-            spine: { x: 0, y: -1, z: 0 },
+            // 10° backward thoracic-extension layback. (0, -cos 10°, sin 10°)
+            // — spine bone points up-and-slightly-back from pelvis to neck
+            // base.
+            spine: { x: 0, y: -0.984807753012208, z: 0.17364817766693 },
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
+            // Humerus in spineFrame-local — same body-local arm pose as a
+            // standard OHP rack. Spine tilt rotates the spineFrame, so the
+            // arms automatically rotate backward with the chest.
             lHumerus: { x: -0.747931030541106, y: 0.4365766525522397, z: -0.5 },
             lForearm: { x: 0, y: -0.29237170472273666, z: 0.9563047559630355 },
             rHumerus: { x: 0.747931030541106, y: 0.4365766525522397, z: -0.5 },
             rForearm: { x: 0, y: -0.29237170472273666, z: 0.9563047559630355 },
-            lFemur: { x: 0, y: 1, z: 0 },
+            // Femur tilts a hair back (z = +0.0556) so that with the pelvis
+            // shifted 3 units forward (pelvisTz = -3), the knee lands
+            // exactly at (±20, 84, 0) — over the ankle. (Geometry: hip at
+            // (±20, 30.0834, -3) + 54·(0, 0.99846, 0.05556) = (±20, 84, 0).)
+            // In pelvis-frame this reads as a few degrees of hip extension,
+            // which is the correct loading for hip drive.
+            lFemur: { x: 0, y: 0.99846, z: 0.05556 },
             lTibia: { x: 0, y: 1, z: 0 },
             lFoot: { x: 0, y: 0, z: -1 },
-            rFemur: { x: 0, y: 1, z: 0 },
+            rFemur: { x: 0, y: 0.99846, z: 0.05556 },
             rTibia: { x: 0, y: 1, z: 0 },
             rFoot: { x: 0, y: 0, z: -1 },
         },
         endPosture: {
+            // Spine upright at lockout — lifter has punched through, head
+            // between arms, bar over the mid-foot.
             spine: { x: 0, y: -1, z: 0 },
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
@@ -2674,16 +2744,20 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             lForearm: { x: 0, y: 0.9380262519854508, z: 0.34656420846089653 },
             rHumerus: { x: 0.5975991021254786, y: -0.7694482245835916, z: -0.225443435974482 },
             rForearm: { x: 0, y: 0.9380262519854508, z: 0.3465642084608963 },
-            lFemur: { x: 0, y: 0.99999025731741, z: 0.00441421230348835 },
+            lFemur: { x: 0, y: 1, z: 0 },
             lTibia: { x: 0, y: 1, z: 0 },
-            lFoot: { x: 0, y: -0.00031255621549564674, z: -0.9999999511543048 },
-            rFemur: { x: 0, y: 0.99999025731741, z: 0.0044142123034882986 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 1, z: 0 },
             rTibia: { x: 0, y: 1, z: 0 },
-            rFoot: { x: 0, y: -0.0003125562154956851, z: -0.9999999511543048 },
+            rFoot: { x: 0, y: 0, z: -1 },
         },
         startTwists: {
             spine: 0, pelvis: 0,
-            pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            // Pelvis 3 units forward (hip drive) and 0.0834 down — the Y
+            // offset is the geometric correction that makes the femur a
+            // unit vector with the knee at (±20, 84, 0). Both interpolate
+            // linearly to 0 at lockout.
+            pelvisTx: 0, pelvisTy: 0.0834, pelvisTz: -3,
             lHumerus: 63, rHumerus: -63,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
@@ -2692,7 +2766,7 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         },
         endTwists: {
             spine: 0, pelvis: 0,
-            pelvisTx: 0, pelvisTy: -0.08548262318749959, pelvisTz: -0.40813631325005023,
+            pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
             lHumerus: -9, rHumerus: 9,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
@@ -2704,17 +2778,20 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             { name: 'Force', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
         ],
         constraints: {
-            spine: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: -30, z: 0 }, physicsEnabled: false },
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 30, z: 0 }, position: 0, physicsEnabled: false },
-            ],
             rFoot: [
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0, directional: 'half-space' },
+                // Heel (foot bone start, position 0): X + Z friction pins,
+                // Y floor half-space (heel can't penetrate), and an
+                // exercise-specific transverse guide pin (heel can't lift
+                // either — flat-footed OHP form).
                 { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
                 { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: -20 }, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0, physicsEnabled: false },
+                // Toe (foot bone end): same pattern.
                 { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 20, y: 133, z: -20 } },
                 { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 20, y: 133, z: -20 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: -20 }, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: -20 }, physicsEnabled: false },
             ],
             rForearm: [
                 { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 65.26382327369274, y: -49.089084175284526, z: -21.633578301457874 } },
@@ -2723,16 +2800,15 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             rHumerus: [
                 { active: true, type: 'planar', normal: { x: 0, y: 0.2, z: 1 }, center: { x: 57.90896534380867, y: -10.79062728770145, z: -22 }, physicsEnabled: false },
             ],
-            rFemur: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 20, y: 84, z: 0 }, physicsEnabled: false },
-            ],
             lFoot: [
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0, directional: 'half-space' },
                 { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
                 { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: -20 }, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0, physicsEnabled: false },
                 { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -20, y: 133, z: -20 } },
                 { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -20, y: 133, z: -20 } },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: -20 }, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: -20 }, physicsEnabled: false },
             ],
             lForearm: [
                 { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -65.26382327369274, y: -49.089084175284526, z: -21.633578301457874 } },
@@ -2740,9 +2816,6 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             ],
             lHumerus: [
                 { active: true, type: 'planar', normal: { x: 0, y: 0.2, z: 1 }, center: { x: -57.90896534380867, y: -10.79062728770145, z: -22 }, physicsEnabled: false },
-            ],
-            lFemur: [
-                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -20, y: 84, z: 0 }, physicsEnabled: false },
             ],
         },
     },
@@ -9316,6 +9389,9 @@ const BioModelPage: React.FC = () => {
                                                                 {pts.map((p, i) => (
                                                                     <circle key={i} cx={PAD + p.t * plotW} cy={PAD + plotH - (p.multiplier / maxM) * plotH} r="3" fill="#f97316" stroke="white" strokeWidth="1" />
                                                                 ))}
+                                                                {/* Current ROM position indicator */}
+                                                                <line x1={PAD + currentRomT * plotW} x2={PAD + currentRomT * plotW} y1={PAD} y2={PAD + plotH} stroke="#0d9488" strokeWidth="1" opacity="0.85" />
+                                                                <circle cx={PAD + currentRomT * plotW} cy={PAD} r="2" fill="#0d9488" />
                                                                 <text x={PAD} y={H - 1} fontSize="7" fill="#9ca3af">start</text>
                                                                 <text x={PAD + plotW} y={H - 1} textAnchor="end" fontSize="7" fill="#9ca3af">end</text>
                                                                 <text x={PAD} y={PAD + 6} fontSize="7" fill="#9ca3af">{maxM.toFixed(1)}×</text>
@@ -9835,6 +9911,9 @@ const BioModelPage: React.FC = () => {
                                               <path d={linePath} fill="none" stroke={color} strokeWidth="1.75" strokeLinejoin="round" strokeLinecap="round" />
                                               <line x1={peakX} x2={peakX} y1={PAD_T} y2={PAD_T + plotH} stroke={color} strokeWidth="1" strokeDasharray="2 2" opacity="0.5" />
                                               <circle cx={peakX} cy={peakY} r="2.5" fill={color} stroke="white" strokeWidth="1" />
+                                              {/* Current ROM position indicator */}
+                                              <line x1={tx(currentRomT)} x2={tx(currentRomT)} y1={PAD_T} y2={PAD_T + plotH} stroke="#0d9488" strokeWidth="1" opacity="0.85" />
+                                              <circle cx={tx(currentRomT)} cy={PAD_T} r="2.5" fill="#0d9488" stroke="white" strokeWidth="0.75" />
                                           </svg>
                                           <p className="text-[9px] text-gray-400 font-mono mt-1 text-right">raw peak: {rawPeakLabel}</p>
                                       </div>
@@ -9918,6 +9997,14 @@ const BioModelPage: React.FC = () => {
                                       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ display: 'block', height: `${height}px` }} preserveAspectRatio="none">
                                           <path d={areaD} fill={fillColor} />
                                           <path d={pathD} fill="none" stroke={color} strokeWidth="1.25" strokeLinejoin="round" />
+                                          {/* Current ROM position indicator */}
+                                          <line
+                                              x1={PAD + currentRomT * plotW}
+                                              x2={PAD + currentRomT * plotW}
+                                              y1={PAD}
+                                              y2={PAD + plotH}
+                                              stroke="#0d9488" strokeWidth="0.75" opacity="0.85"
+                                          />
                                       </svg>
                                   );
                               };
@@ -10074,6 +10161,14 @@ const BioModelPage: React.FC = () => {
                                       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ display: 'block', height: `${height}px` }} preserveAspectRatio="none">
                                           <path d={areaD} fill={fillColor} />
                                           <path d={pathD} fill="none" stroke={color} strokeWidth="1.25" strokeLinejoin="round" />
+                                          {/* Current ROM position indicator */}
+                                          <line
+                                              x1={PAD + currentRomT * plotW}
+                                              x2={PAD + currentRomT * plotW}
+                                              y1={PAD}
+                                              y2={PAD + plotH}
+                                              stroke="#0d9488" strokeWidth="0.75" opacity="0.85"
+                                          />
                                       </svg>
                                   );
                               };
