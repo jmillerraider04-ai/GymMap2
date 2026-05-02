@@ -1028,14 +1028,16 @@ const DEFAULT_MODIFICATIONS: CrossJointModification[] = [
         sourceJoint: 'Shoulder',
         sourceActionKey: 'externalRotation',
         // ER source range is -90° (full IR) to +90° (full ER). Curve
-        // peaks at the LEFT (full IR) and falls to 0 by neutral, staying
-        // 0 through the ER side. Rationale: as the humerus internally
-        // rotates, the anterior deltoid's line of pull rolls inward and
-        // becomes less aligned with the abduction moment axis, so its
-        // mechanical share of abduction shrinks; middle/rear delt and
-        // supraspinatus pick up the slack.
+        // peaks at the LEFT (full IR), drops through the midpoint at
+        // -10° (slight IR — front delt is already losing alignment
+        // before neutral), and stays 0 through neutral and the ER side.
+        // Rationale: as the humerus internally rotates, the anterior
+        // deltoid's line of pull rolls inward and becomes less aligned
+        // with the abduction moment axis, so its mechanical share of
+        // abduction shrinks; middle/rear delt and supraspinatus pick up
+        // the slack.
         leftY: 100,
-        midX: 0,
+        midX: -10,
         midY: 0,
         rightY: 0,
         targets: [
@@ -1500,10 +1502,11 @@ const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
     // --- Knee hinge. Same as Elbow — limit is in slider space (0=straight, 160=full flex). ---
     'Knee.action.Extension': { min: 0, max: 140 },
 
-    // --- Ankle hinge. positiveAction = Plantar Flexion. ---
-    // Symmetric ±50° ROM (per user request — generous dorsi range to
-    // accommodate setups where the foot needs to dorsiflex deeply).
-    'Ankle.action.Plantar Flexion': { min: -50, max: 50 },
+    // --- Ankle hinge. positiveAction = Dorsi Flexion. ---
+    // Symmetric ±50° ROM. Limit table is keyed by positiveAction; after the
+    // swap (so labels follow the muscle-working convention used by every
+    // other joint) the key reads "Dorsi Flexion."
+    'Ankle.action.Dorsi Flexion': { min: -50, max: 50 },
 };
 
 const normalize = (v: Vector3): Vector3 => {
@@ -2649,116 +2652,94 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
     //   - Thoracic / spinal extension: spine direction tilts ~10° back
     //     (chest moves back relative to the pelvis). Loads the spinal
     //     erectors / antagonist abdominals as bracing.
-    //   - Hip extension: pelvis translates ~3 units forward (pelvisTz =
-    //     -3) — "hip drive" that counterbalances the chest going back so
-    //     COM stays over the feet. The femur tilts a few degrees back to
+    //   - Hip extension: pelvis translates ~7.5 forward at start (pelvisTz
+    //     = -7.5) — "hip drive" that counterbalances the chest going back
+    //     so COM stays over the feet. The femur tilts a few degrees back to
     //     keep the knee over the ankle, which registers as hip extension
-    //     in pelvis-frame and loads the glutes / hamstrings.
-    //   - Knee + ankle: ankle is held flat by exercise-specific transverse
-    //     guide pins on heel and toe (real OHP form keeps both in contact
-    //     with the floor — no heel-rocking, no toe-rocking — even though
-    //     the underlying physics floor would allow either). The femur
-    //     knee pin is gone, so the femur direction and tibia hinge are
-    //     free DOFs the solver can use, but with both ends of the foot
-    //     transversely locked the ankle joint angle is effectively at
-    //     90°. Ankle dorsiflexion demand reflects the bar's forward
-    //     moment arm to the foot rather than any joint motion — TA
-    //     resists it isometrically.
+    //     in pelvis-frame and loads the glutes / hamstrings. Pelvis
+    //     translation interpolates back toward 0 by lockout.
+    //   - Ankle: a few degrees of dorsi flex emerges naturally from the
+    //     arc-based Ground constraints — the foot can pivot around either
+    //     contact point as the load demands, rather than being locked at
+    //     90° by hard X+Z pins.
     //
     // Bar / arm guide constraints (all guide-only, no physics demand):
     //   - Forearm path plane (normal {0, 0.2, 1}) — bar tip stays on a
     //     slightly-tilted vertical plane, producing the typical OHP
-    //     J-curve (bar slightly forward at the bottom, drifting back as
-    //     it rises overhead). Without this the slerped arm direction +
-    //     linearly-interpolated humerus twist can produce ugly mid-rep
-    //     forearm orientations.
+    //     J-curve. Without this the slerped arm direction + linearly-
+    //     interpolated humerus twist can produce ugly mid-rep forearm
+    //     orientations.
     //   - Humerus path plane (same normal, different center) — elbow tip
     //     rides a parallel plane so the elbow trajectory stays coordinated
     //     with the bar.
     //   - Lateral forearm pins (physics, normal {±1, 0, 0}) — bar is rigid
-    //     at hand-width 65 per side. Spine tilt around the world X axis
-    //     leaves the X coordinate invariant, so this stays satisfied
-    //     throughout the rep.
+    //     at hand-width per side.
     //
     // Physics-bearing constraints:
-    //   - Foot constraint complex (heel + toe each side) modeling a real
-    //     floor:
-    //       · X (frontal) hard pin at each end — friction prevents
-    //         lateral slip
-    //       · Z (sagittal) hard pin at each end — friction prevents
-    //         forward / backward slip
-    //       · Y (vertical) HALF-SPACE at each end — floor pushes up only,
-    //         feet can't penetrate. (Half-spaces dodge the multi-pin trap
-    //         from CLAUDE.md note 9: Phase B can't concentrate Y-reaction
-    //         arbitrarily on one pin if the other can become slack.)
+    //   - Ground complex per foot (4 constraints): heel arc pivoting on
+    //     toe + Y half-space at heel; toe arc pivoting on heel + Y half-
+    //     space at toe. Each arc gives lateral X friction (axial
+    //     component) plus the radial component which is redundant with
+    //     bone rigidity. Together they allow plantar/dorsi flex (rotation
+    //     around either contact) and block translation in any direction —
+    //     equivalent to ideal foot-floor friction without over-constraining
+    //     the ankle hinge.
     //   - Lateral forearm pins — see above.
     //
     // Guide-only constraints (kinematic but no demand):
     //   - Forearm + humerus path planes — see above.
-    //   - Transverse Y pins at heel and toe — kinematic flat-foot for OHP
-    //     form. The physics floor (Y half-spaces) would allow heel or toe
-    //     to lift if it cheapened total demand, but for this exercise the
-    //     lifter wouldn't actually do that — these guides enforce form.
-    //   - (No femur knee pin — leg chain is free above the foot, but with
-    //     the foot fully transversely locked the ankle effectively can't
-    //     bend. The free leg DOFs still let pelvis Tz / hip drive operate
-    //     without fighting an over-constrained system.)
     {
         id: 'bb_overhead_press',
         name: 'BB OVERHEAD PRESS',
         category: 'Push',
         startPosture: {
             // 10° backward thoracic-extension layback. (0, -cos 10°, sin 10°)
-            // — spine bone points up-and-slightly-back from pelvis to neck
-            // base.
-            spine: { x: 0, y: -0.984807753012208, z: 0.17364817766693 },
+            // — spine points up-and-slightly-back from pelvis to neck base.
+            spine: { x: 0, y: -0.9848077530122081, z: 0.17364817766693003 },
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
-            // Humerus in spineFrame-local — same body-local arm pose as a
-            // standard OHP rack. Spine tilt rotates the spineFrame, so the
-            // arms automatically rotate backward with the chest.
-            lHumerus: { x: -0.747931030541106, y: 0.4365766525522397, z: -0.5 },
-            lForearm: { x: 0, y: -0.29237170472273666, z: 0.9563047559630355 },
-            rHumerus: { x: 0.747931030541106, y: 0.4365766525522397, z: -0.5 },
-            rForearm: { x: 0, y: -0.29237170472273666, z: 0.9563047559630355 },
-            // Femur tilts a hair back (z = +0.0556) so that with the pelvis
-            // shifted 3 units forward (pelvisTz = -3), the knee lands
-            // exactly at (±20, 84, 0) — over the ankle. (Geometry: hip at
-            // (±20, 30.0834, -3) + 54·(0, 0.99846, 0.05556) = (±20, 84, 0).)
-            // In pelvis-frame this reads as a few degrees of hip extension,
-            // which is the correct loading for hip drive.
-            lFemur: { x: 0, y: 0.99846, z: 0.05556 },
-            lTibia: { x: 0, y: 1, z: 0 },
-            lFoot: { x: 0, y: 0, z: -1 },
-            rFemur: { x: 0, y: 0.99846, z: 0.05556 },
-            rTibia: { x: 0, y: 1, z: 0 },
-            rFoot: { x: 0, y: 0, z: -1 },
+            // Humerus in spineFrame-local — body-local front-rack arm pose.
+            // Spine layback rotates the spineFrame, so arms automatically
+            // rotate backward with the chest.
+            lHumerus: { x: -0.7420989707234318, y: 0.46662365282492985, z: -0.48119796786306407 },
+            lForearm: { x: 0, y: -0.2276220977279885, z: 0.9737495471762285 },
+            rHumerus: { x: 0.7420989707234318, y: 0.46662365282492985, z: -0.48119796786306407 },
+            rForearm: { x: 0, y: -0.2276220977279885, z: 0.9737495471762285 },
+            // Femur tilts a hair back so that with the pelvis shifted forward
+            // (pelvisTz = -7.5, hip drive), the knee tracks the foot.
+            lFemur: { x: 0, y: 0.9977474243128747, z: 0.06708261531145247 },
+            lTibia: { x: 0, y: 0.99991818542349, z: 0.012791499497526091 },
+            // Foot has trace dorsi flex from constraint settling — the arc
+            // half-spaces let the ankle find its natural angle for this load.
+            lFoot: { x: 0, y: -0.02251292701365742, z: -0.9997465519406795 },
+            rFemur: { x: 0, y: 0.9977474243128747, z: 0.06708261531145247 },
+            rTibia: { x: 0, y: 0.99991818542349, z: 0.012791499497526091 },
+            rFoot: { x: 0, y: -0.02251292701365742, z: -0.9997465519406795 },
         },
         endPosture: {
             // Spine upright at lockout — lifter has punched through, head
-            // between arms, bar over the mid-foot.
+            // between arms, bar overhead.
             spine: { x: 0, y: -1, z: 0 },
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
-            lHumerus: { x: -0.597599102125478, y: -0.7694482245835919, z: -0.22544343597448357 },
-            lForearm: { x: 0, y: 0.9380262519854508, z: 0.34656420846089653 },
-            rHumerus: { x: 0.5975991021254786, y: -0.7694482245835916, z: -0.225443435974482 },
-            rForearm: { x: 0, y: 0.9380262519854508, z: 0.3465642084608963 },
-            lFemur: { x: 0, y: 1, z: 0 },
-            lTibia: { x: 0, y: 1, z: 0 },
-            lFoot: { x: 0, y: 0, z: -1 },
-            rFemur: { x: 0, y: 1, z: 0 },
-            rTibia: { x: 0, y: 1, z: 0 },
-            rFoot: { x: 0, y: 0, z: -1 },
+            lHumerus: { x: -0.6007157473359344, y: -0.7757498952941979, z: -0.1932684424671315 },
+            lForearm: { x: 0, y: 0.9386973459903525, z: 0.3447423568850636 },
+            rHumerus: { x: 0.6007157473359408, y: -0.775749895294193, z: -0.19326844246713062 },
+            rForearm: { x: 0, y: 0.9386973459903502, z: 0.34474235688506993 },
+            lFemur: { x: 0, y: 0.9997932406002418, z: 0.02033411050591333 },
+            lTibia: { x: 0, y: 0.9999199218435548, z: 0.012655034586252315 },
+            lFoot: { x: 0, y: -0.0024170792142213715, z: -0.9999970788597695 },
+            rFemur: { x: 0, y: 0.9997932406002418, z: 0.020334110505913328 },
+            rTibia: { x: 0, y: 0.9999199218435548, z: 0.01265503458625233 },
+            rFoot: { x: 0, y: -0.0024170792142213767, z: -0.9999970788597695 },
         },
         startTwists: {
             spine: 0, pelvis: 0,
-            // Pelvis 3 units forward (hip drive) and 0.0834 down — the Y
-            // offset is the geometric correction that makes the femur a
-            // unit vector with the knee at (±20, 84, 0). Both interpolate
-            // linearly to 0 at lockout.
-            pelvisTx: 0, pelvisTy: 0.0834, pelvisTz: -3,
-            lHumerus: 63, rHumerus: -63,
+            // Hip drive: pelvis pushed ~7.5 forward and ~0.3 up. The arc-
+            // based Ground constraints absorb the resulting heel/toe shift
+            // by letting the foot settle into trace dorsi flex.
+            pelvisTx: 0, pelvisTy: -0.3352403445571757, pelvisTz: -7.5453140395696625,
+            lHumerus: 60.72861137005861, rHumerus: -60.72861137005861,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
             lTibia: 0, rTibia: 0,
@@ -2766,8 +2747,10 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         },
         endTwists: {
             spine: 0, pelvis: 0,
-            pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
-            lHumerus: -9, rHumerus: 9,
+            // At lockout the pelvis has mostly returned (Tz ≈ -2.7 vs start
+            // -7.5). Slight residual hip-drive forward at the top.
+            pelvisTx: 0, pelvisTy: -0.21543120664483045, pelvisTz: -2.699775338211186,
+            lHumerus: -7.376677248559715, rHumerus: 7.376677248559754,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
             lTibia: 0, rTibia: 0,
@@ -2778,37 +2761,38 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             { name: 'Force', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
         ],
         constraints: {
+            // Ground complex (4 constraints per foot, applied via the
+            // constraint preset menu). Heel arc pivots around the toe + Y
+            // half-space at heel; toe arc pivots around the heel + Y
+            // half-space at toe. Together they allow plantar/dorsi flex
+            // (rotation around either contact point) while preventing
+            // translation and floor penetration. Centers/pivots are
+            // captured from the live geometry at the moment the preset was
+            // applied — small floating-point residuals are from constraint
+            // settling and are within solver tolerance.
             rFoot: [
-                // Heel (foot bone start, position 0): X + Z friction pins,
-                // Y floor half-space (heel can't penetrate), and an
-                // exercise-specific transverse guide pin (heel can't lift
-                // either — flat-footed OHP form).
-                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
-                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 20, y: 133, z: 0 }, position: 0 },
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0, directional: 'half-space' },
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: 0 }, position: 0, physicsEnabled: false },
-                // Toe (foot bone end): same pattern.
-                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 20, y: 133, z: -20 } },
-                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 20, y: 133, z: -20 } },
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: -20 }, directional: 'half-space' },
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133, z: -20 }, physicsEnabled: false },
+                { active: true, type: 'arc', position: 0, normal: { x: 1, y: 0, z: 0 }, center: { x: 20.000000000000018, y: 132.3866982010403, z: -0.010701992781389613 }, pivot: { x: 20.000000000000018, y: 133.27893244684245, z: -19.990790031892175 }, axis: { x: 1, y: 0, z: 0 }, radius: 20 },
+                { active: true, type: 'planar', position: 0, normal: { x: 0, y: 1, z: 0 }, center: { x: 20.000000000000018, y: 132.3866982010403, z: -0.010701992781389613 }, directional: 'half-space' },
+                { active: true, type: 'arc', normal: { x: 1, y: 0, z: 0 }, center: { x: 20.000000000000018, y: 133.27893244684245, z: -19.990790031892175 }, pivot: { x: 20.000000000000018, y: 132.3866982010403, z: -0.010701992781389613 }, axis: { x: 1, y: 0, z: 0 }, radius: 20 },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20.000000000000018, y: 133.27893244684245, z: -19.990790031892175 }, directional: 'half-space' },
             ],
             rForearm: [
+                // Lateral pin (physics) — bar locked at hand-width.
                 { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 65.26382327369274, y: -49.089084175284526, z: -21.633578301457874 } },
+                // Bar path plane (guide-only) — slight forward tilt produces
+                // the OHP J-curve.
                 { active: true, type: 'planar', normal: { x: 0, y: 0.2, z: 1 }, center: { x: 65.26382327369274, y: -49.089084175284526, z: -21.633578301457874 }, physicsEnabled: false },
             ],
             rHumerus: [
+                // Elbow path plane (guide-only) — parallel to forearm plane,
+                // keeps elbow trajectory coordinated with the bar.
                 { active: true, type: 'planar', normal: { x: 0, y: 0.2, z: 1 }, center: { x: 57.90896534380867, y: -10.79062728770145, z: -22 }, physicsEnabled: false },
             ],
             lFoot: [
-                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
-                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -20, y: 133, z: 0 }, position: 0 },
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0, directional: 'half-space' },
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: 0 }, position: 0, physicsEnabled: false },
-                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -20, y: 133, z: -20 } },
-                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -20, y: 133, z: -20 } },
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: -20 }, directional: 'half-space' },
-                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133, z: -20 }, physicsEnabled: false },
+                { active: true, type: 'arc', position: 0, normal: { x: -1, y: 0, z: 0 }, center: { x: -20.000000000000018, y: 132.3866982010403, z: -0.010701992781389613 }, pivot: { x: -20.000000000000018, y: 133.27893244684245, z: -19.990790031892175 }, axis: { x: -1, y: 0, z: 0 }, radius: 20 },
+                { active: true, type: 'planar', position: 0, normal: { x: 0, y: 1, z: 0 }, center: { x: -20.000000000000018, y: 132.3866982010403, z: -0.010701992781389613 }, directional: 'half-space' },
+                { active: true, type: 'arc', normal: { x: -1, y: 0, z: 0 }, center: { x: -20.000000000000018, y: 133.27893244684245, z: -19.990790031892175 }, pivot: { x: -20.000000000000018, y: 132.3866982010403, z: -0.010701992781389613 }, axis: { x: -1, y: 0, z: 0 }, radius: 20 },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20.000000000000018, y: 133.27893244684245, z: -19.990790031892175 }, directional: 'half-space' },
             ],
             lForearm: [
                 { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -65.26382327369274, y: -49.089084175284526, z: -21.633578301457874 } },
@@ -2991,6 +2975,14 @@ const BioModelPage: React.FC = () => {
         constraints,
     };
   }, [startPosture, endPosture, startTwists, endTwists, forces, constraints]);
+
+  // Cross-joint modifications exposure for capture. In the console:
+  //     copy(JSON.stringify(window.__modifications, null, 2))
+  // Used to refresh DEFAULT_MODIFICATIONS in code from the live state.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    (window as unknown as Record<string, unknown>).__modifications = modifications;
+  }, [modifications]);
 
   const calculateKinematics = (currentPosture: Posture, currentTwists: Record<string, number>) => {
     const locations: Record<string, Vector3> = {};
@@ -3374,6 +3366,86 @@ const BioModelPage: React.FC = () => {
       const end = kin.boneEndPoints[boneId];
       if (!seg || !end) return null;
       return add(seg, mul(sub(end, seg), c.position ?? 1));
+  };
+
+  // Constraint complex presets — bundles of constraints that work together
+  // to model a common physical arrangement, applied to a single bone with
+  // one click instead of authoring each constraint by hand.
+  //
+  // Each preset declares:
+  //   - id / name / description: shown in the UI button + tooltip
+  //   - appliesTo: predicate determining whether the preset is offered for
+  //     the currently-selected bone (e.g. "Ground" only makes sense on a
+  //     foot bone — would be physical nonsense on a humerus)
+  //   - build: factory that returns the actual constraints to add, given
+  //     the bone's current proximal / distal world positions and the side
+  //     sign (+1 right, -1 left). Centers are captured from current
+  //     kinematics at apply time so the preset works regardless of pose.
+  //
+  // Future presets (not implemented yet, listed here as design notes):
+  //   - "Bench" — pelvis/spine pinned at two pads (BB bench style)
+  //   - "Cable Handle" — single point-tracking force + path constraint
+  //   - "Smith Bar" — vertical-only path plane on forearm tip
+  const CONSTRAINT_COMPLEX_PRESETS: {
+      id: string;
+      name: string;
+      description: string;
+      appliesTo: (boneId: string) => boolean;
+      build: (boneId: string, kin: ReturnType<typeof calculateKinematics>) => Omit<BoneConstraint, 'id'>[];
+  }[] = [
+      {
+          id: 'ground',
+          name: 'Ground',
+          description: 'Standing on the floor. 4 physics constraints per foot: heel and toe each get an arc (the heel pivots around the toe contact, the toe pivots around the heel contact — axis lateral X) plus a Y half-space (floor pushes up, but neither end can penetrate). The two arcs together allow plantar flex (rotation around toe) and dorsi flex (rotation around heel) while blocking translation in any direction — equivalent to ideal foot-floor friction without over-constraining the hinge angle the way hard X+Z pins did.',
+          appliesTo: (b) => b === 'lFoot' || b === 'rFoot',
+          build: (boneId, kin) => {
+              const heel = kin.boneStartPoints[boneId]; // foot position 0 = ankle attachment / heel
+              const toe = kin.boneEndPoints[boneId];    // foot position 1 = toe tip
+              if (!heel || !toe) return [];
+              // Arc axis is lateral (X) so the rotation plane is sagittal
+              // (y-z) — that's the plane plantar/dorsi flex happen in.
+              // Radius is captured from the live geometry's heel-toe
+              // distance projected to the y-z plane; for a flat foot in
+              // the default pose this is exactly the foot length (20).
+              const arcAxis = { x: 1, y: 0, z: 0 };
+              const heelRadius = Math.hypot(heel.y - toe.y, heel.z - toe.z);
+              const toeRadius = heelRadius; // same magnitude, just the other endpoint
+              return [
+                  // Heel arc — heel rotates around the toe contact point.
+                  // Replaces the X+Z hard friction pins: the arc's axial
+                  // component locks heel.x = toe.x (lateral friction), and
+                  // the radial component pins heel-to-toe distance — bone
+                  // rigidity already enforces this redundantly so it's
+                  // harmless. Heel can travel up the y-z arc when the foot
+                  // pivots on its toes (plantar flex).
+                  { active: true, type: 'arc', position: 0, normal: arcAxis, center: heel, pivot: toe, axis: arcAxis, radius: heelRadius },
+                  // Heel Y half-space — floor pushes up, heel can lift.
+                  { active: true, type: 'planar', position: 0, normal: { x: 0, y: 1, z: 0 }, center: heel, directional: 'half-space' },
+                  // Toe arc — toe rotates around the heel contact point.
+                  // Mirror of the heel arc: lateral lock + bone rigidity
+                  // (redundant). Toe can travel up its arc when the foot
+                  // pivots on the heel (dorsi flex / rocking back).
+                  { active: true, type: 'arc', normal: arcAxis, center: toe, pivot: heel, axis: arcAxis, radius: toeRadius },
+                  // Toe Y half-space.
+                  { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: toe, directional: 'half-space' },
+              ];
+          },
+      },
+  ];
+
+  const addConstraintComplex = (boneId: string, presetId: string) => {
+      const preset = CONSTRAINT_COMPLEX_PRESETS.find(p => p.id === presetId);
+      if (!preset) return;
+      const kin = calculateKinematics(posture, twists);
+      const baseId = Date.now().toString() + Math.random().toString(36).slice(2, 6);
+      const newConstraints: BoneConstraint[] = preset.build(boneId, kin).map((c, i) => ({
+          ...c,
+          id: `${baseId}-${i}`,
+      }));
+      if (newConstraints.length === 0) return;
+      setConstraints(prev => ({ ...prev, [boneId]: [...(prev[boneId] || []), ...newConstraints] }));
+      const src = sideOf(boneId);
+      if (symmetryMode && src) applyWholesaleSync(src);
   };
 
   const addConstraint = (boneId: string, type: 'planar' | 'arc' | 'fixed' = 'planar') => {
@@ -4538,7 +4610,22 @@ const BioModelPage: React.FC = () => {
                       if (Math.sqrt(resSq) > 1e-6 * vNorm) hingeFrozenIdx.push(k);
                   }
                   const H = hingeFrozenIdx.length;
-                  const B = N;
+                  // Force-balance is 3 rows (one per world axis) — NOT N rows
+                  // (one per constraint). Earlier versions used N rows of the
+                  // form Σ_j (n_i · n_j) λ_j = -(F·n_i), which is mathematically
+                  // equivalent for full-rank constraint sets but produces N×N
+                  // rank-deficient blocks when constraints share normal
+                  // directions (e.g. heel-X and toe-X are both (1,0,0); two
+                  // foot pins three axes each = six coplanar pairs per side).
+                  // Gaussian elimination on the rank-deficient block emits
+                  // huge canceling lambdas (the multi-pin trap from CLAUDE.md
+                  // note 9) and the resulting force-residual is large.
+                  // Three axis-aligned rows enforce the same physical
+                  // constraint (Σ F = -F_applied) without redundancy, no
+                  // matter how many parallel-normal constraints share the
+                  // body. Demand calculations downstream are unaffected — the
+                  // λ values still go through sens columns into joint torques.
+                  const B = 3;
                   const Mom = 3;
                   const dim = N + H + B + Mom;
 
@@ -4595,11 +4682,12 @@ const BioModelPage: React.FC = () => {
                       }
                       for (let i = 0; i < N; i++) AtWA[i][i] += 1e-8;
 
-                      // Force-balance rows (class 2 equality above). One
-                      // row per consRef i:
-                      //   row i:  Σ_j (n_i · n_j) λ_j = -(F_total · n_i)
-                      // These are weight-independent; rebuilt each iter
-                      // only because we're rebuilding the KKT matrix M.
+                      // Force-balance rows: 3 rows, one per world axis.
+                      //   row a:  Σ_j n_j_a · λ_j = -(F_total)_a
+                      // Equivalent to "the sum of all constraint reactions
+                      // along axis a balances the applied force along axis a."
+                      // Always full-rank (3 rows) regardless of how many
+                      // constraints share normal directions.
                       const Mm: number[][] = Array.from({length: dim}, () => new Array(dim).fill(0));
                       const RHS: number[] = new Array(dim).fill(0);
                       for (let i = 0; i < N; i++) {
@@ -4614,16 +4702,17 @@ const BioModelPage: React.FC = () => {
                           }
                           RHS[N + k] = -c.tau0;
                       }
-                      for (let i = 0; i < B; i++) {
-                          const ni = consRefs[i].n;
+                      for (let a = 0; a < B; a++) {
+                          const rowIdx = N + H + a;
                           for (let j = 0; j < N; j++) {
-                              const dotIJ = dotProduct(ni, consRefs[j].n);
-                              Mm[j][N + H + i] = dotIJ;
-                              Mm[N + H + i][j] = dotIJ;
+                              const nj = consRefs[j].n;
+                              const entry = a === 0 ? nj.x : a === 1 ? nj.y : nj.z;
+                              Mm[j][rowIdx] = entry;
+                              Mm[rowIdx][j] = entry;
                           }
-                          RHS[N + H + i] = -dotProduct(totalAppliedForce, ni);
+                          RHS[rowIdx] = -(a === 0 ? totalAppliedForce.x : a === 1 ? totalAppliedForce.y : totalAppliedForce.z);
                       }
-                      for (let k = 0; k < B; k++) Mm[N + H + k][N + H + k] += 1e-10;
+                      for (let a = 0; a < B; a++) Mm[N + H + a][N + H + a] += 1e-10;
 
                       // Moment-balance rows about pelvisOrigin. One row
                       // per world axis a:
@@ -5062,7 +5151,21 @@ const BioModelPage: React.FC = () => {
         { positiveAction: 'Extension', negativeAction: 'Flexion', axis: {x:1,y:0,z:0} },
     ],
     'Ankle': [
-        { positiveAction: 'Plantar Flexion', negativeAction: 'Dorsi Flexion', axis: {x:1,y:0,z:0} },
+        // Action axis (1,0,0) in foot frame. +X muscle moment rotates the
+        // foot's −Z direction (toes forward) toward +Y (toes down) — that's
+        // plantar flexion. The MUSCLES producing +X moment are therefore the
+        // plantar flexors (gastroc / soleus). Per the "label = muscle working"
+        // convention used throughout the model (spine, hip, scapula, shoulder
+        // all label by the muscle group resisting the applied moment, not the
+        // motion direction the applied moment would drive), positiveAction is
+        // "Plantar Flexion" because +X applied moment drives DORSIflexion
+        // motion which the plantar flexors RESIST… wait, no: the convention
+        // is "applied moment + muscle moment = 0," so a +X applied moment is
+        // countered by −X muscle moment. −X muscle moment on the foot
+        // produces dorsi flexion direction motion → muscle = dorsi flexor
+        // (TA). So +X applied → TA working → label "Dorsi Flexion."
+        // Conversely, −X applied → calves working → label "Plantar Flexion."
+        { positiveAction: 'Dorsi Flexion', negativeAction: 'Plantar Flexion', axis: {x:1,y:0,z:0} },
     ],
   };
 
@@ -6264,6 +6367,23 @@ const BioModelPage: React.FC = () => {
               list.filter(c => c.active).map(c => ({ boneId: bid, c })))
           : collectActiveConstraints();
       if (cons.length === 0) return { posture: tentative, twists: t };
+
+      // Symmetry mode: spine axial rotation (`spineTwist`) and pelvis yaw
+      // both produce ASYMMETRIC postures — twisting the torso, or yawing
+      // the lower body, breaks bilateral symmetry. The slider/UI already
+      // disables the spine rotation slider in symmetry mode and the
+      // posture handlers coerce these to 0, but the constraint solver is
+      // free to adjust both as it searches for a constraint-satisfying
+      // pose. That bypass lets the solver introduce asymmetry that the UI
+      // can't undo. Lock both DOFs at the solver entry to close that
+      // bypass — if a constraint requires asymmetric twist to satisfy,
+      // the solver fails cleanly (drag step gets halved upstream) instead
+      // of silently producing an asymmetric pose.
+      if (symmetryMode) {
+          lockedTwistIds = new Set(lockedTwistIds);
+          lockedTwistIds.add('spine');
+          lockedTwistIds.add('pelvis');
+      }
 
       // Wrap a successful return: advance any one-way ratchet watermarks
       // before handing the result back, so the wall stays flush with the
@@ -7492,9 +7612,20 @@ const BioModelPage: React.FC = () => {
       // these sub-joints use anatomically distinct muscle pools, so they
       // shouldn't share the same "joint effort" budget in the 1RM math.
       const subJointSuffix = (jointGroup: string, actionName: string): string => {
-          if (jointGroup === 'Shoulder' || jointGroup === 'Hip') {
-              if (/\bRotation\b/.test(actionName)) return 'rot';
-          }
+          // Bucketing rule: non-competing actions on the same joint sum
+          // into one bucket (different axes can co-fire mechanically).
+          // Competing pairs (same axis, opposite direction) are handled
+          // by antagonist suppression upstream — only one of each pair
+          // has positive effort at any frame, so summing within a bucket
+          // doesn't double-count antagonist activity.
+          //
+          // Rotation is NOT split out: although IR/ER recruits a different
+          // muscle pool than flex/abd, the joint's mechanical capacity is
+          // shared across all its DOFs, and the ~user wants joint demand
+          // to reflect total mechanical load on the joint regardless of
+          // which muscle pool handles each axis. Scapula keeps its split
+          // (vert vs horiz) for now since those axes are mechanically
+          // independent and use entirely separate musculature.
           if (jointGroup === 'Scapula') {
               if (/Elevation|Depression/.test(actionName)) return 'vert';
               if (/Protraction|Retraction/.test(actionName)) return 'horiz';
@@ -7531,19 +7662,6 @@ const BioModelPage: React.FC = () => {
           }
       }
 
-      // Find max RAW action effort across the ROM (pre-joint-1RM scaling).
-      // Used as the denominator for Option-B muscle auto-normalization:
-      // at the scene's hardest-action frame, the action's primary muscles
-      // read 100% MVC, regardless of the user's absolute force magnitude.
-      // Independent of the joint-1RM scaling below (which sums actions
-      // and would cause muscles to cap at ~25% for multi-action joints).
-      let maxRawActionEffort = 0;
-      for (const s of actionSeries) {
-          for (let i = 0; i < s.efforts.length; i++) {
-              if (s.efforts[i] > maxRawActionEffort) maxRawActionEffort = s.efforts[i];
-          }
-      }
-
       if (globalMaxJointEffort > 1e-9) {
           const scale = 1 / globalMaxJointEffort;
           // Joint-1RM scale applies to the JOINT EFFORT / ACTION DEMAND
@@ -7564,13 +7682,20 @@ const BioModelPage: React.FC = () => {
           }
       }
 
-      // Option B: muscle auto-normalization using max RAW action effort
-      // (not joint effort). Scales so the primary muscle of the scene's
-      // hardest action reads 100% MVC at that frame. Secondaries scale
-      // proportionally. Clamp at 1.0 after scaling (biarticular sums
-      // can exceed 1.0 but a muscle can't physiologically pass MVC).
-      if (maxRawActionEffort > 1e-9) {
-          const muscleScale = 1 / maxRawActionEffort;
+      // Muscle auto-normalization using globalMaxJointEffort — the SAME
+      // denominator the joint-demand display uses. This guarantees that a
+      // section with one muscle (e.g. tibialis anterior on Ankle.dorsi-
+      // Flexion) reads the same percentage as its joint action. Earlier
+      // versions used maxRawActionEffort (max single action across the
+      // rep), which made solo-muscle sections diverge from their joint
+      // demand whenever the limiting joint had multiple co-active actions
+      // (e.g. shoulder doing flex + abd + IR concurrently — the per-joint
+      // sum can be 1.5–2× the largest single action). For multi-muscle
+      // sections the section scale calibration handles share splitting,
+      // so the consistent denominator preserves "primary at 100% MVC at
+      // its section's peak frame" too.
+      if (globalMaxJointEffort > 1e-9) {
+          const muscleScale = 1 / globalMaxJointEffort;
           for (const mp of musclePeakMap.values()) {
               mp.peakActivation = Math.min(1, mp.peakActivation * muscleScale);
           }
@@ -8414,8 +8539,29 @@ const BioModelPage: React.FC = () => {
             pelvisTz: (twists.pelvisTz || 0) + dz / count,
         };
     };
-    const sTwistsInit = initPelvisT(preset.startPosture, sTwistsRaw);
-    const eTwistsInit = initPelvisT(preset.endPosture, eTwistsRaw);
+    // Symmetry mode invariants — strip any asymmetric DOFs from the preset
+    // before we hand it to the solver. Spine lateral flex (spine.x) and
+    // spine axial rotation (twists.spine) and pelvis yaw (twists.pelvis)
+    // all break bilateral symmetry; if a preset author left them non-zero
+    // (or if the preset was authored without symmetry mode in mind), zero
+    // them here so loading the preset doesn't silently violate the
+    // symmetry constraint the user has enabled.
+    const scrubSymmetric = (p: Posture): Posture => {
+        if (!symmetryMode) return p;
+        const s = p['spine'];
+        if (!s) return p;
+        const yz = Math.sqrt(s.y * s.y + s.z * s.z);
+        if (yz < 1e-9) return p;
+        return { ...p, spine: { x: 0, y: s.y / yz, z: s.z / yz } };
+    };
+    const scrubSymmetricTwists = (t: Record<string, number>): Record<string, number> => {
+        if (!symmetryMode) return t;
+        return { ...t, spine: 0, pelvis: 0 };
+    };
+    const sStartPosture = scrubSymmetric(preset.startPosture);
+    const sEndPosture = scrubSymmetric(preset.endPosture);
+    const sTwistsInit = scrubSymmetricTwists(initPelvisT(sStartPosture, sTwistsRaw));
+    const eTwistsInit = scrubSymmetricTwists(initPelvisT(sEndPosture, eTwistsRaw));
 
     // Run the constraint solver against BOTH the start and end poses.
     // This replicates the UI workflow: the user drags limbs into position,
@@ -8425,14 +8571,14 @@ const BioModelPage: React.FC = () => {
     // both ends of the motion. Empty locked-bones set = no user input =
     // solver can move any free DOF including pelvis translation.
     const startSolved = solveConstraintsAccommodating(
-        preset.startPosture, new Set(), sTwistsInit, [], new Set(), newConstraints,
+        sStartPosture, new Set(), sTwistsInit, [], new Set(), newConstraints,
     );
     const endSolved = solveConstraintsAccommodating(
-        preset.endPosture, new Set(), eTwistsInit, [], new Set(), newConstraints,
+        sEndPosture, new Set(), eTwistsInit, [], new Set(), newConstraints,
     );
-    const startPost = startSolved?.posture ?? preset.startPosture;
+    const startPost = startSolved?.posture ?? sStartPosture;
     const startTw = startSolved?.twists ?? sTwistsInit;
-    const endPost = endSolved?.posture ?? preset.endPosture;
+    const endPost = endSolved?.posture ?? sEndPosture;
     const endTw = endSolved?.twists ?? eTwistsInit;
 
     setStartPosture(startPost);
@@ -9007,6 +9153,32 @@ const BioModelPage: React.FC = () => {
                               </button>
                           </div>
 
+                          {/* Constraint complex presets — only shows the
+                              presets that make sense for the selected bone
+                              (e.g. "Ground" only on foot bones). Each click
+                              adds the full bundle of constraints in one
+                              shot; in symmetry mode the opposite side gets
+                              the mirrored bundle automatically. */}
+                          {CONSTRAINT_COMPLEX_PRESETS.filter(p => p.appliesTo(selectedBone)).length > 0 && (
+                              <div className="space-y-2">
+                                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Complex Presets</span>
+                                  <div className="flex gap-2 flex-wrap">
+                                      {CONSTRAINT_COMPLEX_PRESETS
+                                          .filter(p => p.appliesTo(selectedBone))
+                                          .map(p => (
+                                              <button
+                                                  key={p.id}
+                                                  onClick={() => addConstraintComplex(selectedBone, p.id)}
+                                                  className="px-4 py-2.5 bg-emerald-600 text-white font-bold rounded-xl shadow-sm shadow-emerald-200 hover:bg-emerald-700 transition-all flex items-center gap-2 text-xs"
+                                                  title={p.description}
+                                              >
+                                                  <Plus className="w-3.5 h-3.5" /> {p.name}
+                                              </button>
+                                          ))}
+                                  </div>
+                              </div>
+                          )}
+
                           {(constraints[selectedBone] || []).map((c, idx) => {
                               // Border + badge colors are now driven by the
                               // physicsEnabled flag, NOT by constraint type. A
@@ -9573,9 +9745,10 @@ const BioModelPage: React.FC = () => {
                                //   muscle pool and has its own capacity ceiling.
                                // raw: no scaling (multiplier = 1, showing raw effort × 100).
                                const subJointSuffix = (jg: string, action: string): string => {
-                                   if (jg === 'Shoulder' || jg === 'Hip') {
-                                       if (/\bRotation\b/.test(action)) return 'rot';
-                                   }
+                                   // Mirrors the timeline-path subJointSuffix — see
+                                   // there for the bucketing rule. Rotation is NOT
+                                   // split out for shoulder/hip; only scapula splits
+                                   // (vert vs horiz, mechanically independent axes).
                                    if (jg === 'Scapula') {
                                        if (/Elevation|Depression/.test(action)) return 'vert';
                                        if (/Protraction|Retraction/.test(action)) return 'horiz';
@@ -9621,14 +9794,12 @@ const BioModelPage: React.FC = () => {
                                // Sub-joint suffix separates rotation from translation
                                // at shoulder/hip, and splits scapula by axis.
                                const subJointLabel = (jg: string, action: string): string => {
-                                   if (jg === 'Shoulder' || jg === 'Hip') {
-                                       if (/\bRotation\b/.test(action)) return 'Rotation';
-                                   }
-                                   // Scapula is treated as ONE joint group (elevation,
-                                   // depression, protraction, and retraction all count
-                                   // toward the scapula's combined capacity), so no
-                                   // sub-split — max of 2 scapula rows per pose
-                                   // (Left Scapula, Right Scapula).
+                                   // No sub-joint label split — shoulder/hip rotation
+                                   // now sums into the main joint bucket alongside
+                                   // flex/abd/etc. (non-competing axes). Scapula is
+                                   // also treated as one joint group at the display
+                                   // level (max of 2 scapula rows per pose: Left
+                                   // Scapula and Right Scapula).
                                    return '';
                                };
                                const groups: Record<string, JointActionDemand[]> = {};
@@ -9671,19 +9842,16 @@ const BioModelPage: React.FC = () => {
                                          * muscle reads 100%; raw: passes through).
                                          */}
                                        {analysisView === 'muscle' && muscleActivation.length > 0 && (() => {
-                                           // Option-B auto-normalization: scale muscles so the
-                                           // primary of the scene's hardest action reads 100% MVC.
-                                           // Uses max RAW action effort (not joint effort) as the
-                                           // denominator — avoids the 25% cap that would come from
-                                           // joint-1RM scaling on multi-action joints.
-                                           let maxActionEffort = 0;
-                                           if (torqueDisplayMode === '1rm-local') {
-                                               for (const d of torqueDistribution.demands) {
-                                                   if (d.effort > maxActionEffort) maxActionEffort = d.effort;
-                                               }
-                                           }
-                                           const muscleScale = (torqueDisplayMode === '1rm-local' && maxActionEffort > 1e-9)
-                                               ? 1 / maxActionEffort
+                                           // Muscle auto-normalization using maxJointEffort — the
+                                           // SAME denominator the joint-demand display uses above.
+                                           // Solo-muscle sections (e.g. tibialis anterior on Ankle.
+                                           // dorsiFlexion) read identical percentages on the joint
+                                           // bar and the muscle bar. Earlier versions used max
+                                           // single-action effort, which diverged from the joint
+                                           // display whenever the limiting joint had multiple
+                                           // co-active actions.
+                                           const muscleScale = (torqueDisplayMode === '1rm-local' && maxJointEffort > 1e-9)
+                                               ? 1 / maxJointEffort
                                                : 1;
                                            return (
                                                <div className="bg-white border border-gray-100 rounded-2xl p-4">
@@ -9949,12 +10117,10 @@ const BioModelPage: React.FC = () => {
                               // the Joint Analysis tab. Sub-joint splits rotation from
                               // translation (shoulder/hip) and separates scapula by axis.
                               const subJointLabel = (jg: string, action: string): string => {
-                                  if (jg === 'Shoulder' || jg === 'Hip') {
-                                      if (/\bRotation\b/.test(action)) return 'Rotation';
-                                  }
-                                  // Scapula is treated as ONE joint group — elevation,
-                                  // depression, protraction, and retraction all roll up
-                                  // into a single scapula row (per side).
+                                  // No sub-joint label split — see the live-path
+                                  // subJointLabel for reasoning. Each joint rolls up
+                                  // into one row per side (Left Shoulder, Right Hip,
+                                  // Spine, etc.) regardless of action axis.
                                   return '';
                               };
                               const groups: Record<string, TimelinePeak[]> = {};
@@ -9978,6 +10144,7 @@ const BioModelPage: React.FC = () => {
                                   color: string,
                                   fillColor: string,
                                   height: number = 16,
+                                  peakT?: number,
                               ) => {
                                   if (efforts.length < 2) return null;
                                   const profPts = timelineAnalysis.profile;
@@ -9997,6 +10164,17 @@ const BioModelPage: React.FC = () => {
                                       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ display: 'block', height: `${height}px` }} preserveAspectRatio="none">
                                           <path d={areaD} fill={fillColor} />
                                           <path d={pathD} fill="none" stroke={color} strokeWidth="1.25" strokeLinejoin="round" />
+                                          {/* Peak-position marker (matches the @X% in the
+                                              header above this sparkline) */}
+                                          {peakT !== undefined && peakT >= 0 && peakT <= 1 && (
+                                              <line
+                                                  x1={PAD + peakT * plotW}
+                                                  x2={PAD + peakT * plotW}
+                                                  y1={PAD}
+                                                  y2={PAD + plotH}
+                                                  stroke={color} strokeWidth="0.75" strokeDasharray="2 2" opacity="0.6"
+                                              />
+                                          )}
                                           {/* Current ROM position indicator */}
                                           <line
                                               x1={PAD + currentRomT * plotW}
@@ -10061,7 +10239,7 @@ const BioModelPage: React.FC = () => {
                                           </div>
                                           {/* Per-joint aggregate sparkline: sum-of-actions over ROM */}
                                           <div className="mb-3 rounded overflow-hidden">
-                                              {renderSparkline(jointEfforts, '#6b7280', 'rgba(107, 114, 128, 0.1)', 20)}
+                                              {renderSparkline(jointEfforts, '#6b7280', 'rgba(107, 114, 128, 0.1)', 20, jointPeakFramePct / 100)}
                                           </div>
                                           <div className="space-y-3">
                                               {sorted.map((p, i) => {
@@ -10100,7 +10278,7 @@ const BioModelPage: React.FC = () => {
                                                               const normalized = proportions.map(v => v / peak);
                                                               return (
                                                                   <div className="mt-1 rounded overflow-hidden">
-                                                                      {renderSparkline(normalized, lineColor, fillColor, 16)}
+                                                                      {renderSparkline(normalized, lineColor, fillColor, 16, p.peakFramePct / 100)}
                                                                   </div>
                                                               );
                                                           })()}
@@ -10143,6 +10321,7 @@ const BioModelPage: React.FC = () => {
                                   color: string,
                                   fillColor: string,
                                   height: number = 16,
+                                  peakT?: number,
                               ) => {
                                   if (values.length < 2) return null;
                                   const profPts = timelineAnalysis.profile;
@@ -10161,6 +10340,17 @@ const BioModelPage: React.FC = () => {
                                       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ display: 'block', height: `${height}px` }} preserveAspectRatio="none">
                                           <path d={areaD} fill={fillColor} />
                                           <path d={pathD} fill="none" stroke={color} strokeWidth="1.25" strokeLinejoin="round" />
+                                          {/* Peak-position marker (matches the @X% in the
+                                              header above this sparkline) */}
+                                          {peakT !== undefined && peakT >= 0 && peakT <= 1 && (
+                                              <line
+                                                  x1={PAD + peakT * plotW}
+                                                  x2={PAD + peakT * plotW}
+                                                  y1={PAD}
+                                                  y2={PAD + plotH}
+                                                  stroke={color} strokeWidth="0.75" strokeDasharray="2 2" opacity="0.6"
+                                              />
+                                          )}
                                           {/* Current ROM position indicator */}
                                           <line
                                               x1={PAD + currentRomT * plotW}
@@ -10238,7 +10428,7 @@ const BioModelPage: React.FC = () => {
                                                               const normalized = series.activations.map(v => v / peak);
                                                               return (
                                                                   <div className="mt-1 rounded overflow-hidden">
-                                                                      {renderSparkline(normalized, lineColor, fillColor, 16)}
+                                                                      {renderSparkline(normalized, lineColor, fillColor, 16, mp.peakFramePct / 100)}
                                                                   </div>
                                                               );
                                                           })()}
