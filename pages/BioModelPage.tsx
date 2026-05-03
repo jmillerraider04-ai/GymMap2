@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import BioMan, { Posture, Vector3, VisualForce, VisualPlane, AxisCircle } from '../components/BioMan';
-import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, ChevronDown, BrainCircuit, Axis3d, Plus, Trash2, TrendingUp, Activity, Link2 } from 'lucide-react';
+import { Settings2, RotateCcw, MousePointerClick, Move3d, Copy, Lock, Split, Play, Pause, Zap, Scale, Gauge, ChevronLeft, AlertCircle, ArrowDownUp, RefreshCw, ChevronRight, ChevronDown, BrainCircuit, Axis3d, Plus, Trash2, TrendingUp, Activity, Link2, Search, Heart, Clock, Ruler } from 'lucide-react';
 
 const DEFAULT_POSTURE: Posture = {
   // Spine is a unit direction from pelvis base to neck base. Default
@@ -244,7 +244,7 @@ interface Frame {
     z: Vector3;
 }
 
-type JointGroup = 'Shoulder' | 'Elbow' | 'Hip' | 'Knee' | 'Ankle' | 'Scapula' | 'Spine';
+type JointGroup = 'Shoulder' | 'Elbow' | 'Forearm' | 'Hip' | 'Knee' | 'Ankle' | 'Scapula' | 'Spine';
 
 // Map of pickable joint anchor points → which bone end they correspond to
 // in the kinematics output. `start` = boneStartPoints[bone], `end` =
@@ -309,6 +309,18 @@ interface MuscleDef {
     id: string;
     name: string;
     region: string;  // grouping for the "add muscle" dropdown
+    // Per-joint-action coefficients used to compute muscle length from
+    // pose. Length is `Σ shorteningPattern[a] × angleInDirection[a]`,
+    // where angleInDirection is in degrees. Positive coefficient = muscle
+    // SHORTENS in the positive direction of that action; the antagonist
+    // direction lengthens it automatically via the negative angle. List
+    // ONE action per joint DOF the muscle crosses (whichever direction
+    // it shortens). Magnitude scale: 0.012 ≈ primary monoarticular,
+    // 0.008 ≈ strong biarticular component, 0.005 ≈ moderate, 0.003 ≈
+    // minor. Length output is in arbitrary units calibrated such that
+    // typical full ROM produces swings in roughly [-1.5, +1.5] — used
+    // by the app's view-time length-tension and recovery formulas.
+    shorteningPattern?: Record<string, number>;
 }
 
 interface MuscleContribution {
@@ -443,6 +455,18 @@ interface ActionAxis {
     // Without this flag, horizontal ab/ad's local Y axis would alias to the
     // humerus bone axis in the joint frame and collide with IR/ER.
     useWorldAxis?: boolean;
+    // True for actions that represent a TENSILE FORCE rather than a torque.
+    // Currently used for Forearm.grip — the load the hand must hold against
+    // the implement (not a rotation, not a moment). The pipeline treats
+    // these specially:
+    //   - getActionAngle returns 0 (no rotational angle to track).
+    //   - calculateTorqueDistribution injects demands directly from a
+    //     dedicated computation (forearm-axis projection of forces),
+    //     bypassing the torque chain walker.
+    //   - Capacity is in force units, NOT Nm-like torque. Demand is in
+    //     the same units as the user's force magnitudes.
+    //   - Bell curves still apply at angle 0 (flat bells work fine).
+    isLinearForce?: boolean;
 }
 
 interface JointActionDemand {
@@ -610,6 +634,25 @@ const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
         // Flex/ext ratio ≈ 1.1, biceps slightly outpull triceps.
         'extension':            createCap(35, 80,  -75)
     },
+    'Forearm': {
+        // Forearm rotation peak torques. Supination > pronation because
+        // biceps brachii (a major supinator at flexed elbow) is much
+        // larger than the dedicated pronators. Numbers from O'Sullivan +
+        // Gallwey 2002 forearm isokinetic data: peak supination ~14 Nm,
+        // peak pronation ~9 Nm. Sup/pron ≈ 1.55. Mid-range peaks (angle 0)
+        // because both pronators and supinators show fairly flat curves
+        // across the radioulnar ROM.
+        'supination':            createCap(7,  14, 0),
+        'pronation':             createCap(5,  9,  0),
+        // Grip: max sustained tensile force the hand can hold. Population
+        // mean adult max grip ~50 kgf ≈ 500 N. Numbers in the same
+        // arbitrary force units as the user's force magnitudes — set
+        // peak = 500 to match a "1 grip unit = 1 N"-ish convention.
+        // Flat bell (peak == base) since grip strength doesn't vary with
+        // forearm rotation — there's no rotational angle to track for a
+        // tensile action.
+        'grip':                  createCap(500, 500, 0),
+    },
     'Hip': {
         // Flex peak 145 Nm @ +90° (iliopsoas mid-range).
         'flexion':              createCap(70, 145, 90),
@@ -697,28 +740,129 @@ const DEFAULT_CAPACITIES: Record<JointGroup, JointCapacityProfile> = {
 
 // Hardcoded muscle catalog focused on what matters for hypertrophy / strength
 // training analysis. Grouped by region for the "add muscle" dropdown.
+//
+// `shorteningPattern` per muscle: see the MuscleDef interface for convention.
+// Coefficients are best-guess from anatomy (which joints the muscle crosses,
+// which actions shorten vs. lengthen it). Refine empirically once the
+// app's length-tension visualization is wired up.
+//
+// L/R-handed actions (Spine.lateralFlexionL/R, Spine.rotationL/R,
+// scapular up/down rotation) are intentionally omitted — they need
+// ipsilateral/contralateral side routing the catalog can't express here.
+// Bilateral actions (Spine.flexion, Spine.extension) are listed normally;
+// the L/R lateral flexion + rotation contributions for spine-crossing
+// muscles can be added later via a side-aware extension to the model.
+//
+// Linear-model limitations: muscles with non-monotonic length-vs-angle
+// relationships (e.g. pec-sternal across deep shoulder flexion, where
+// it stretches above 90° but shortens below) are encoded by their
+// dominant length axis, not by every joint they cross. Pec-sternal uses
+// adduction + horizontal adduction (which capture overhead-stretch
+// correctly via abduction-direction angles) and skips Shoulder.flexion.
 const MUSCLE_CATALOG: MuscleDef[] = [
     // Chest
-    { id: 'pec-clavicular', name: 'Pectoralis Major (Clavicular)', region: 'Chest' },
-    { id: 'pec-sternal',    name: 'Pectoralis Major (Sternal)',    region: 'Chest' },
-    { id: 'pec-minor',      name: 'Pectoralis Minor',              region: 'Chest' },
+    { id: 'pec-clavicular', name: 'Pectoralis Major (Clavicular)', region: 'Chest',
+      shorteningPattern: {
+          // Clav head crosses anterior to the shoulder joint center, so
+          // it flexes/horizontally adducts/IRs the humerus. Stretches at
+          // overhead via the adduction term (abduction angle goes negative).
+          'Shoulder.horizontalAdduction': 0.008,
+          'Shoulder.flexion':             0.005,
+          'Shoulder.internalRotation':    0.002,
+      } },
+    { id: 'pec-sternal',    name: 'Pectoralis Major (Sternal)',    region: 'Chest',
+      shorteningPattern: {
+          // Sternal head fans across the chest. Adduction is the
+          // dominant length axis (overhead position lengthens it sharply
+          // via the abduction-direction angle).
+          'Shoulder.adduction':           0.005,
+          'Shoulder.horizontalAdduction': 0.008,
+          'Shoulder.internalRotation':    0.003,
+      } },
+    { id: 'pec-minor',      name: 'Pectoralis Minor',              region: 'Chest',
+      shorteningPattern: {
+          'Scapula.protraction': 0.005,
+          'Scapula.depression':  0.005,
+      } },
     // Shoulders
-    { id: 'delt-front', name: 'Anterior Deltoid',  region: 'Shoulders' },
-    { id: 'delt-side',  name: 'Lateral Deltoid',   region: 'Shoulders' },
-    { id: 'delt-rear',  name: 'Posterior Deltoid', region: 'Shoulders' },
+    { id: 'delt-front', name: 'Anterior Deltoid',  region: 'Shoulders',
+      shorteningPattern: {
+          'Shoulder.flexion':             0.010,
+          'Shoulder.horizontalAdduction': 0.005,
+          'Shoulder.internalRotation':    0.003,
+      } },
+    { id: 'delt-side',  name: 'Lateral Deltoid',   region: 'Shoulders',
+      shorteningPattern: {
+          'Shoulder.abduction': 0.012,
+      } },
+    { id: 'delt-rear',  name: 'Posterior Deltoid', region: 'Shoulders',
+      shorteningPattern: {
+          'Shoulder.extension':           0.008,
+          'Shoulder.horizontalAbduction': 0.008,
+          'Shoulder.externalRotation':    0.003,
+      } },
     // Back
-    { id: 'lats',              name: 'Latissimus Dorsi',     region: 'Back' },
-    { id: 'traps-upper',       name: 'Trapezius (Upper)',    region: 'Back' },
-    { id: 'traps-mid',         name: 'Trapezius (Middle)',   region: 'Back' },
-    { id: 'traps-lower',       name: 'Trapezius (Lower)',    region: 'Back' },
-    { id: 'rhomboids',         name: 'Rhomboids',            region: 'Back' },
-    { id: 'teres-major',       name: 'Teres Major',          region: 'Back' },
-    { id: 'teres-minor',       name: 'Teres Minor',          region: 'Back' },
-    { id: 'infraspinatus',     name: 'Infraspinatus',        region: 'Back' },
-    { id: 'supraspinatus',     name: 'Supraspinatus',        region: 'Back' },
-    { id: 'subscapularis',     name: 'Subscapularis',        region: 'Back' },
-    { id: 'serratus-anterior', name: 'Serratus Anterior',    region: 'Back' },
-    { id: 'levator-scapulae',  name: 'Levator Scapulae',     region: 'Back' },
+    { id: 'lats',              name: 'Latissimus Dorsi',     region: 'Back',
+      shorteningPattern: {
+          // Lats stretch dramatically at full overhead (extension angle
+          // negative + adduction angle negative both lengthen).
+          'Shoulder.extension':        0.008,
+          'Shoulder.adduction':        0.005,
+          'Shoulder.internalRotation': 0.003,
+      } },
+    { id: 'traps-upper',       name: 'Trapezius (Upper)',    region: 'Back',
+      shorteningPattern: {
+          'Scapula.elevation':  0.012,
+          'Scapula.retraction': 0.005,
+      } },
+    { id: 'traps-mid',         name: 'Trapezius (Middle)',   region: 'Back',
+      shorteningPattern: {
+          'Scapula.retraction': 0.012,
+      } },
+    { id: 'traps-lower',       name: 'Trapezius (Lower)',    region: 'Back',
+      shorteningPattern: {
+          'Scapula.depression': 0.010,
+          'Scapula.retraction': 0.005,
+      } },
+    { id: 'rhomboids',         name: 'Rhomboids',            region: 'Back',
+      shorteningPattern: {
+          'Scapula.retraction': 0.010,
+          'Scapula.elevation':  0.005,
+      } },
+    { id: 'teres-major',       name: 'Teres Major',          region: 'Back',
+      shorteningPattern: {
+          'Shoulder.extension':        0.008,
+          'Shoulder.adduction':        0.005,
+          'Shoulder.internalRotation': 0.005,
+      } },
+    { id: 'teres-minor',       name: 'Teres Minor',          region: 'Back',
+      shorteningPattern: {
+          'Shoulder.externalRotation':    0.012,
+          'Shoulder.horizontalAbduction': 0.005,
+      } },
+    { id: 'infraspinatus',     name: 'Infraspinatus',        region: 'Back',
+      shorteningPattern: {
+          'Shoulder.externalRotation':    0.012,
+          'Shoulder.horizontalAbduction': 0.005,
+      } },
+    { id: 'supraspinatus',     name: 'Supraspinatus',        region: 'Back',
+      shorteningPattern: {
+          // Initiates abduction, narrow line-of-action.
+          'Shoulder.abduction': 0.008,
+      } },
+    { id: 'subscapularis',     name: 'Subscapularis',        region: 'Back',
+      shorteningPattern: {
+          'Shoulder.internalRotation': 0.012,
+      } },
+    { id: 'serratus-anterior', name: 'Serratus Anterior',    region: 'Back',
+      shorteningPattern: {
+          'Scapula.protraction': 0.012,
+          'Scapula.depression':  0.003,
+      } },
+    { id: 'levator-scapulae',  name: 'Levator Scapulae',     region: 'Back',
+      shorteningPattern: {
+          'Scapula.elevation': 0.012,
+      } },
     // Arms
     // Biceps heads and triceps lateral/medial are merged because the two
     // biceps heads act together functionally (both cross shoulder + elbow
@@ -726,24 +870,137 @@ const MUSCLE_CATALOG: MuscleDef[] = [
     // contribution), and triceps lateral + medial are both monoarticular
     // elbow extensors with essentially identical role — only triceps long
     // gets a separate entry because it's biarticular (crosses shoulder).
-    { id: 'biceps-brachii',         name: 'Biceps Brachii',                          region: 'Arms' },
-    { id: 'brachialis',             name: 'Brachialis',                              region: 'Arms' },
-    { id: 'brachioradialis',        name: 'Brachioradialis',                         region: 'Arms' },
-    { id: 'triceps-long',           name: 'Triceps Brachii (Long Head)',             region: 'Arms' },
-    { id: 'triceps-lateral-medial', name: 'Triceps Brachii (Lateral + Medial Head)', region: 'Arms' },
+    { id: 'biceps-brachii',         name: 'Biceps Brachii',                          region: 'Arms',
+      shorteningPattern: {
+          // Long head crosses the shoulder; short head only the elbow.
+          // Lumped here, the shoulder contribution is reduced. Biceps
+          // is also a powerful supinator (especially at flexed elbow) —
+          // hence the Forearm.supination contribution. This is what
+          // makes a barbell curl "feel different" with a supinated grip
+          // (palms up = biceps already shortened) vs neutral/pronated.
+          'Elbow.flexion':      0.010,
+          'Shoulder.flexion':   0.005,
+          'Forearm.supination': 0.005,
+      } },
+    { id: 'brachialis',             name: 'Brachialis',                              region: 'Arms',
+      shorteningPattern: {
+          // Pure elbow flexor — full range across knee... err, elbow.
+          'Elbow.flexion': 0.012,
+      } },
+    { id: 'brachioradialis',        name: 'Brachioradialis',                         region: 'Arms',
+      shorteningPattern: {
+          // Crosses the elbow + the wrist (wrist not modelled here).
+          'Elbow.flexion': 0.010,
+      } },
+    { id: 'triceps-long',           name: 'Triceps Brachii (Long Head)',             region: 'Arms',
+      shorteningPattern: {
+          // Biarticular: crosses shoulder + elbow. Stretches massively
+          // at full shoulder flexion + elbow flexion (overhead extension
+          // bottom).
+          'Elbow.extension':    0.008,
+          'Shoulder.extension': 0.005,
+      } },
+    { id: 'triceps-lateral-medial', name: 'Triceps Brachii (Lateral + Medial Head)', region: 'Arms',
+      shorteningPattern: {
+          'Elbow.extension': 0.012,
+      } },
+    // Forearms
+    // Wrist flexors / extensors are collapsed groups — flexor carpi radialis
+    // / ulnaris / palmaris longus + flexor digitorum superficialis /
+    // profundus on the flexor side; extensor carpi radialis / ulnaris +
+    // extensor digitorum on the extensor side. The wrist DOF isn't
+    // currently modeled, so these don't drive any joint actions yet
+    // (their shorteningPattern is empty). They appear in the catalog so
+    // muscle-group rolls (e.g. noobie "Forearms") can reference them
+    // once wrist work is added.
+    //
+    // Pronator teres / quadratus / supinator are the dedicated radioulnar
+    // joint actuators. Pronator teres also weakly assists elbow flexion
+    // (modest shorteningPattern entry). Biceps brachii's supination role
+    // is encoded on its existing entry above (added in Forearm.supination
+    // muscle assignment).
+    { id: 'wrist-flexors',     name: 'Wrist Flexors',     region: 'Forearms' },
+    { id: 'wrist-extensors',   name: 'Wrist Extensors',   region: 'Forearms' },
+    { id: 'pronator-teres',    name: 'Pronator Teres',    region: 'Forearms',
+      shorteningPattern: {
+          'Forearm.pronation': 0.010,
+          // Crosses elbow weakly (origin: medial epicondyle of humerus).
+          // Small flex contribution.
+          'Elbow.flexion':     0.003,
+      } },
+    { id: 'pronator-quadratus',name: 'Pronator Quadratus',region: 'Forearms',
+      shorteningPattern: {
+          // Pure radioulnar — distal forearm, doesn't cross elbow.
+          'Forearm.pronation': 0.012,
+      } },
+    { id: 'supinator',         name: 'Supinator',         region: 'Forearms',
+      shorteningPattern: {
+          // Pure radioulnar supinator (separate from biceps brachii's
+          // supination role).
+          'Forearm.supination': 0.012,
+      } },
     // Core
-    { id: 'rectus-abdominis',  name: 'Rectus Abdominis',   region: 'Core' },
-    { id: 'obliques-external', name: 'External Obliques',  region: 'Core' },
-    { id: 'obliques-internal', name: 'Internal Obliques',  region: 'Core' },
-    { id: 'erector-spinae',    name: 'Erector Spinae',     region: 'Core' },
-    { id: 'quadratus-lumborum',name: 'Quadratus Lumborum', region: 'Core' },
+    { id: 'rectus-abdominis',  name: 'Rectus Abdominis',   region: 'Core',
+      shorteningPattern: {
+          'Spine.flexion': 0.012,
+      } },
+    { id: 'obliques-external', name: 'External Obliques',  region: 'Core',
+      shorteningPattern: {
+          // Lateral flexion + rotation contributions intentionally
+          // omitted (need side-aware encoding — see header comment).
+          'Spine.flexion': 0.005,
+      } },
+    { id: 'obliques-internal', name: 'Internal Obliques',  region: 'Core',
+      shorteningPattern: {
+          'Spine.flexion': 0.005,
+      } },
+    { id: 'erector-spinae',    name: 'Erector Spinae',     region: 'Core',
+      shorteningPattern: {
+          'Spine.extension': 0.012,
+      } },
+    { id: 'quadratus-lumborum',name: 'Quadratus Lumborum', region: 'Core',
+      shorteningPattern: {
+          // QL is mainly a lateral flexor + spine extensor stabilizer.
+          // Lateral flex omitted (side-handed); extension role kept.
+          'Spine.extension': 0.005,
+      } },
     // Hips
-    { id: 'glute-max',  name: 'Gluteus Maximus',     region: 'Hips' },
-    { id: 'glute-med',  name: 'Gluteus Medius',      region: 'Hips' },
-    { id: 'glute-min',  name: 'Gluteus Minimus',     region: 'Hips' },
-    { id: 'iliopsoas',  name: 'Iliopsoas',           region: 'Hips' },
-    { id: 'tfl',        name: 'Tensor Fasciae Latae',region: 'Hips' },
-    { id: 'sartorius',  name: 'Sartorius',           region: 'Hips' },
+    { id: 'glute-max',  name: 'Gluteus Maximus',     region: 'Hips',
+      shorteningPattern: {
+          'Hip.extension':        0.010,
+          'Hip.externalRotation': 0.005,
+          'Hip.abduction':        0.003,
+      } },
+    { id: 'glute-med',  name: 'Gluteus Medius',      region: 'Hips',
+      shorteningPattern: {
+          'Hip.abduction': 0.012,
+      } },
+    { id: 'glute-min',  name: 'Gluteus Minimus',     region: 'Hips',
+      shorteningPattern: {
+          'Hip.abduction':        0.012,
+          'Hip.internalRotation': 0.003,
+      } },
+    { id: 'iliopsoas',  name: 'Iliopsoas',           region: 'Hips',
+      shorteningPattern: {
+          // Psoas portion crosses lumbar spine; iliac portion doesn't.
+          // Lumped here — small spine flexion contribution.
+          'Hip.flexion':   0.010,
+          'Spine.flexion': 0.002,
+      } },
+    { id: 'tfl',        name: 'Tensor Fasciae Latae',region: 'Hips',
+      shorteningPattern: {
+          'Hip.flexion':          0.005,
+          'Hip.abduction':        0.005,
+          'Hip.internalRotation': 0.005,
+      } },
+    { id: 'sartorius',  name: 'Sartorius',           region: 'Hips',
+      shorteningPattern: {
+          // Biarticular: hip + knee. Tailor's-position muscle.
+          'Hip.flexion':          0.005,
+          'Hip.abduction':        0.005,
+          'Hip.externalRotation': 0.003,
+          'Knee.flexion':         0.005,
+      } },
     // Adductors
     // Two functionally distinct portions with different innervations:
     //   Anterior  (obturator nerve): the classic adductor portion — pure hip
@@ -761,27 +1018,311 @@ const MUSCLE_CATALOG: MuscleDef[] = [
     // Adductor contribution to knee flexion (gracilis) is intentionally
     // dropped — its knee moment arm is insignificant vs. the actual knee
     // flexors and shouldn't show up in that graph.
-    { id: 'adductors',                 name: 'Adductors',                   region: 'Adductors' },
-    { id: 'adductor-magnus-posterior', name: 'Adductor Magnus (Posterior)', region: 'Adductors' },
+    { id: 'adductors',                 name: 'Adductors',                   region: 'Adductors',
+      shorteningPattern: {
+          'Hip.adduction': 0.012,
+      } },
+    { id: 'adductor-magnus-posterior', name: 'Adductor Magnus (Posterior)', region: 'Adductors',
+      shorteningPattern: {
+          // Ischiocondylar head — hip extensor + adductor.
+          'Hip.adduction': 0.005,
+          'Hip.extension': 0.008,
+      } },
     // Quads
     // Three vasti collapsed — they all cross only the knee and all extend
     // it with essentially identical function. Rectus femoris stays separate
     // because it's biarticular (hip flexor + knee extensor).
-    { id: 'rectus-femoris', name: 'Rectus Femoris', region: 'Quads' },
-    { id: 'quads-vasti',    name: 'Quads (Vasti)',  region: 'Quads' },
+    { id: 'rectus-femoris', name: 'Rectus Femoris', region: 'Quads',
+      shorteningPattern: {
+          // Biarticular: max stretch is hip extension + knee flexion
+          // simultaneously (bicycle-kick lengthened position).
+          'Knee.extension': 0.008,
+          'Hip.flexion':    0.008,
+      } },
+    { id: 'quads-vasti',    name: 'Quads (Vasti)',  region: 'Quads',
+      shorteningPattern: {
+          'Knee.extension': 0.012,
+      } },
     // Hamstrings
     // Biarticular hamstrings collapsed — biceps femoris long head,
     // semitendinosus, and semimembranosus all cross hip + knee with
     // essentially identical function (hip extend + knee flex). Biceps
     // femoris SHORT head stays separate because it's monoarticular
     // (knee flexor only, doesn't cross hip).
-    { id: 'hamstrings-biarticular', name: 'Hamstrings (Biarticular)',    region: 'Hamstrings' },
-    { id: 'biceps-femoris-short',   name: 'Biceps Femoris (Short Head)', region: 'Hamstrings' },
+    { id: 'hamstrings-biarticular', name: 'Hamstrings (Biarticular)',    region: 'Hamstrings',
+      shorteningPattern: {
+          // Both joint contributions add: deadlift bottom (high hip flex
+          // + extended knee) is maximum stretch. Hip is the longer lever
+          // anatomically, but coefficients here are roughly equal —
+          // refine empirically.
+          'Hip.extension': 0.008,
+          'Knee.flexion':  0.008,
+      } },
+    { id: 'biceps-femoris-short',   name: 'Biceps Femoris (Short Head)', region: 'Hamstrings',
+      shorteningPattern: {
+          'Knee.flexion': 0.012,
+      } },
     // Calves
-    { id: 'gastrocnemius',     name: 'Gastrocnemius',     region: 'Calves' },
-    { id: 'soleus',            name: 'Soleus',            region: 'Calves' },
-    { id: 'tibialis-anterior', name: 'Tibialis Anterior', region: 'Calves' },
+    { id: 'gastrocnemius',     name: 'Gastrocnemius',     region: 'Calves',
+      shorteningPattern: {
+          // Biarticular: knee flexion shortens it, knee extension stretches.
+          // Gastroc-knee-flex coupling is well-known (donkey calf raise =
+          // knee straight = max stretch).
+          'Ankle.plantarFlexion': 0.010,
+          'Knee.flexion':         0.005,
+      } },
+    { id: 'soleus',            name: 'Soleus',            region: 'Calves',
+      shorteningPattern: {
+          'Ankle.plantarFlexion': 0.012,
+      } },
+    { id: 'tibialis-anterior', name: 'Tibialis Anterior', region: 'Calves',
+      shorteningPattern: {
+          'Ankle.dorsiFlexion': 0.012,
+      } },
 ];
+
+// User-facing muscle taxonomy. Each "display group" (e.g. "Triceps",
+// "Shoulders", "Rotator cuff") aggregates one or more catalog muscles
+// using the SATURATION formula:
+//
+//     group_activation = 1 − Π(1 − w_i · a_i)
+//
+// Where w_i is each contributor's weight in [0, 1] and a_i is its peak
+// activation in [0, 1]. Properties:
+//   - A single contributor at 100% activation reports the group at its
+//     weight (e.g. side delt w=1.0, front delt w=0.2 → "Shoulders" reads
+//     20% from front-delt-only activation).
+//   - Multiple contributors saturate gracefully toward 100% rather than
+//     summing past it (two triceps heads at 100% with w=0.8 each → 96%
+//     group activation, not 160%).
+//   - Monotonic in every input — adding activation never reduces the
+//     group score.
+//
+// Catalog muscles can contribute to multiple display groups (e.g. the
+// rotator cuff muscles each contribute fully to "Rotator cuff" in the
+// advanced view AND a small share to "Shoulders" in the noobie view).
+// Catalog muscles that don't contribute to any group in a view are
+// effectively hidden in that view.
+type DisplayGroup = {
+    label: string;
+    contributors: Array<{ muscleId: string; weight: number }>;
+};
+
+// Advanced view: 1:1 with catalog wherever possible. The only non-trivial
+// aggregations are "Rotator cuff" (4 small synergists rolled up since
+// they're rarely distinguishable in EMG / programming context),
+// "Glute medius/minimus" (functionally tightly coupled), and "Obliques"
+// (external + internal merge — most users don't distinguish). Hidden
+// from the catalog: pec-minor (small, redundant with sternal pec for
+// programming purposes), quadratus lumborum (lower-back stabilizer that
+// rarely registers as the dominant trained tissue), iliopsoas / TFL /
+// sartorius (hip flexors that are usually accessory).
+const ADVANCED_GROUPS: DisplayGroup[] = [
+    // Chest
+    { label: 'Clavicular pec',                contributors: [{ muscleId: 'pec-clavicular',         weight: 1.0 }] },
+    { label: 'Sternal pec',                   contributors: [{ muscleId: 'pec-sternal',            weight: 1.0 }] },
+    // Shoulders (splits)
+    { label: 'Front delt',                    contributors: [{ muscleId: 'delt-front',             weight: 1.0 }] },
+    { label: 'Side delt',                     contributors: [{ muscleId: 'delt-side',              weight: 1.0 }] },
+    { label: 'Rear delt',                     contributors: [{ muscleId: 'delt-rear',              weight: 1.0 }] },
+    // Back
+    { label: 'Latissimus dorsi',              contributors: [{ muscleId: 'lats',                   weight: 1.0 }] },
+    { label: 'Upper traps',                   contributors: [{ muscleId: 'traps-upper',            weight: 1.0 }] },
+    { label: 'Middle traps',                  contributors: [{ muscleId: 'traps-mid',              weight: 1.0 }] },
+    { label: 'Lower traps',                   contributors: [{ muscleId: 'traps-lower',            weight: 1.0 }] },
+    { label: 'Rhomboids',                     contributors: [{ muscleId: 'rhomboids',              weight: 1.0 }] },
+    { label: 'Teres major',                   contributors: [{ muscleId: 'teres-major',            weight: 1.0 }] },
+    { label: 'Levator scapula',               contributors: [{ muscleId: 'levator-scapulae',       weight: 1.0 }] },
+    { label: 'Serratus anterior',             contributors: [{ muscleId: 'serratus-anterior',      weight: 1.0 }] },
+    { label: 'Rotator cuff',                  contributors: [
+        { muscleId: 'supraspinatus',                                  weight: 0.7 },
+        { muscleId: 'infraspinatus',                                  weight: 0.7 },
+        { muscleId: 'teres-minor',                                    weight: 0.7 },
+        { muscleId: 'subscapularis',                                  weight: 0.7 },
+    ] },
+    // Arms
+    { label: 'Biceps brachii',                contributors: [{ muscleId: 'biceps-brachii',         weight: 1.0 }] },
+    { label: 'Brachialis',                    contributors: [{ muscleId: 'brachialis',             weight: 1.0 }] },
+    { label: 'Brachioradialis',               contributors: [{ muscleId: 'brachioradialis',        weight: 1.0 }] },
+    { label: 'Tricep long head',              contributors: [{ muscleId: 'triceps-long',           weight: 1.0 }] },
+    { label: 'Triceps lateral/medial heads',  contributors: [{ muscleId: 'triceps-lateral-medial', weight: 1.0 }] },
+    // Core
+    { label: 'Abs',                           contributors: [{ muscleId: 'rectus-abdominis',       weight: 1.0 }] },
+    { label: 'Obliques',                      contributors: [
+        { muscleId: 'obliques-external',                              weight: 0.85 },
+        { muscleId: 'obliques-internal',                              weight: 0.85 },
+    ] },
+    { label: 'Erectors',                      contributors: [{ muscleId: 'erector-spinae',         weight: 1.0 }] },
+    // Glutes
+    { label: 'Glute max',                     contributors: [{ muscleId: 'glute-max',              weight: 1.0 }] },
+    { label: 'Glute medius/minimus',          contributors: [
+        { muscleId: 'glute-med',                                      weight: 0.85 },
+        { muscleId: 'glute-min',                                      weight: 0.85 },
+    ] },
+    // Adductors
+    { label: 'Adductors',                     contributors: [{ muscleId: 'adductors',              weight: 1.0 }] },
+    { label: 'Adductor magnus',               contributors: [{ muscleId: 'adductor-magnus-posterior', weight: 1.0 }] },
+    // Quads
+    { label: 'Quads (vasti)',                 contributors: [{ muscleId: 'quads-vasti',            weight: 1.0 }] },
+    { label: 'Rectus femoris',                contributors: [{ muscleId: 'rectus-femoris',         weight: 1.0 }] },
+    // Hams
+    { label: 'Hamstrings (biarticular)',      contributors: [{ muscleId: 'hamstrings-biarticular', weight: 1.0 }] },
+    { label: 'Hamstring (short head)',        contributors: [{ muscleId: 'biceps-femoris-short',   weight: 1.0 }] },
+    // Calves
+    { label: 'Gastrocnemius',                 contributors: [{ muscleId: 'gastrocnemius',          weight: 1.0 }] },
+    { label: 'Soleus',                        contributors: [{ muscleId: 'soleus',                 weight: 1.0 }] },
+    { label: 'Tibialis anterior',             contributors: [{ muscleId: 'tibialis-anterior',      weight: 1.0 }] },
+    // Forearms (radioulnar + wrist).
+    { label: 'Wrist flexors',                 contributors: [{ muscleId: 'wrist-flexors',          weight: 1.0 }] },
+    { label: 'Wrist extensors',               contributors: [{ muscleId: 'wrist-extensors',        weight: 1.0 }] },
+    { label: 'Pronator teres',                contributors: [{ muscleId: 'pronator-teres',         weight: 1.0 }] },
+    { label: 'Pronator quadratus',            contributors: [{ muscleId: 'pronator-quadratus',     weight: 1.0 }] },
+    { label: 'Supinator',                     contributors: [{ muscleId: 'supinator',              weight: 1.0 }] },
+];
+
+// Noobie view: 13 high-level groups. Weights here encode the user's
+// rules of thumb:
+//   - Shoulders saturates at 100% off side-delt alone (w=1.0); front
+//     and rear delts at w=0.6 / 0.5 so isolation work like rear-delt
+//     fly or front raise still reads "training shoulders" without
+//     overwhelming the side-delt-dominant signal. No rotator cuff in
+//     the roll-up.
+//   - Triceps merges long head + lat/med (each w=0.8 → 80% from one
+//     head alone, ~96% with both maxed).
+//   - Chest merges both pec heads (sternal + clavicular) into one row —
+//     noobies don't distinguish "upper" vs "lower" chest the way the
+//     advanced split does.
+//   - Lats includes teres major (the "little lats", same functional
+//     pattern of shoulder extension / IR).
+//   - Upper back rolls up traps + rhomboids + lev scap (no serratus —
+//     not what people picture when they say "upper back").
+//   - Lower back is just erectors (QL is a stabilizer; rarely the
+//     dominant trained tissue and muddies the signal if included).
+//   - Quads weighted 0.75 vasti / 0.25 rectus (bulk vs biarticular).
+//   - Calves weighted 0.85 gastroc / 0.7 soleus (gastroc visually
+//     dominant; seated calf work reads ~70% rather than 100%).
+//   - Brachialis is a "Biceps" contributor (deep elbow flexor); it's
+//     also an arms muscle but the noobie view only has Biceps/Triceps/
+//     Forearms in the upper-arm slots. Brachioradialis goes to Forearms.
+//   - Hip flexors / abs / stabilizers don't appear in noobie at all.
+const NOOBIE_GROUPS: DisplayGroup[] = [
+    { label: 'Biceps', contributors: [
+        { muscleId: 'biceps-brachii',                                 weight: 0.85 },
+        { muscleId: 'brachialis',                                     weight: 0.5 },
+    ] },
+    { label: 'Triceps', contributors: [
+        { muscleId: 'triceps-long',                                   weight: 0.8 },
+        { muscleId: 'triceps-lateral-medial',                         weight: 0.8 },
+    ] },
+    { label: 'Forearms', contributors: [
+        // Wrist flexors / extensors are the bulk of the forearm — give
+        // them the dominant weight. Brachioradialis is visible/forearm-
+        // appearing too. Pronators and supinator are smaller but also
+        // count toward "forearm work."
+        { muscleId: 'wrist-flexors',                                  weight: 0.85 },
+        { muscleId: 'wrist-extensors',                                weight: 0.85 },
+        { muscleId: 'brachioradialis',                                weight: 0.6 },
+        { muscleId: 'pronator-teres',                                 weight: 0.3 },
+        { muscleId: 'pronator-quadratus',                             weight: 0.2 },
+        { muscleId: 'supinator',                                      weight: 0.3 },
+    ] },
+    { label: 'Shoulders', contributors: [
+        // Side delt at w=1.0 — Shoulders saturates at 100% off side-delt
+        // alone (saturation formula clamps the product at 1, so weights
+        // never sum past 1 in the display). Front + rear at w=0.6/0.5
+        // mean a pure rear-delt-fly or front-raise still flags the
+        // exercise as "training shoulders" (50–60% display) rather than
+        // hiding under the side-delt-only signal. No rotator cuff in
+        // the noobie roll-up — those live under "Shoulders" only in the
+        // advanced view.
+        { muscleId: 'delt-side',                                      weight: 1.0 },
+        { muscleId: 'delt-front',                                     weight: 0.6 },
+        { muscleId: 'delt-rear',                                      weight: 0.5 },
+    ] },
+    { label: 'Lats', contributors: [
+        { muscleId: 'lats',                                           weight: 0.9 },
+        { muscleId: 'teres-major',                                    weight: 0.5 },
+    ] },
+    { label: 'Upper back', contributors: [
+        // serratus-anterior removed: it's a rib-cage / scapular muscle
+        // most lifters don't think of as "upper back" training; lives
+        // under its own row in advanced view.
+        { muscleId: 'traps-mid',                                      weight: 0.7 },
+        { muscleId: 'rhomboids',                                      weight: 0.7 },
+        { muscleId: 'traps-upper',                                    weight: 0.5 },
+        { muscleId: 'traps-lower',                                    weight: 0.5 },
+        { muscleId: 'levator-scapulae',                               weight: 0.3 },
+    ] },
+    { label: 'Lower back', contributors: [
+        // QL removed: small stabilizer that rarely registers as the
+        // dominant trained tissue; muddied the lower-back signal.
+        { muscleId: 'erector-spinae',                                 weight: 0.9 },
+    ] },
+    { label: 'Chest', contributors: [
+        // Sternal head dominates total chest mass — give it the bigger
+        // share. Clavicular head adds ~equal contribution but caps lower
+        // so chest doesn't read 100% off a pure incline-style angle
+        // (where only clav fires) the way it would off a flat-style angle
+        // (both heads fire). Pec-minor is small and contributes weakly.
+        { muscleId: 'pec-sternal',                                    weight: 0.85 },
+        { muscleId: 'pec-clavicular',                                 weight: 0.7 },
+        { muscleId: 'pec-minor',                                      weight: 0.15 },
+    ] },
+    { label: 'Quads', contributors: [
+        // Vasti carry the bulk of the quads (3 of the 4 heads); rectus
+        // femoris is the smaller, biarticular head and contributes more
+        // weakly. Pure rectus-only firing (e.g. an unusual leg-extension
+        // angle) reads ~25% Quads — present but clearly secondary.
+        { muscleId: 'quads-vasti',                                    weight: 0.75 },
+        { muscleId: 'rectus-femoris',                                 weight: 0.25 },
+    ] },
+    { label: 'Hamstrings', contributors: [
+        { muscleId: 'hamstrings-biarticular',                         weight: 0.85 },
+        { muscleId: 'biceps-femoris-short',                           weight: 0.5 },
+    ] },
+    { label: 'Inner thighs', contributors: [
+        { muscleId: 'adductors',                                      weight: 0.7 },
+        { muscleId: 'adductor-magnus-posterior',                      weight: 0.7 },
+    ] },
+    { label: 'Glutes', contributors: [
+        { muscleId: 'glute-max',                                      weight: 0.9 },
+        { muscleId: 'glute-med',                                      weight: 0.4 },
+        { muscleId: 'glute-min',                                      weight: 0.4 },
+    ] },
+    { label: 'Calves', contributors: [
+        // Gastroc kept at 0.85 (visually dominant calf head); soleus
+        // dropped to 0.7 since seated / knee-flexed calf work isn't
+        // typically what people picture when they say "calves."
+        { muscleId: 'gastrocnemius',                                  weight: 0.85 },
+        { muscleId: 'soleus',                                         weight: 0.7 },
+    ] },
+];
+
+// Apply the saturation formula to a display group given a lookup of
+// per-catalog-muscle peak activations. Returns activation in [0, 1] plus
+// the dominant contributor's id (the one with the largest w·a — used by
+// the Preview tab to attach metadata badges to the row).
+const aggregateGroupActivation = (
+    group: DisplayGroup,
+    activationByMuscle: Map<string, number>,
+): { activation: number; dominantMuscleId: string | null; contributors: string[] } => {
+    let oneMinusProduct = 1; // running Π(1 − w·a)
+    let maxContribution = 0;
+    let dominantId: string | null = null;
+    const present: string[] = [];
+    for (const c of group.contributors) {
+        const a = activationByMuscle.get(c.muscleId) ?? 0;
+        if (a <= 0) continue;
+        const contrib = c.weight * a;
+        oneMinusProduct *= (1 - contrib);
+        if (contrib > maxContribution) {
+            maxContribution = contrib;
+            dominantId = c.muscleId;
+        }
+        present.push(c.muscleId);
+    }
+    return { activation: 1 - oneMinusProduct, dominantMuscleId: dominantId, contributors: present };
+};
 
 // Default muscle assignments per joint action. Numbers are dimensionless
 // contribution weights — only their RATIO at a given angle matters. The
@@ -871,17 +1412,28 @@ const DEFAULT_SECTION_SCALES: Record<string, number> = {
     'Scapula.protraction':           2.8,
     'Scapula.retraction':            3.1,
     // Shoulder.
-    'Shoulder.flexion':              2.2936,
+    'Shoulder.flexion':              2.4194,
     'Shoulder.extension':            3.0167,
-    'Shoulder.abduction':            2.4350,
+    'Shoulder.abduction':            2.3807,
     'Shoulder.adduction':            3.0314,
-    'Shoulder.horizontalAbduction':  2.8018,
-    'Shoulder.horizontalAdduction':  3.1645,
+    'Shoulder.horizontalAbduction':  2.8261,
+    'Shoulder.horizontalAdduction':  3.5162,
     'Shoulder.externalRotation':     2.7838,
     'Shoulder.internalRotation':     5.5471,
     // Elbow.
     'Elbow.flexion':                 2.4757,
     'Elbow.extension':               1.5187,
+    // Forearm. 1.8 = sum_targets / max_target = (1.0 + 0.8) / 1.0 with
+    // brachioradialis (target 0.3) intentionally omitted — bidirectional
+    // role doesn't fit the linear bell model. Re-calibrate when adding
+    // a brachioradialis bell or other contributors.
+    'Forearm.pronation':             1.8,
+    'Forearm.supination':            1.8,
+    // Grip — single contributor (wrist-flexors at target 1.0). Scale =
+    // sum_targets / max_target = 1.0. Wrist-flexors absorbs all of grip
+    // demand. Add other contributors and re-calibrate when finger
+    // flexors / hand intrinsics get split out.
+    'Forearm.grip':                  1.0,
     // Spine.
     'Spine.flexion':                 3.1,
     'Spine.extension':               1.4,
@@ -1048,6 +1600,46 @@ const DEFAULT_MODIFICATIONS: CrossJointModification[] = [
             { kind: 'muscle', jointGroup: 'Shoulder', actionKey: 'abduction', muscleId: 'delt-front', maxChange: 50, direction: 'reduce', muscleMode: 'relative' },
         ],
     },
+    {
+        id: 'biceps-disadvantage-at-pronation',
+        name: 'Biceps disadvantage at forearm pronation',
+        sourceJoint: 'Forearm',
+        sourceActionKey: 'pronation',
+        // Source range maps to Forearm.action.Supination joint limit
+        // (±85°), but with sign flipped so that POSITIVE source angle =
+        // pronated direction. Curve stays at 0 through the supination
+        // half (xMin = -85, midX = 0, midY = 0) and ramps up to 100 at
+        // full pronation (xMax = +85, rightY = 100). Net: no effect when
+        // the forearm is supinated or neutral; effect ramps in linearly
+        // as the forearm rotates into pronation.
+        leftY: 0,
+        midX: 0,
+        midY: 0,
+        rightY: 100,
+        targets: [
+            // Biceps brachii's contribution to elbow flexion drops up to
+            // 50% at full pronation. Biceps is mechanically a supinator;
+            // when the forearm is pronated, its line of pull no longer
+            // aligns with the elbow flexion axis, so its share of the
+            // flexion torque shrinks. 'relative' mode lets brachialis +
+            // brachioradialis absorb the redistributed share — they're
+            // unaffected by forearm rotation (brachialis monoarticular
+            // at elbow only) or actually FAVORED by pronation
+            // (brachioradialis is strongest in mid-pronated grip).
+            { kind: 'muscle', jointGroup: 'Elbow', actionKey: 'flexion', muscleId: 'biceps-brachii', maxChange: 50, direction: 'reduce', muscleMode: 'relative' },
+            // Total elbow flexion capacity INCREASES up to 15% at full
+            // pronation. Mechanism: biceps loses ~50% of its share but
+            // brachioradialis (now in its strongest line-of-pull) more
+            // than compensates, so the joint as a whole can produce more
+            // total flexion torque pronated than supinated. This is
+            // physiologically defensible (semi-pronated reverse curls
+            // often allow more weight than supinated curls), though the
+            // magnitude is modest. Tune up/down if data suggests
+            // otherwise — or flip to direction: 'reduce' if you'd rather
+            // model pronation as a net capacity loss.
+            { kind: 'capacity', jointGroup: 'Elbow', actionKey: 'flexion', maxChange: 15, direction: 'increase' },
+        ],
+    },
 ];
 
 const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
@@ -1085,17 +1677,20 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     'Shoulder.flexion': {
         // Spec ROM: -60° to 180°. delt-front mid-ROM contribution lifted
         // ~30% by raising inverted-bell dip parameter (raw 0.439 → 0.57);
-        // peaks at -60° / 180° unchanged (raw base = 1.024). delt-side
-        // overall reduced 20% (target 0.6 → 0.48).
-        'delt-front':        m(0.7469, 0.4157, 30, 1.15),
-        'pec-clavicular':    m(0, 0.8066, 37, 2),
-        'delt-side':         m(0.14, 0.6998, 120, 2),
-        'traps-lower':       m(-0.1366, 0.8719, 140, 2.2),
-        'serratus-anterior': m(-0.1556, 0.8725, 140, 2.2),
-        // Pec-sternal helps pull arm forward only at deep extension —
-        // drops near 0 by +10° flex (steepness 6 narrow bell at -45°).
-        'pec-sternal':       m(0, 0.3853, -45, 6),
-        'biceps-brachii':    m(0.1005, 0.3436, 60, 1.6),
+        // peaks at -60° / 180° unchanged (raw base = 1.024).
+        // 2026-05-02 target updates: delt-side 0.48 → 0.40 (less side-
+        // delt incidental flexion); pec-sternal 0.6 → 0.7 (sternal head
+        // contributes more shoulder-flex torque at deep extension than
+        // previously credited); biceps-brachii 0.4 → 0.6 (long-head
+        // shoulder-flex contribution increased). Section scale 2.2936
+        // → 2.4194.
+        'delt-front':        m(0.8053, 0.4482, 30, 1.15),
+        'pec-clavicular':    m(0,      0.8503, 37, 2),
+        'delt-side':         m(0.1094, 0.5472, 120, 2),
+        'traps-lower':       m(-0.1243, 0.7936, 140, 2.2),
+        'serratus-anterior': m(-0.1416, 0.7941, 140, 2.2),
+        'pec-sternal':       m(0,      0.4863, -45, 6),
+        'biceps-brachii':    m(0.1582, 0.5393, 60, 1.6),
     },
     'Shoulder.extension': {
         // Spec ROM: -180° to 60°. delt-rear and rhomboids bell bases
@@ -1114,12 +1709,14 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         // Spec ROM: 0° to 180°. delt-front now co-equal primary at 100%
         // (target raised 0.9 → 1.0); base lifted ~3× so contribution
         // stays meaningful through low-abduction angles.
-        'delt-side':         m(0.2971, 0.7579, 72, 2.75),
-        'supraspinatus':     m(0.1175, 0.549, 15, 2.2),
-        'delt-front':        m(0.3198, 0.969, 180, 1.9),
-        'traps-lower':       m(-0.0602, 0.8206, 130, 3.2),
-        'serratus-anterior': m(-0.0615, 0.8206, 130, 3.2),
-        'biceps-brachii':    m(-0.0358, 0.2652, 120, 2),
+        // 2026-05-02 target update: biceps-brachii 0.2 → 0.1 (incidental
+        // abduction contribution halved). Section scale 2.4350 → 2.3807.
+        'delt-side':         m(0.3081, 0.7860, 72, 2.75),
+        'supraspinatus':     m(0.1240, 0.5792, 15, 2.2),
+        'delt-front':        m(0.3152, 0.9552, 180, 1.9),
+        'traps-lower':       m(-0.0586, 0.7989, 130, 3.2),
+        'serratus-anterior': m(-0.0599, 0.7989, 130, 3.2),
+        'biceps-brachii':    m(-0.0182, 0.1297, 120, 2),
     },
     'Shoulder.adduction': {
         // Spec ROM: -180° to 0°.
@@ -1132,22 +1729,40 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
     },
     'Shoulder.horizontalAdduction': {
         // Spec ROM: -45° to 135°.
-        'pec-sternal':       m(0.1256, 0.7434, 70, 1.5),
-        'delt-front':        m(0.0288, 1.1255, 56, 2.6),
-        'pec-clavicular':    m(-0.0486, 0.6797, 40, 2),
-        'serratus-anterior': m(0, 0.5705, 60, 1.8),
-        'pec-minor':         m(0.0827, 0.4135, 60, 2),
-        'biceps-brachii':    m(-0.0153, 0.4695, 60, 1.8),
+        // 2026-05-02: pec-sternal and pec-clavicular bells re-shaped to
+        // share the delt-front bell profile (peak=56°, steepness=2.6) so
+        // the three pec-driven contributors track each other proportionally
+        // across the ROM. Result: pec-sternal display share holds at
+        // 86-100% (was 56-100% — 44pp swing → 14pp); pec-clavicular at
+        // 61-70% (was 21-70% — 49pp swing → 9pp). Within-ROM activation
+        // now stays close to the target ratios at every angle, which
+        // matches the kinesiology consensus that both pec heads are
+        // primary horizontal adductors throughout the motion (not just
+        // at peak shortening).
+        // 2026-05-02 target updates: pec-clavicular 0.7 → 0.8 (clav head
+        // contributes more horizontal adduction than previously
+        // credited); biceps-brachii 0.4 → 0.3 (smaller incidental
+        // contribution). Section scale 3.5008 → 3.5162.
+        'pec-sternal':       m(0.0327, 1.2578, 56, 2.6),
+        'delt-front':        m(0.0289, 1.1320, 56, 2.6),
+        'pec-clavicular':    m(0.0289, 1.0062, 56, 2.6),
+        'serratus-anterior': m(0,      0.4633, 60, 1.8),
+        'pec-minor':         m(0.0560, 0.2799, 60, 2),
+        'biceps-brachii':    m(-0.0097, 0.2906, 60, 1.8),
     },
     'Shoulder.horizontalAbduction': {
-        // Spec ROM: -135° to 45°. lats max reduced 0.5 → 0.3 per spec.
-        // RESIDUAL: rhomboids overshoots target 50% (clamps to 100%) —
-        // bell-shape-vs-share-distribution issue, unchanged.
-        'delt-rear':     m(0.0564, 1.3425, 15, 1.8),
-        'infraspinatus': m(-0.122, 2.0, 0, 2),
-        'teres-minor':   m(-0.142, 2.0, 0, 2),
+        // Spec ROM: -135° to 45°.
+        // 2026-05-02 target update: lats 0.3 → 0.5 (more horizontal
+        // abduction contribution restored). lats now hits k_max cap
+        // (k=2.0) so achieved %  is 52.3% vs 50% target — minor over-
+        // shoot, acceptable. Section scale 2.8018 → 2.8261.
+        // RESIDUAL: rhomboids still overshoots target 50% (clamps to
+        // 100%) — bell-shape-vs-share-distribution issue, unchanged.
+        'delt-rear':     m(0.0546, 1.3010, 15, 1.8),
+        'infraspinatus': m(-0.1220, 2.0, 0, 2),
+        'teres-minor':   m(-0.1420, 2.0, 0, 2),
         'rhomboids':     m(0.0905, 0.25, 25, 2.5),
-        'lats':          m(-0.06, 0.6, 30, 2),
+        'lats':          m(-0.1, 1.0, 30, 2),
     },
     'Shoulder.internalRotation': {
         // Spec ROM: -90° to 90°.
@@ -1186,6 +1801,39 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         // Spec ROM: -145° to 0°.
         'triceps-long':           m(-0.0403, 1.3432, -100, 1.4),
         'triceps-lateral-medial': m(0.4653, 0.7445, -53, 0.85),
+    },
+
+    // =========================================================================
+    // FOREARM (radioulnar pronation/supination)
+    // =========================================================================
+    // Spec ROM: ±85°. Bells are flat (peak angle 0, default cosine) since
+    // both pronators and supinators show fairly constant force across the
+    // ROM. Targets per section:
+    //   pronation:  pronator-quadratus 1.0, pronator-teres 0.8,
+    //               brachioradialis 0.3 (only pronates from supinated
+    //               position; ignored here as a length-tension complexity).
+    //   supination: biceps-brachii 1.0 (massive contributor at flexed
+    //               elbow), supinator 0.8, brachioradialis 0.3 (same
+    //               caveat as above — ignored).
+    // Uncalibrated default scale (1.8) — re-run calibrate_capped.py
+    // after locking these targets.
+    'Forearm.pronation': {
+        'pronator-quadratus': m(0.4, 1.0, 0, 1),
+        'pronator-teres':     m(0.32, 0.8, 0, 1),
+    },
+    'Forearm.supination': {
+        'biceps-brachii': m(0.4, 1.0, 0, 1),
+        'supinator':      m(0.32, 0.8, 0, 1),
+    },
+    'Forearm.grip': {
+        // Only contributor for now — the wrist flexors are the
+        // dominant grip muscles (the deep finger flexors live within
+        // them in our collapsed catalog). Flat bell at peak so all
+        // grip demand routes 100% to wrist-flexors regardless of
+        // pose. Wrist extensors don't contribute to grip in this
+        // model. Add finger flexors / hand intrinsics later if you
+        // want to split out the grip contributors.
+        'wrist-flexors': m(1.0, 1.0, 0, 1),
     },
 
     // =========================================================================
@@ -1365,11 +2013,14 @@ const DEFAULT_MUSCLE_ASSIGNMENTS: MuscleAssignmentMap = {
         'traps-mid':        m(0.19, 0.4, 0, 1),
     },
     'Scapula.depression': {
+        // 2026-05-02: lats target 0.7 → 0.6 (slightly less of a depression
+        // contributor than previously credited); serratus-anterior 0.3 →
+        // 0.4 (slightly more — its lower fibers depress the scapula).
         'traps-lower':       m(0.39, 1.0, 0, 1),
         'pec-minor':         m(0.38, 1.0, 0, 1),
-        'lats':              m(0.25, 0.7, 0, 1),
-        'pec-sternal':       m(0.2, 0.5, 0, 1),
-        'serratus-anterior': m(0.13, 0.3, 0, 1),
+        'lats':              m(0.25, 0.6, 0, 1),
+        'pec-sternal':       m(0.2,  0.5, 0, 1),
+        'serratus-anterior': m(0.13, 0.4, 0, 1),
     },
     'Scapula.protraction': {
         'serratus-anterior': m(0.41, 1.0, 0, 1),
@@ -1465,6 +2116,16 @@ const DEFAULT_JOINT_LIMITS: JointLimitsMap = {
     // direction the stored hinge angle calls positive. The two conventions
     // happen to disagree here, which is fine as long as nothing mixes them.
     'Elbow.action.Extension': { min: 0, max: 150 },
+
+    // --- Forearm pronation/supination (twist on the forearm bone) ---
+    // ROM ±85° — typical population. Stored on the positive direction
+    // (Supination). Negative angles = pronation.
+    'Forearm.action.Supination': { min: -85, max: 85 },
+    // Grip is a tensile-force action — no rotational ROM. The "limits"
+    // entry exists only so the limit-discovery pipeline doesn't choke on
+    // a missing key; demand magnitudes are in force units, never angles,
+    // so these bounds aren't meaningfully consulted.
+    'Forearm.action.Grip': { min: 0, max: 9999 },
 
     // --- Spine (fixed in the model today; defined for static analysis) ---
     'Spine.action.Flexion':          { min: -30, max: 80 },
@@ -1933,16 +2594,117 @@ const mkPosture = (overrides: Partial<Posture>): Posture => ({
     ...overrides,
 });
 
+// ---------------------------------------------------------------------------
+// EXERCISE METADATA
+//
+// Information that travels with each exercise but isn't derivable from the
+// live simulation. Used by the Preview tab (and downstream the user-facing
+// app) to render the exercise the way an end user wants to see it. All
+// fields optional — Preview shows the bits that are populated and falls
+// back gracefully on the rest. Designed for forward expansion: add fields
+// here as the recovery / rest-time / volume formulas come online without
+// breaking presets that were authored under earlier schemas.
+//
+// Per-muscle annotation. Keyed in `muscleNotes` by MUSCLE_CATALOG id
+// (e.g. 'quads-vasti', 'glute-max'). Captures things the SIMULATION can't
+// reasonably infer from forces + posture alone — these are exercise-
+// specific characterizations of HOW the muscle is being trained.
+interface MuscleNote {
+    // Region of the muscle most heavily trained. Useful for muscles with
+    // regional differentiation (lats upper vs lower fibers, rectus femoris
+    // proximal vs distal, etc.). 'whole' for muscles that don't really
+    // differentiate or for cases where the exercise hits the muscle evenly.
+    region?: 'proximal' | 'distal' | 'whole';
+    // Muscle length range at peak load. 'short' = active-insufficiency
+    // territory (heavily contracted), 'mid' = normal mid-range, 'long' =
+    // stretched / passive-tension contributing, 'full' = trains across the
+    // whole length (e.g. exercises with large ROM at this joint).
+    lengthRange?: 'short' | 'mid' | 'long' | 'full';
+    // Recovery demand multiplier (1.0 = baseline). Plugs into the
+    // suggested-rest / days-to-recover formulas. Captures exercise-
+    // specific factors like high eccentric load (RDL → hams) or extreme
+    // length (overhead pressing → long head triceps stretch) that lengthen
+    // recovery beyond what activation magnitude alone would suggest.
+    recoveryDemand?: number;
+    // Free-form note for the advanced view (e.g. "biased toward stretched
+    // position", "dominant in the lockout phase").
+    note?: string;
+}
+
+interface ExerciseMetadata {
+    // Per-muscle annotations keyed by MUSCLE_CATALOG id.
+    muscleNotes?: Record<string, MuscleNote>;
+    // Exercise-level systemic demand multiplier. Captures cardio load
+    // (large total muscle mass), bracing requirements, CNS taxation.
+    // Used by the rest-time / weekly-volume formulas. 1.0 = baseline.
+    systemicDemand?: number;
+    // Whether the exercise typically requires intense bracing (squat,
+    // deadlift, overhead press). Boolean shortcut for systemic demand
+    // boosting; the formulas can also read systemicDemand directly.
+    requiresBracing?: boolean;
+    // Free-form description shown in the Preview tab (replaces the
+    // hardcoded MOCK_EXERCISES descriptions for live-authored presets).
+    description?: string;
+}
+
+// Allowed values for the `movementPattern` field. Standard kinesiology
+// taxonomy — used by the preset picker's pattern-grouping mode.
+type MovementPattern =
+    | 'press'        // shoulder/horizontal/incline press, push-up, dip
+    | 'row'          // any horizontal pull
+    | 'pulldown'     // vertical pull (lat pulldown, pull-up)
+    | 'curl'         // elbow flexion under load
+    | 'extension'    // elbow extension (skull crusher, pushdown, dip extension phase)
+    | 'fly'          // shoulder horizontal adduction without elbow extension
+    | 'raise'        // shoulder abduction / horizontal abduction (lateral / front / rear raise)
+    | 'shrug'        // scapular elevation
+    | 'pullover'     // shoulder extension/adduction with straight arm
+    | 'rotation'     // spine rotation (oblique twists)
+    | 'crunch'       // spine flexion
+    | 'extension-spine' // spine extension (back extension, good morning)
+    | 'hinge'        // hip hinge (deadlift, RDL, kettlebell swing)
+    | 'squat'        // knee+hip flex/ext under axial load
+    | 'lunge'        // unilateral squat / split-stance loaded
+    | 'leg-curl'     // knee flexion isolation
+    | 'leg-extension'// knee extension isolation
+    | 'calf-raise'   // ankle plantar flexion isolation
+    | 'hip-abduction'// hip abduction / adduction isolation
+    | 'grip'         // pure grip force
+    | 'neck'         // cervical spine motion
+    | 'other';
+
+// Equipment brand / category. Used for both filter ("show only Hammer
+// Strength") and grouping ("group by manufacturer"). Free-form so new
+// brands can be added without touching the type — but stick to these
+// when you can:
+//   'Free Weight' — barbells, dumbbells, kettlebells (no machine)
+//   'Hammer Strength' — Life Fitness's plate-loaded line
+//   'Cybex', 'Nautilus', 'Life Fitness' — selectorized / cammed machines
+//   'Bodyweight' — calisthenics / no equipment
+//   'Cable' — cable-stack exercises that aren't brand-specific
+//   'Smith Machine'
+//   'Custom' — user-built exercises that don't fit elsewhere
+
 interface ExercisePreset {
     id: string;
     name: string;
     category: 'Push' | 'Pull' | 'Legs' | 'Isolation';
+    // Equipment brand — see above for canonical strings.
+    brand?: string;
+    // Movement pattern — kinesiology bucket the exercise belongs to.
+    movementPattern?: MovementPattern;
+    // Primary trained muscles, by MUSCLE_CATALOG id, ordered most→least.
+    // Used for "group by muscle" view in the picker. Optional — falls
+    // back to "uncategorized" if absent. Can be derived later from
+    // timeline analysis but explicit authoring is cleaner.
+    primaryMuscles?: string[];
     startPosture: Posture;
     endPosture: Posture;
     startTwists?: Record<string, number>;
     endTwists?: Record<string, number>;
     forces: Array<Omit<ForceConfig, 'id'>>;
     constraints: Record<string, Array<Omit<BoneConstraint, 'id'>>>;
+    metadata?: ExerciseMetadata;
 }
 
 // Exercise presets are captured from real, user-built scenes via the
@@ -1954,6 +2716,9 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         id: 'bb_bench_press',
         name: 'BB BENCH PRESS',
         category: 'Push',
+        brand: 'Free Weight',
+        movementPattern: 'press',
+        primaryMuscles: ['pec-sternal', 'pec-clavicular', 'delt-front', 'triceps-lateral-medial'],
         startPosture: {
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
@@ -2047,6 +2812,9 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         id: 'hs_iso_chest_press',
         name: 'HAMMER STRENGTH ISO-LATERAL CHEST PRESS',
         category: 'Push',
+        brand: 'Hammer Strength',
+        movementPattern: 'press',
+        primaryMuscles: ['pec-sternal', 'pec-clavicular', 'delt-front', 'triceps-lateral-medial'],
         startPosture: {
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
@@ -2196,6 +2964,9 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         id: 'sldl',
         name: 'STIFF-LEG DEADLIFT',
         category: 'Pull',
+        brand: 'Free Weight',
+        movementPattern: 'hinge',
+        primaryMuscles: ['hamstrings-biarticular', 'glute-max', 'erector-spinae', 'adductor-magnus-posterior'],
         startPosture: {
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
@@ -2305,6 +3076,9 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         id: 'rdl',
         name: 'ROMANIAN DEADLIFT',
         category: 'Pull',
+        brand: 'Free Weight',
+        movementPattern: 'hinge',
+        primaryMuscles: ['hamstrings-biarticular', 'glute-max', 'erector-spinae'],
         startPosture: {
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
@@ -2383,6 +3157,9 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         id: 'deadlift',
         name: 'CONVENTIONAL DEADLIFT',
         category: 'Pull',
+        brand: 'Free Weight',
+        movementPattern: 'hinge',
+        primaryMuscles: ['glute-max', 'hamstrings-biarticular', 'quads-vasti', 'erector-spinae'],
         startPosture: {
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
@@ -2456,6 +3233,9 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         id: 'back-squat',
         name: 'BARBELL BACK SQUAT',
         category: 'Push',
+        brand: 'Free Weight',
+        movementPattern: 'squat',
+        primaryMuscles: ['quads-vasti', 'glute-max', 'adductor-magnus-posterior', 'erector-spinae'],
         startPosture: {
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
@@ -2540,6 +3320,9 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         id: 'bb_bent_over_row',
         name: 'BB BENT OVER ROW',
         category: 'Pull',
+        brand: 'Free Weight',
+        movementPattern: 'row',
+        primaryMuscles: ['lats', 'rhomboids', 'traps-mid', 'delt-rear', 'biceps-brachii'],
         startPosture: {
             spine: { x: 4.8203590771609627e-17, y: -0.6166666666666667, z: -0.7872243785746362 },
             lClavicle: { x: -25, y: 2.01947021484375, z: -4 },
@@ -2692,6 +3475,9 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         id: 'bb_overhead_press',
         name: 'BB OVERHEAD PRESS',
         category: 'Push',
+        brand: 'Free Weight',
+        movementPattern: 'press',
+        primaryMuscles: ['delt-front', 'delt-side', 'pec-clavicular', 'triceps-lateral-medial', 'serratus-anterior'],
         startPosture: {
             // 10° backward thoracic-extension layback. (0, -cos 10°, sin 10°)
             // — spine points up-and-slightly-back from pelvis to neck base.
@@ -2699,22 +3485,19 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
             // Humerus in spineFrame-local — body-local front-rack arm pose.
-            // Spine layback rotates the spineFrame, so arms automatically
-            // rotate backward with the chest.
-            lHumerus: { x: -0.7420989707234318, y: 0.46662365282492985, z: -0.48119796786306407 },
-            lForearm: { x: 0, y: -0.2276220977279885, z: 0.9737495471762285 },
-            rHumerus: { x: 0.7420989707234318, y: 0.46662365282492985, z: -0.48119796786306407 },
-            rForearm: { x: 0, y: -0.2276220977279885, z: 0.9737495471762285 },
-            // Femur tilts a hair back so that with the pelvis shifted forward
-            // (pelvisTz = -7.5, hip drive), the knee tracks the foot.
-            lFemur: { x: 0, y: 0.9977474243128747, z: 0.06708261531145247 },
-            lTibia: { x: 0, y: 0.99991818542349, z: 0.012791499497526091 },
-            // Foot has trace dorsi flex from constraint settling — the arc
-            // half-spaces let the ankle find its natural angle for this load.
-            lFoot: { x: 0, y: -0.02251292701365742, z: -0.9997465519406795 },
-            rFemur: { x: 0, y: 0.9977474243128747, z: 0.06708261531145247 },
-            rTibia: { x: 0, y: 0.99991818542349, z: 0.012791499497526091 },
-            rFoot: { x: 0, y: -0.02251292701365742, z: -0.9997465519406795 },
+            lHumerus: { x: -0.7427119838672667, y: 0.46616149308207727, z: -0.4806998766251532 },
+            lForearm: { x: 0, y: -0.22903294841769695, z: 0.9734186707368503 },
+            rHumerus: { x: 0.7427119838672667, y: 0.46616149308207727, z: -0.4806998766251532 },
+            rForearm: { x: 0, y: -0.22903294841769695, z: 0.9734186707368503 },
+            // Femur tilts a hair back so the knee tracks the foot with the
+            // pelvis shifted forward (pelvisTz ≈ -7.5).
+            lFemur: { x: 0, y: 0.9977396447051208, z: 0.06719822455764331 },
+            lTibia: { x: 0, y: 0.999923270054424, z: 0.01238765529336555 },
+            // Trace dorsi flex from arc-Ground settling.
+            lFoot: { x: 0, y: -0.022516991197585434, z: -0.9997464604125428 },
+            rFemur: { x: 0, y: 0.9977396447051208, z: 0.06719822455764331 },
+            rTibia: { x: 0, y: 0.999923270054424, z: 0.01238765529336555 },
+            rFoot: { x: 0, y: -0.022516991197585434, z: -0.9997464604125428 },
         },
         endPosture: {
             // Spine upright at lockout — lifter has punched through, head
@@ -2722,24 +3505,24 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             spine: { x: 0, y: -1, z: 0 },
             lClavicle: { x: -25, y: 0, z: 0 },
             rClavicle: { x: 25, y: 0, z: 0 },
-            lHumerus: { x: -0.6007157473359344, y: -0.7757498952941979, z: -0.1932684424671315 },
-            lForearm: { x: 0, y: 0.9386973459903525, z: 0.3447423568850636 },
-            rHumerus: { x: 0.6007157473359408, y: -0.775749895294193, z: -0.19326844246713062 },
-            rForearm: { x: 0, y: 0.9386973459903502, z: 0.34474235688506993 },
-            lFemur: { x: 0, y: 0.9997932406002418, z: 0.02033411050591333 },
-            lTibia: { x: 0, y: 0.9999199218435548, z: 0.012655034586252315 },
-            lFoot: { x: 0, y: -0.0024170792142213715, z: -0.9999970788597695 },
-            rFemur: { x: 0, y: 0.9997932406002418, z: 0.020334110505913328 },
-            rTibia: { x: 0, y: 0.9999199218435548, z: 0.01265503458625233 },
-            rFoot: { x: 0, y: -0.0024170792142213767, z: -0.9999970788597695 },
+            lHumerus: { x: -0.6007214380907318, y: -0.7759325411591376, z: -0.19251609124571026 },
+            lForearm: { x: 0, y: 0.9386752355344765, z: 0.34480255537668963 },
+            rHumerus: { x: 0.6007214380907366, y: -0.7759325411591339, z: -0.19251609124571012 },
+            rForearm: { x: 0, y: 0.9386752355344739, z: 0.34480255537669674 },
+            lFemur: { x: 0, y: 0.9997954669830768, z: 0.020224346716064413 },
+            lTibia: { x: 0, y: 0.9999237504912879, z: 0.012348813847351932 },
+            lFoot: { x: 0, y: -0.0024162168357367746, z: -0.9999970809438409 },
+            rFemur: { x: 0, y: 0.9997954669830768, z: 0.020224346716064396 },
+            rTibia: { x: 0, y: 0.9999237504912879, z: 0.012348813847351977 },
+            rFoot: { x: 0, y: -0.002416216835736783, z: -0.9999970809438409 },
         },
         startTwists: {
             spine: 0, pelvis: 0,
-            // Hip drive: pelvis pushed ~7.5 forward and ~0.3 up. The arc-
+            // Hip drive: pelvis pushed ~7.5 forward and ~0.6 up. The arc-
             // based Ground constraints absorb the resulting heel/toe shift
             // by letting the foot settle into trace dorsi flex.
-            pelvisTx: 0, pelvisTy: -0.3352403445571757, pelvisTz: -7.5453140395696625,
-            lHumerus: 60.72861137005861, rHumerus: -60.72861137005861,
+            pelvisTx: 0, pelvisTy: -0.6135080268990754, pelvisTz: -7.549893552020549,
+            lHumerus: 60.55950155413256, rHumerus: -60.55950155413256,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
             lTibia: 0, rTibia: 0,
@@ -2747,10 +3530,10 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
         },
         endTwists: {
             spine: 0, pelvis: 0,
-            // At lockout the pelvis has mostly returned (Tz ≈ -2.7 vs start
-            // -7.5). Slight residual hip-drive forward at the top.
-            pelvisTx: 0, pelvisTy: -0.21543120664483045, pelvisTz: -2.699775338211186,
-            lHumerus: -7.376677248559715, rHumerus: 7.376677248559754,
+            // At lockout the pelvis Tz mostly returns (~ -2.7 vs start -7.5);
+            // pelvis Ty stays slightly elevated for the punch-through.
+            pelvisTx: 0, pelvisTy: -0.6073708213912018, pelvisTz: -2.6997059520757305,
+            lHumerus: -7.359825959213434, rHumerus: 7.359825959213478,
             lFemur: 0, rFemur: 0,
             lForearm: 0, rForearm: 0,
             lTibia: 0, rTibia: 0,
@@ -2761,20 +3544,24 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             { name: 'Force', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
         ],
         constraints: {
-            // Ground complex (4 constraints per foot, applied via the
-            // constraint preset menu). Heel arc pivots around the toe + Y
-            // half-space at heel; toe arc pivots around the heel + Y
-            // half-space at toe. Together they allow plantar/dorsi flex
-            // (rotation around either contact point) while preventing
-            // translation and floor penetration. Centers/pivots are
-            // captured from the live geometry at the moment the preset was
-            // applied — small floating-point residuals are from constraint
-            // settling and are within solver tolerance.
+            // Ground complex (4 physics constraints per foot — heel arc
+            // pivoting on toe + Y half-space at heel + toe arc pivoting on
+            // heel + Y half-space at toe) allows plantar/dorsi flex while
+            // preventing translation and floor penetration.
+            //
+            // Two additional GUIDE-ONLY Y planar pins per foot lock the
+            // heel and toe to floor level (y=133) for OHP form — the lifter
+            // doesn't actually rock on toes or heels here, the layback is
+            // entirely in the upper body. The arcs handle physics, the
+            // guide pins enforce flat-foot kinematics.
             rFoot: [
                 { active: true, type: 'arc', position: 0, normal: { x: 1, y: 0, z: 0 }, center: { x: 20.000000000000018, y: 132.3866982010403, z: -0.010701992781389613 }, pivot: { x: 20.000000000000018, y: 133.27893244684245, z: -19.990790031892175 }, axis: { x: 1, y: 0, z: 0 }, radius: 20 },
                 { active: true, type: 'planar', position: 0, normal: { x: 0, y: 1, z: 0 }, center: { x: 20.000000000000018, y: 132.3866982010403, z: -0.010701992781389613 }, directional: 'half-space' },
                 { active: true, type: 'arc', normal: { x: 1, y: 0, z: 0 }, center: { x: 20.000000000000018, y: 133.27893244684245, z: -19.990790031892175 }, pivot: { x: 20.000000000000018, y: 132.3866982010403, z: -0.010701992781389613 }, axis: { x: 1, y: 0, z: 0 }, radius: 20 },
                 { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20.000000000000018, y: 133.27893244684245, z: -19.990790031892175 }, directional: 'half-space' },
+                // Flat-foot guide pins (kinematic, no physics demand).
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 133.00359691762412, z: -20.003094428041972 }, physicsEnabled: false },
+                { active: true, type: 'planar', position: 0, normal: { x: 0, y: 1, z: 0 }, center: { x: 20, y: 132.10913511513996, z: -0.023105987507360926 }, physicsEnabled: false },
             ],
             rForearm: [
                 // Lateral pin (physics) — bar locked at hand-width.
@@ -2793,6 +3580,8 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
                 { active: true, type: 'planar', position: 0, normal: { x: 0, y: 1, z: 0 }, center: { x: -20.000000000000018, y: 132.3866982010403, z: -0.010701992781389613 }, directional: 'half-space' },
                 { active: true, type: 'arc', normal: { x: -1, y: 0, z: 0 }, center: { x: -20.000000000000018, y: 133.27893244684245, z: -19.990790031892175 }, pivot: { x: -20.000000000000018, y: 132.3866982010403, z: -0.010701992781389613 }, axis: { x: -1, y: 0, z: 0 }, radius: 20 },
                 { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20.000000000000018, y: 133.27893244684245, z: -19.990790031892175 }, directional: 'half-space' },
+                { active: true, type: 'planar', normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 133.00359691762412, z: -20.003094428041972 }, physicsEnabled: false },
+                { active: true, type: 'planar', position: 0, normal: { x: 0, y: 1, z: 0 }, center: { x: -20, y: 132.10913511513996, z: -0.023105987507360926 }, physicsEnabled: false },
             ],
             lForearm: [
                 { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -65.26382327369274, y: -49.089084175284526, z: -21.633578301457874 } },
@@ -2803,10 +3592,539 @@ const EXERCISE_PRESETS: ExercisePreset[] = [
             ],
         },
     },
+    // ========================================================================
+    // HAMMER STRENGTH ISO-LATERAL INCLINE PRESS  (rev 2 — arc constraint)
+    // ========================================================================
+    // Plate-loaded incline press with two independent levers. Each lever
+    // pivots at the bottom-rear of the frame; handles extend up-and-
+    // forward to the user at upper-chest height (start) and finish
+    // overhead-and-forward at lockout (end). The lever traces an arc, so
+    // we model each handle with an `arc` constraint — pivot behind+below
+    // the user, lateral rotation axis, radius = lever length.
+    //
+    // Why arc, not planar rails:
+    //   The arc constraint locks every direction perpendicular to the
+    //   handle's circular path and leaves only the tangent free — exactly
+    //   what a fixed-path lever does. Planar rails approximate this
+    //   linearly, which is fine for short ROMs (<25°) but loses the
+    //   curvature on incline machines where the lever sweeps ~50°+.
+    //
+    // Why no resistance profile:
+    //   Plate gravity acts at the back end of the lever; the effective
+    //   tangent force at the handle = plate_weight × (plate_horizontal
+    //   distance from pivot) / (handle distance from pivot). The arc
+    //   constraint already decomposes a fixed-direction (downward)
+    //   resistance into tangent + radial components, and the tangent
+    //   component automatically follows the cos(lever_angle) variation.
+    //   So a plain downward force on the hand reproduces lever physics
+    //   for free. No profile needed for plain-lever (non-cammed)
+    //   Hammer Strength designs.
+    //
+    // Body posture:
+    //   Seated, back upright against the back pad (spine pinned at
+    //   pelvis + neck), knees ~30° flexed, hip ~95° flexed.
+    //
+    // Start (BOTTOM of rep): hands at upper chest height, slightly
+    //   outside shoulder line (V-grip), elbows ~90° flexed. Maximum
+    //   chest stretch — the eccentric end of the rep.
+    // End (TOP of rep): arms extended forward-and-up at ~30° incline
+    //   above horizontal, elbows ~10–15° from straight (slight bend at
+    //   lockout). Arms shortened, plates lifted highest.
+    {
+        id: 'hs_iso_incline_press',
+        name: 'HAMMER STRENGTH ISO-LATERAL INCLINE PRESS',
+        category: 'Push',
+        brand: 'Hammer Strength',
+        movementPattern: 'press',
+        primaryMuscles: ['pec-clavicular', 'delt-front', 'pec-sternal', 'triceps-lateral-medial'],
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // Start (BOTTOM): humerus mostly forward + slightly outward
+            // for V-grip width. Shoulder ~80° flex, ~25° abduction.
+            lHumerus: { x: -0.42, y: 0.17, z: -0.89 },
+            // Elbow ~90° flex (BOTTOM of press). hingeLocal(90°) = (0, 0, 1).
+            lForearm: { x: 0, y: 0, z: 1 },
+            rHumerus: { x: 0.42, y: 0.17, z: -0.89 },
+            rForearm: { x: 0, y: 0, z: 1 },
+            // Seated, knees ~30° flex
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // End (TOP): humerus forward-and-up at incline angle.
+            // Shoulder ~135° flex, ~20° abduction. Arm reaching up-and-
+            // forward to the lockout position above the upper chest.
+            lHumerus: { x: -0.30, y: -0.66, z: -0.69 },
+            // Elbow ~12° flex (lockout — slight bend, never fully straight
+            // on a press). hingeLocal(12°) = (0, 0.978, 0.208).
+            lForearm: { x: 0, y: 0.978, z: 0.208 },
+            rHumerus: { x: 0.30, y: -0.66, z: -0.69 },
+            rForearm: { x: 0, y: 0.978, z: 0.208 },
+            // Legs unchanged
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            // Plate gravity — pure downward (world +Y in y-down). The arc
+            // constraint decomposes this into tangent (drives muscle
+            // demand) and radial (absorbed by constraint reaction). As
+            // the lever rotates from start to end, the tangent component
+            // automatically reduces — same effective leverage curve as
+            // a real plate-loaded lever.
+            { name: 'Lever resistance', boneId: 'rForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+            { name: 'Lever resistance', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10 },
+        ],
+        constraints: {
+            // Arc constraint per hand. Pivot behind+below the user
+            // (where the lever pivots on the machine frame). Axis is
+            // lateral (X) — independent left/right levers, each rotates
+            // about its own horizontal axis. Radius is the lever length
+            // from pivot to handle. (`snapArcToTip` will refine pivot
+            // along the X axis at load time so the arc passes exactly
+            // through the start hand position.)
+            rForearm: [
+                { active: true, type: 'arc',
+                  normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 0, z: 0 },
+                  pivot: { x: 25, y: 60, z: 50 },
+                  axis: { x: 1, y: 0, z: 0 },
+                  radius: 110,
+                  position: 1 },
+            ],
+            lForearm: [
+                { active: true, type: 'arc',
+                  normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 0, z: 0 },
+                  pivot: { x: -25, y: 60, z: 50 },
+                  axis: { x: 1, y: 0, z: 0 },
+                  radius: 110,
+                  position: 1 },
+            ],
+            // Back pad + seat → pin pelvis and neck so the body doesn't
+            // translate and the spine doesn't drive the lift.
+            spine: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 30, z: 0 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: -30, z: 0 } },
+            ],
+        },
+    },
+    // ========================================================================
+    // HAMMER STRENGTH ISO-LATERAL SHOULDER PRESS
+    // ========================================================================
+    // Vertical-dominant press from shoulder height to overhead. Hands
+    // travel up a near-vertical rail per side. Targets front + side delts
+    // and triceps. Shoulder reaches ~165° flexion at lockout.
+    {
+        id: 'hs_iso_shoulder_press',
+        name: 'HAMMER STRENGTH ISO-LATERAL SHOULDER PRESS',
+        category: 'Push',
+        brand: 'Hammer Strength',
+        movementPattern: 'press',
+        primaryMuscles: ['delt-front', 'delt-side', 'triceps-lateral-medial', 'serratus-anterior', 'pec-clavicular'],
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // Shoulder ~95° abduction with slight flex (V-grip), elbow at shoulder height
+            lHumerus: { x: -0.85, y: 0.2, z: -0.49 },
+            // Elbow ~95° flex, forearm pointing up and slightly forward
+            lForearm: { x: 0, y: -0.85, z: -0.53 },
+            rHumerus: { x: 0.85, y: 0.2, z: -0.49 },
+            rForearm: { x: 0, y: -0.85, z: -0.53 },
+            // Seated, moderate knee flex
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // End: arms overhead, near full abduction with slight flex
+            lHumerus: { x: -0.4, y: -0.9, z: -0.17 },
+            // End: elbow nearly straight
+            lForearm: { x: 0, y: 0.985, z: 0.174 },
+            rHumerus: { x: 0.4, y: -0.9, z: -0.17 },
+            rForearm: { x: 0, y: 0.985, z: 0.174 },
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            // Vertical resistance — overhead press fights gravity directly.
+            { name: 'Lever resistance', boneId: 'rForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10,
+              profile: { points: [{ t: 0, multiplier: 1.0 }, { t: 0.5, multiplier: 1.05 }, { t: 1, multiplier: 0.9 }] } },
+            { name: 'Lever resistance', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10,
+              profile: { points: [{ t: 0, multiplier: 1.0 }, { t: 0.5, multiplier: 1.05 }, { t: 1, multiplier: 0.9 }] } },
+        ],
+        constraints: {
+            // Vertical rail per side: lock X (no cross-body drift) and Z
+            // (no fwd/back drift). Y is free for the press direction.
+            rForearm: [
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 32, y: -42, z: -10 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 32, y: -42, z: -10 } },
+            ],
+            lForearm: [
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -32, y: -42, z: -10 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -32, y: -42, z: -10 } },
+            ],
+            spine: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 30, z: 0 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: -30, z: 0 } },
+            ],
+        },
+    },
+    // ========================================================================
+    // HAMMER STRENGTH ISO-LATERAL ROW
+    // ========================================================================
+    // Horizontal pulling lever. Chest pressed against a forward pad,
+    // hands start extended forward and pull back to sides. Lever path is
+    // roughly horizontal-rearward per side. Targets lats, rhomboids,
+    // mid traps, rear delts; biceps work secondarily.
+    {
+        id: 'hs_iso_row',
+        name: 'HAMMER STRENGTH ISO-LATERAL ROW',
+        category: 'Pull',
+        brand: 'Hammer Strength',
+        movementPattern: 'row',
+        primaryMuscles: ['lats', 'rhomboids', 'traps-mid', 'delt-rear', 'biceps-brachii', 'teres-major'],
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // Arms forward — shoulder ~85° flexion, slight protraction
+            lHumerus: { x: -0.2, y: 0.1, z: -0.974 },
+            // Elbow nearly straight at start (~15° flex)
+            lForearm: { x: 0, y: 0.966, z: -0.259 },
+            rHumerus: { x: 0.2, y: 0.1, z: -0.974 },
+            rForearm: { x: 0, y: 0.966, z: -0.259 },
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // End: elbows back past torso, ~30° shoulder extension
+            lHumerus: { x: -0.3, y: 0.6, z: -0.74 },
+            // Elbow flexed ~110°
+            lForearm: { x: 0, y: -0.34, z: -0.94 },
+            rHumerus: { x: 0.3, y: 0.6, z: -0.74 },
+            rForearm: { x: 0, y: -0.34, z: -0.94 },
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            // Resistance pulls the hand FORWARD (the direction the user
+            // pulls AWAY from). Y component small — slight downward
+            // since the lever drops as user pulls back.
+            { name: 'Lever resistance', boneId: 'rForearm', position: 1, x: 0, y: 0.1, z: -0.995, magnitude: 10,
+              profile: { points: [{ t: 0, multiplier: 0.85 }, { t: 0.5, multiplier: 1.05 }, { t: 1, multiplier: 1.0 }] } },
+            { name: 'Lever resistance', boneId: 'lForearm', position: 1, x: 0, y: 0.1, z: -0.995, magnitude: 10,
+              profile: { points: [{ t: 0, multiplier: 0.85 }, { t: 0.5, multiplier: 1.05 }, { t: 1, multiplier: 1.0 }] } },
+        ],
+        constraints: {
+            // Forward-back rail per side with slight downward bias
+            rForearm: [
+                { active: true, type: 'planar', normal: { x: 0, y: 0.995, z: 0.1 }, center: { x: 35, y: -25, z: -45 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 1, y: 0, z: 0 }, center: { x: 35, y: -25, z: -45 } },
+            ],
+            lForearm: [
+                { active: true, type: 'planar', normal: { x: 0, y: 0.995, z: 0.1 }, center: { x: -35, y: -25, z: -45 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: -1, y: 0, z: 0 }, center: { x: -35, y: -25, z: -45 } },
+            ],
+            // Chest pad pressed against the user — pin spine and pelvis
+            spine: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 30, z: 0 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: -30, z: 0 } },
+            ],
+        },
+    },
+    // ========================================================================
+    // HAMMER STRENGTH ISO-LATERAL WIDE PULLDOWN
+    // ========================================================================
+    // Vertical pulling lever — handles start above and to the sides,
+    // pulled down and outward to roughly shoulder height. Targets lats
+    // (with strong adduction emphasis from the wide grip), teres major,
+    // mid traps, and biceps.
+    {
+        id: 'hs_iso_wide_pulldown',
+        name: 'HAMMER STRENGTH ISO-LATERAL WIDE PULLDOWN',
+        category: 'Pull',
+        brand: 'Hammer Strength',
+        movementPattern: 'pulldown',
+        primaryMuscles: ['lats', 'teres-major', 'biceps-brachii', 'rhomboids', 'traps-lower'],
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // Arms overhead and wide — shoulder ~165° abduction, ~10° flex
+            lHumerus: { x: -0.95, y: -0.31, z: -0.05 },
+            // Elbow nearly straight
+            lForearm: { x: 0, y: 0.966, z: 0.259 },
+            rHumerus: { x: 0.95, y: -0.31, z: -0.05 },
+            rForearm: { x: 0, y: 0.966, z: 0.259 },
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // End: arms pulled down to ~T-pose with elbows behind shoulder line
+            lHumerus: { x: -0.85, y: 0.5, z: 0.17 },
+            // Elbow flexed ~95°
+            lForearm: { x: 0, y: -0.087, z: -0.996 },
+            rHumerus: { x: 0.85, y: 0.5, z: 0.17 },
+            rForearm: { x: 0, y: -0.087, z: -0.996 },
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 0, rForearm: 0,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            // Resistance pulls UP (user pulls down). Slightly outward
+            // component matching the wide-grip path (handles drift
+            // outward as they descend).
+            { name: 'Lever resistance', boneId: 'rForearm', position: 1, x: 0.2, y: -0.98, z: 0, magnitude: 10,
+              profile: { points: [{ t: 0, multiplier: 0.85 }, { t: 0.5, multiplier: 1.05 }, { t: 1, multiplier: 1.0 }] } },
+            { name: 'Lever resistance', boneId: 'lForearm', position: 1, x: -0.2, y: -0.98, z: 0, magnitude: 10,
+              profile: { points: [{ t: 0, multiplier: 0.85 }, { t: 0.5, multiplier: 1.05 }, { t: 1, multiplier: 1.0 }] } },
+        ],
+        constraints: {
+            // Each hand on a downward-and-slightly-outward rail.
+            rForearm: [
+                { active: true, type: 'planar', normal: { x: 0.98, y: 0.2, z: 0 }, center: { x: 100, y: -100, z: 0 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: 100, y: -100, z: 0 } },
+            ],
+            lForearm: [
+                { active: true, type: 'planar', normal: { x: -0.98, y: 0.2, z: 0 }, center: { x: -100, y: -100, z: 0 }, physicsEnabled: false },
+                { active: true, type: 'planar', normal: { x: 0, y: 0, z: 1 }, center: { x: -100, y: -100, z: 0 } },
+            ],
+            // Seated with knee restraint pad — pin spine+pelvis
+            spine: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 30, z: 0 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: -30, z: 0 } },
+            ],
+        },
+    },
+    // ========================================================================
+    // HAMMER STRENGTH PLATE-LOADED SEATED BICEPS
+    // ========================================================================
+    // Preacher-style biceps curl machine. Upper arms supported on a pad,
+    // hands grip handles that swing on a lever. Pure elbow flexion ROM
+    // (~100°), targeting biceps + brachialis with brachioradialis assist.
+    // Forearms travel an arc, but the linear-rail approximation works at
+    // this ROM range.
+    {
+        id: 'hs_seated_biceps',
+        name: 'HAMMER STRENGTH SEATED BICEPS',
+        category: 'Isolation',
+        brand: 'Hammer Strength',
+        movementPattern: 'curl',
+        primaryMuscles: ['biceps-brachii', 'brachialis', 'brachioradialis'],
+        startPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // Upper arm forward and down ~30° from horizontal (preacher pad
+            // angle), shoulder ~75° flex. Slight outward angle to V-grip.
+            lHumerus: { x: -0.2, y: 0.5, z: -0.84 },
+            // Elbow nearly straight (~10° flex) at start — arm extended
+            // forward over the pad
+            lForearm: { x: 0, y: 0.985, z: -0.174 },
+            rHumerus: { x: 0.2, y: 0.5, z: -0.84 },
+            rForearm: { x: 0, y: 0.985, z: -0.174 },
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        endPosture: {
+            lClavicle: { x: -25, y: 0, z: 0 },
+            rClavicle: { x: 25, y: 0, z: 0 },
+            // Upper arm position unchanged (pad supports it), elbow flexed
+            // ~110° at peak — hands curled up toward shoulder
+            lHumerus: { x: -0.2, y: 0.5, z: -0.84 },
+            lForearm: { x: 0, y: -0.342, z: -0.94 },
+            rHumerus: { x: 0.2, y: 0.5, z: -0.84 },
+            rForearm: { x: 0, y: -0.342, z: -0.94 },
+            lFemur: { x: 0, y: 0.3, z: -0.954 },
+            lTibia: { x: 0, y: 0.866, z: 0.5 },
+            lFoot: { x: 0, y: 0, z: -1 },
+            rFemur: { x: 0, y: 0.3, z: -0.954 },
+            rTibia: { x: 0, y: 0.866, z: 0.5 },
+            rFoot: { x: 0, y: 0, z: -1 },
+        },
+        startTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            // Forearm supinated — the curl handles are angled palm-up.
+            // Stored raw left = +60, raw right = -60 (mirror convention).
+            lForearm: 60, rForearm: -60,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        endTwists: {
+            spine: 0, pelvis: 0, pelvisTx: 0, pelvisTy: 0, pelvisTz: 0,
+            lHumerus: 0, rHumerus: 0,
+            lFemur: 0, rFemur: 0,
+            lForearm: 60, rForearm: -60,
+            lTibia: 0, rTibia: 0,
+            lFoot: 0, rFoot: 0,
+        },
+        forces: [
+            // Resistance pulls hand DOWN (gravity on plates → effective
+            // downward at the handle). Ascending profile: machine feels
+            // hardest in the bottom half of the curl as the lever
+            // approaches horizontal.
+            { name: 'Lever resistance', boneId: 'rForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10,
+              profile: { points: [{ t: 0, multiplier: 1.05 }, { t: 0.5, multiplier: 1.0 }, { t: 1, multiplier: 0.85 }] } },
+            { name: 'Lever resistance', boneId: 'lForearm', position: 1, x: 0, y: 1, z: 0, magnitude: 10,
+              profile: { points: [{ t: 0, multiplier: 1.05 }, { t: 0.5, multiplier: 1.0 }, { t: 1, multiplier: 0.85 }] } },
+        ],
+        constraints: {
+            // Hand path is an arc; using arc constraint here. Pivot ~at
+            // the elbow position, axis = lateral (each arm has its own
+            // pivot — independent levers). Radius = forearm length.
+            // (`normal` and `center` are unused by arc but the type
+            // declaration still requires them — fill with placeholders.)
+            rForearm: [
+                { active: true, type: 'arc',
+                  normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 0, z: 0 },
+                  pivot: { x: 25, y: -10, z: -38 },
+                  axis: { x: 1, y: 0, z: 0 },
+                  radius: 25,
+                  position: 1 },
+            ],
+            lForearm: [
+                { active: true, type: 'arc',
+                  normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 0, z: 0 },
+                  pivot: { x: -25, y: -10, z: -38 },
+                  axis: { x: 1, y: 0, z: 0 },
+                  radius: 25,
+                  position: 1 },
+            ],
+            // Seated, chest pressed against pad. Pin spine.
+            spine: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: 30, z: 0 }, position: 0 },
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 0, y: -30, z: 0 } },
+            ],
+            // Upper arm pinned to preacher pad — fixed constraints on the
+            // humerus tip (= elbow position).
+            rHumerus: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: 25, y: -10, z: -38 } },
+            ],
+            lHumerus: [
+                { active: true, type: 'fixed', normal: { x: 0, y: 0, z: 0 }, center: { x: -25, y: -10, z: -38 } },
+            ],
+        },
+    },
 ];
 
 const BioModelPage: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'timeline' | 'capacities' | 'constraints' | 'limits' | 'muscles' | 'modifications'>('kinematics');
+  const [activeTab, setActiveTab] = useState<'kinematics' | 'kinetics' | 'torque' | 'timeline' | 'capacities' | 'constraints' | 'limits' | 'muscles' | 'modifications' | 'preview' | 'lengths'>('kinematics');
+  // Per-exercise metadata loaded from a preset (or null when authoring
+  // from scratch). Includes per-muscle annotations (region, length range,
+  // recovery demand) and exercise-level systemic demand. Read by the
+  // Preview tab; future work will add an authoring UI in the Muscles tab
+  // so it can be edited inline.
+  const [exerciseMetadata, setExerciseMetadata] = useState<ExerciseMetadata | null>(null);
+  // Preview tab override of the global knowledge level. Lets the author
+  // toggle between noobie / advanced while reviewing a preset without
+  // changing their app-wide setting. Defaults to 'advanced' since the
+  // BioModelPage user IS the advanced user; the toggle is for previewing
+  // what a noobie would see.
+  const [previewLevel, setPreviewLevel] = useState<'noobie' | 'advanced'>('advanced');
   const [poseMode, setPoseMode] = useState<'start' | 'end'>('start');
   const [startPosture, setStartPosture] = useState<Posture>(DEFAULT_POSTURE);
   const [endPosture, setEndPosture] = useState<Posture>(DEFAULT_POSTURE);
@@ -2923,6 +4241,9 @@ const BioModelPage: React.FC = () => {
   // dismissal via the ref. Presets are purely declarative data (see
   // EXERCISE_PRESETS above); applyPreset wires them into state.
   const [presetMenuOpen, setPresetMenuOpen] = useState(false);
+  // Grouping mode for the preset picker. Persisted in component state
+  // only — resets to 'category' on page reload (no localStorage).
+  const [presetGroupBy, setPresetGroupBy] = useState<'category' | 'pattern' | 'brand' | 'muscle'>('category');
   const presetMenuRef = useRef<HTMLDivElement | null>(null);
   // Watermarks for `directional: 'one-way'` planar constraints. Map keyed
   // by constraint id; value is the scalar offset α along the normal that
@@ -5009,6 +6330,42 @@ const BioModelPage: React.FC = () => {
           return d.torqueMagnitude > phaseAMax * 0.01;
       });
 
+      // --- Grip demand injection ---
+      // Grip is a linear-force action — not a torque. Demand is the
+      // forearm-axis distal projection of forces on the hand. This runs
+      // separately from the torque chain because grip force doesn't
+      // propagate through joints; it's resisted purely at the hand /
+      // forearm flexors. For each forearm bone with applied forces,
+      // sum the positive axial projections and emit a demand entry.
+      // Capacity comes from `Forearm.grip` (force units, not Nm).
+      const gripCap = capacities['Forearm']?.['grip'];
+      if (gripCap) {
+          for (const boneId of ['lForearm', 'rForearm'] as const) {
+              const bs = kin.boneStartPoints[boneId];
+              const be = kin.boneEndPoints[boneId];
+              if (!bs || !be) continue;
+              const forearmDir = normalize(sub(be, bs));
+              let gripForce = 0;
+              for (const f of currentForces) {
+                  if (f.boneId !== boneId) continue;
+                  const dir = getForceDirectionWithKin(f, kin, currentTwists);
+                  const mag = (f.magnitude || 1) * evaluateProfile(f.profile, currentT);
+                  const projection = dotProduct(dir, forearmDir) * mag;
+                  if (projection > 0) gripForce += projection;
+              }
+              if (gripForce > 0) {
+                  const cap = evaluateCapacity(gripCap, 0);
+                  finalFiltered.push({
+                      boneId,
+                      jointGroup: 'Forearm',
+                      action: 'Grip',
+                      torqueMagnitude: gripForce,
+                      effort: gripForce / Math.max(cap, 1e-6),
+                  });
+              }
+          }
+      }
+
       // Recompute summary stats after all phases
       const finalTotalEffort = finalFiltered.reduce((s, d) => s + d.effort, 0);
       const finalLimiting = finalFiltered.length > 0 ? finalFiltered.reduce((max, d) => d.effort > max.effort ? d : max, finalFiltered[0]) : null;
@@ -5122,6 +6479,21 @@ const BioModelPage: React.FC = () => {
         // else in the pipeline.
         { positiveAction: 'Extension', negativeAction: 'Flexion', axis: {x:1,y:0,z:0} },
     ],
+    'Forearm': [
+        // Forearm rotation about the radius/ulna long axis (radioulnar joint).
+        // Modeled as a twist on the forearm bone, same isBoneAxis pattern as
+        // shoulder IR/ER. Conventional sign: supination = palm-up positive,
+        // pronation = palm-down negative.
+        { positiveAction: 'Supination', negativeAction: 'Pronation', axis: {x:0,y:0,z:0}, isBoneAxis: true },
+        // Grip: tensile-force action (not a torque). Demand is the
+        // forearm-axis distal projection of forces applied to the hand —
+        // i.e. how hard the load is trying to slip out of the fingers.
+        // negativeAction = 'Slack' is a placeholder — grip can't go
+        // negative physically (you can't pull down on something WITH the
+        // fingers via grip). The negative direction is intentionally
+        // unused; demands only ever populate the positive direction.
+        { positiveAction: 'Grip', negativeAction: 'Slack', axis: {x:0,y:0,z:0}, isLinearForce: true },
+    ],
     'Spine': [
         // Unlike Hip/Knee/Elbow, the spine points UP from pelvis, so a +X
         // applied torque drives it INTO flexion (neck tip moves forward).
@@ -5175,6 +6547,12 @@ const BioModelPage: React.FC = () => {
       'Scapula':  { left: 'lClavicle', right: 'rClavicle' },
       'Shoulder': { left: 'lHumerus',  right: 'rHumerus'  },
       'Elbow':    { left: 'lForearm',  right: 'rForearm'  },
+      // Forearm uses the same bones as Elbow but represents the radioulnar
+      // joint's twist (pronation/supination). Twist value is stored at
+      // twists['lForearm'] / twists['rForearm'], independent of the
+      // forearm's hinge angle (which lives in posture as the bone's
+      // direction in parent y-z plane).
+      'Forearm':  { left: 'lForearm',  right: 'rForearm'  },
       'Spine':    null,
       'Hip':      { left: 'lFemur',    right: 'rFemur'    },
       'Knee':     { left: 'lTibia',    right: 'rTibia'    },
@@ -5224,6 +6602,10 @@ const BioModelPage: React.FC = () => {
       curPosture: Posture,
       curTwists: Record<string, number>
   ): number => {
+      // Linear-force actions (e.g. Forearm.grip) have no rotational angle.
+      // Return 0 so bell curves evaluate at their peak — capacity / muscle
+      // contributions for these actions don't depend on a joint angle.
+      if (action.isLinearForce) return 0;
       if (action.isBoneAxis) {
           const raw = curTwists[boneId] || 0;
           // Twists are stored raw for left, negated for right (see
@@ -5386,6 +6768,49 @@ const BioModelPage: React.FC = () => {
           if (actionKey(ax.negativeAction) === key) return { axis: ax, isPositive: false };
       }
       return null;
+  };
+
+  // Compute muscle length scalar from a pose given a per-action shortening
+  // pattern. Length = Σ pattern[a] × angleInDirection[a], where
+  // angleInDirection comes from sectionDirectionAngle (signed degrees,
+  // positive = in the direction of action `a`'s positive axis).
+  //
+  // Positive coefficient + positive angle = shortening (length > 0).
+  // Negative angle (joint in antagonist direction) gives lengthening
+  // automatically. Length is in arbitrary units calibrated by the
+  // catalog's coefficient magnitudes; typical full ROM produces
+  // length swings in roughly [-1.5, +1.5].
+  //
+  // For per-side muscles (everything except spine-only) `side` selects
+  // which bone of each crossed joint to read. Spine actions read the
+  // single 'spine' bone regardless of side.
+  const computeMuscleLength = (
+      pattern: Record<string, number> | undefined,
+      side: 'left' | 'right',
+      pose: Posture,
+      ts: Record<string, number>,
+  ): number => {
+      if (!pattern) return 0;
+      let length = 0;
+      for (const [key, coeff] of Object.entries(pattern)) {
+          const dotIdx = key.indexOf('.');
+          if (dotIdx === -1) continue;
+          const jointGroup = key.slice(0, dotIdx) as JointGroup;
+          const action = key.slice(dotIdx + 1);
+          const ax = getActionAxisByKey(jointGroup, action);
+          if (!ax) continue;
+          let bone: string | null;
+          if (jointGroup === 'Spine') {
+              bone = 'spine';
+          } else {
+              const bones = GROUP_BONES[jointGroup];
+              bone = bones ? (side === 'left' ? bones.left : bones.right) : null;
+          }
+          if (!bone) continue;
+          const angle = sectionDirectionAngle(bone, ax.axis, ax.isPositive, pose, ts);
+          length += coeff * angle;
+      }
+      return length;
   };
 
   // Current source-joint angle (in directionAngle convention) for a
@@ -5778,7 +7203,10 @@ const BioModelPage: React.FC = () => {
       return JOINT_ACTIONS[group].map(action => ({
           kind: 'action' as const,
           key: `${group}.action.${action.positiveAction}`,
-          label: `${action.positiveAction} / ${action.negativeAction}`,
+          // Linear-force actions are unidirectional — no opposing
+          // muscle group / no antagonist label, so just show the
+          // positive name (e.g. "Grip" instead of "Grip / Slack").
+          label: action.isLinearForce ? action.positiveAction : `${action.positiveAction} / ${action.negativeAction}`,
           action,
           displayMin: -200,
           displayMax: 200,
@@ -5844,6 +7272,20 @@ const BioModelPage: React.FC = () => {
   const getBoneJointGroup = (boneId: string): JointGroup | null => {
       for (const [group, sides] of Object.entries(GROUP_BONES) as [JointGroup, { left: string; right: string } | null][]) {
           if (sides && (sides.left === boneId || sides.right === boneId)) return group;
+      }
+      return null;
+  };
+
+  // Like getBoneJointGroup, but specifically returns the JointGroup that
+  // contains this bone AND has a bone-axis (twist) action. Needed because
+  // a bone can belong to multiple joint groups — e.g. lForearm is in both
+  // Elbow (hinge) and Forearm (twist), and the rotation handler needs to
+  // resolve to Forearm to read the right limits.
+  const getBoneRotationGroup = (boneId: string): JointGroup | null => {
+      for (const [group, sides] of Object.entries(GROUP_BONES) as [JointGroup, { left: string; right: string } | null][]) {
+          if (!sides || (sides.left !== boneId && sides.right !== boneId)) continue;
+          const acts = JOINT_ACTIONS[group];
+          if (acts && acts.some(a => a.isBoneAxis)) return group;
       }
       return null;
   };
@@ -7375,6 +8817,22 @@ const BioModelPage: React.FC = () => {
       muscleName: string;
       activations: number[];
   }
+  // Time series of muscle LENGTH across frames (signed, arbitrary units).
+  // Positive = shortened relative to neutral; negative = lengthened.
+  // Computed via computeMuscleLength using the catalog's shorteningPattern
+  // — independent of activation, depends only on pose. Used for length-
+  // tension feedback into recovery formulas.
+  interface MuscleLengthTimeSeries {
+      side: string;
+      muscleId: string;
+      muscleName: string;
+      lengths: number[];
+      // Min and max length seen across the timeline. Used for sparkline
+      // y-axis bounds and to detect "ever stretched" / "ever shortened"
+      // characteristics.
+      minLength: number;
+      maxLength: number;
+  }
   interface TimelineAnalysisResult {
       peaks: TimelinePeak[];
       limitingPeak: TimelinePeak | null;
@@ -7401,7 +8859,10 @@ const BioModelPage: React.FC = () => {
   }
 
   const timelineAnalysis = useMemo<TimelineAnalysisResult | null>(() => {
-      if (activeTab !== 'timeline') return null;
+      // Computed lazily — only when a tab that consumes it is active.
+      // Timeline Peaks (the original consumer) and Preview (which renders
+      // the user-facing exercise breakdown sourced from this same data).
+      if (activeTab !== 'timeline' && activeTab !== 'preview') return null;
       if (forces.length === 0) return null;
 
       const FRAMES: number = 25;
@@ -7753,6 +9214,95 @@ const BioModelPage: React.FC = () => {
       return { peaks, limitingPeak, limitingJoint, framesAnalyzed, framesSkipped, profile, actionSeries, musclePeaks, muscleSeries, limitingMuscle };
       // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, startPosture, endPosture, startTwists, endTwists, forces, constraints, jointCapacities, jointLimits, muscleAssignments, sectionScales, effortExponent, bracingFraction]);
+
+  // Per-frame muscle length analysis. Lives as its own useMemo because:
+  //   1. Length is purely a function of pose — no forces, no solver
+  //      demands needed. The length tab works on any preset, including
+  //      ones without forces or capacities defined.
+  //   2. Decoupling lets the timelineAnalysis stay focused on activation
+  //      / demand work (the heavy stuff).
+  // Pose interpolation + constraint projection mirrors the timeline
+  // sampling so per-frame indexing stays consistent if we ever cross-
+  // reference the two analyses.
+  const lengthAnalysis = useMemo<{
+      profile: TimelineProfilePoint[];
+      muscleLengths: MuscleLengthTimeSeries[];
+  } | null>(() => {
+      if (activeTab !== 'lengths') return null;
+
+      const FRAMES: number = 25;
+      const EMPTY_LOCK = new Set<string>();
+      const profile: TimelineProfilePoint[] = [];
+      const muscleLengthSeriesMap = new Map<string, { side: 'left' | 'right'; muscleId: string; lengths: number[] }>();
+
+      for (let i = 0; i < FRAMES; i++) {
+          const t = FRAMES === 1 ? 0 : i / (FRAMES - 1);
+
+          // Same pose interpolation the playback + timelineAnalysis use.
+          const framePosture: Posture = {};
+          Object.keys(startPosture).forEach(boneId => {
+              const startV = startPosture[boneId];
+              const endV = endPosture[boneId] || startV;
+              if (boneId.includes('Clavicle')) {
+                  framePosture[boneId] = interpolateVector(startV, endV, t);
+              } else {
+                  framePosture[boneId] = slerpDirection(startV, endV, t);
+              }
+          });
+          const frameTwists: Record<string, number> = {};
+          const allTwistKeys = new Set([...Object.keys(startTwists), ...Object.keys(endTwists)]);
+          allTwistKeys.forEach(boneId => {
+              const startT = startTwists[boneId] || 0;
+              const endT = endTwists[boneId] || 0;
+              frameTwists[boneId] = interpolateScalar(startT, endT, t);
+          });
+
+          // Project onto constraints if any. Length is pose-derived so
+          // we want the actually-feasible pose, not just the slerp.
+          // Solver failure: fall back to interpolated pose (length still
+          // computable, just slightly off the constraint manifold).
+          const solved = solveConstraintsAccommodating(framePosture, EMPTY_LOCK, frameTwists);
+          const framePose = solved ? solved.posture : framePosture;
+          const frameTw = solved ? solved.twists : frameTwists;
+
+          profile.push({ t, resistance: 0, difficulty: 0 });
+
+          for (const muscle of MUSCLE_CATALOG) {
+              if (!muscle.shorteningPattern) continue;
+              for (const side of ['left', 'right'] as const) {
+                  const length = computeMuscleLength(muscle.shorteningPattern, side, framePose, frameTw);
+                  const key = `${side}|${muscle.id}`;
+                  let series = muscleLengthSeriesMap.get(key);
+                  if (!series) {
+                      series = { side, muscleId: muscle.id, lengths: [] };
+                      muscleLengthSeriesMap.set(key, series);
+                  }
+                  series.lengths.push(length);
+              }
+          }
+      }
+
+      const muscleLengths: MuscleLengthTimeSeries[] = Array.from(muscleLengthSeriesMap.values()).map(ml => {
+          let minL = Infinity, maxL = -Infinity;
+          for (const v of ml.lengths) {
+              if (v < minL) minL = v;
+              if (v > maxL) maxL = v;
+          }
+          if (!Number.isFinite(minL)) minL = 0;
+          if (!Number.isFinite(maxL)) maxL = 0;
+          return {
+              side: ml.side,
+              muscleId: ml.muscleId,
+              muscleName: MUSCLE_CATALOG.find(m => m.id === ml.muscleId)?.name || ml.muscleId,
+              lengths: ml.lengths,
+              minLength: minL,
+              maxLength: maxL,
+          };
+      });
+
+      return { profile, muscleLengths };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, startPosture, endPosture, startTwists, endTwists, constraints]);
 
   const resolveKinematics = (boneId: string, proposedVector: Vector3, currentPosture: Posture, currentTwists: Record<string, number>): { posture: Posture, twists: Record<string, number> } => {
       const projected = projectDirOntoConstraints(boneId, proposedVector, currentPosture, currentTwists);
@@ -8267,11 +9817,14 @@ const BioModelPage: React.FC = () => {
     }
 
     // Clamp against the External Rotation action limit for this bone's
-    // joint group. Falls back to the static ROTATION_LIMITS table if the
-    // bone doesn't belong to a configured joint group. Slider value is in
-    // display convention (positive = external rotation for both sides).
+    // joint group. Uses getBoneRotationGroup so forearms (which belong to
+    // both Elbow + Forearm) resolve to the rotation-bearing Forearm group,
+    // not the hinge-only Elbow group. Falls back to the static
+    // ROTATION_LIMITS table if no rotation group exists. Slider value is
+    // in display convention (positive = external rotation / supination
+    // for both sides).
     let clampedVal = val;
-    const rotGroup = getBoneJointGroup(selectedBone);
+    const rotGroup = getBoneRotationGroup(selectedBone);
     if (rotGroup) {
         const dims = limitDimensionsForGroup(rotGroup);
         const twistDim = dims.find(d => d.kind === 'action' && d.action?.isBoneAxis);
@@ -8597,6 +10150,9 @@ const BioModelPage: React.FC = () => {
     setForces(newForces);
     setConstraints(newConstraints);
     setEditingForceId(null);
+    // Load metadata from the preset (or clear if not present). Preview
+    // tab reads this for region / length / recovery / systemic demand.
+    setExerciseMetadata(preset.metadata ?? null);
   };
 
   const handleBoneSelect = (boneId: string) => {
@@ -8922,29 +10478,106 @@ const BioModelPage: React.FC = () => {
                 </button>
                 {presetMenuOpen && (
                     <div className="absolute right-0 top-full mt-1 w-80 bg-white border border-gray-200 rounded-xl shadow-lg z-20 max-h-[70vh] overflow-y-auto">
-                        {EXERCISE_PRESETS.length === 0 && (
+                        {EXERCISE_PRESETS.length === 0 ? (
                             <div className="p-4 text-xs text-gray-400 text-center">
                                 No presets yet.
                             </div>
-                        )}
-                        {(['Push', 'Pull', 'Legs', 'Isolation'] as const).map(category => {
-                            const inCat = EXERCISE_PRESETS.filter(p => p.category === category);
-                            if (inCat.length === 0) return null;
+                        ) : (() => {
+                            // Group-by toggle. Determines what "section header"
+                            // each preset is bucketed under in the dropdown.
+                            const muscleNameById = (id: string) =>
+                                MUSCLE_CATALOG.find(m => m.id === id)?.name || id;
+
+                            // Build (groupKey → presets[]) map for the active
+                            // grouping mode. For 'muscle' mode, a preset
+                            // appears under EVERY muscle in its primaryMuscles
+                            // list (so a preset that hits chest + triceps
+                            // shows under both — useful for finding "what
+                            // trains my biceps" type queries).
+                            const groups = new Map<string, ExercisePreset[]>();
+                            for (const p of EXERCISE_PRESETS) {
+                                const keys: string[] = [];
+                                if (presetGroupBy === 'category') {
+                                    keys.push(p.category);
+                                } else if (presetGroupBy === 'pattern') {
+                                    keys.push(p.movementPattern ? p.movementPattern.charAt(0).toUpperCase() + p.movementPattern.slice(1) : 'Other');
+                                } else if (presetGroupBy === 'brand') {
+                                    keys.push(p.brand || 'Other');
+                                } else if (presetGroupBy === 'muscle') {
+                                    if (p.primaryMuscles && p.primaryMuscles.length > 0) {
+                                        for (const mid of p.primaryMuscles) keys.push(muscleNameById(mid));
+                                    } else {
+                                        keys.push('Uncategorized');
+                                    }
+                                }
+                                for (const k of keys) {
+                                    if (!groups.has(k)) groups.set(k, []);
+                                    groups.get(k)!.push(p);
+                                }
+                            }
+
+                            // Sort group keys: category mode keeps the
+                            // canonical Push/Pull/Legs/Isolation order;
+                            // everything else sorts alphabetically.
+                            const groupOrder = (() => {
+                                if (presetGroupBy === 'category') {
+                                    const order = ['Push', 'Pull', 'Legs', 'Isolation'];
+                                    return [...groups.keys()].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+                                }
+                                return [...groups.keys()].sort();
+                            })();
+
                             return (
-                                <div key={category} className="p-2 border-b border-gray-100 last:border-b-0">
-                                    <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 px-2 pb-1">{category}</div>
-                                    {inCat.map(p => (
-                                        <button
-                                            key={p.id}
-                                            onClick={() => { applyPreset(p); setPresetMenuOpen(false); }}
-                                            className="w-full text-left px-2 py-2 rounded-lg hover:bg-indigo-50 transition-colors group"
-                                        >
-                                            <div className="text-sm font-bold text-gray-800 group-hover:text-indigo-700">{p.name}</div>
-                                        </button>
-                                    ))}
-                                </div>
+                                <>
+                                    {/* Group-by toggle. Chip row at top of dropdown. */}
+                                    <div className="sticky top-0 bg-white border-b border-gray-100 p-2 z-10">
+                                        <div className="text-[9px] font-bold uppercase tracking-widest text-gray-400 px-1 pb-1.5">Group by</div>
+                                        <div className="flex gap-1">
+                                            {(['category', 'pattern', 'brand', 'muscle'] as const).map(mode => (
+                                                <button
+                                                    key={mode}
+                                                    onClick={() => setPresetGroupBy(mode)}
+                                                    className={`flex-1 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wide transition-all ${presetGroupBy === mode ? 'bg-indigo-600 text-white' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
+                                                >
+                                                    {mode}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    {groupOrder.map(groupKey => {
+                                        const inGroup = groups.get(groupKey)!;
+                                        return (
+                                            <div key={groupKey} className="p-2 border-b border-gray-100 last:border-b-0">
+                                                <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 px-2 pb-1">
+                                                    {groupKey} <span className="text-gray-300 font-mono normal-case ml-1">{inGroup.length}</span>
+                                                </div>
+                                                {inGroup.map(p => (
+                                                    <button
+                                                        key={p.id}
+                                                        onClick={() => { applyPreset(p); setPresetMenuOpen(false); }}
+                                                        className="w-full text-left px-2 py-2 rounded-lg hover:bg-indigo-50 transition-colors group"
+                                                    >
+                                                        <div className="text-sm font-bold text-gray-800 group-hover:text-indigo-700">{p.name}</div>
+                                                        {/* Sub-line shows the OTHER metadata so the
+                                                            user can see why a preset is in this group
+                                                            (e.g. when grouping by muscle, show the
+                                                            brand + pattern; when grouping by brand,
+                                                            show the primary muscles). */}
+                                                        <div className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">
+                                                            {presetGroupBy !== 'brand' && p.brand && <span>{p.brand}</span>}
+                                                            {presetGroupBy !== 'pattern' && p.movementPattern && <span>{p.brand && presetGroupBy !== 'brand' ? ' · ' : ''}{p.movementPattern}</span>}
+                                                            {presetGroupBy !== 'muscle' && p.primaryMuscles && p.primaryMuscles.length > 0 && (
+                                                                <span>{(p.brand || p.movementPattern) ? ' · ' : ''}{p.primaryMuscles.slice(0, 3).map(muscleNameById).join(', ')}</span>
+                                                            )}
+                                                        </div>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        );
+                                    })}
+                                </>
                             );
-                        })}
+                        })()}
                     </div>
                 )}
             </div>
@@ -8998,7 +10631,9 @@ const BioModelPage: React.FC = () => {
             <button onClick={() => setActiveTab('capacities')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'capacities' ? 'bg-white text-purple-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Strength Capacity"><Gauge className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('limits')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'limits' ? 'bg-white text-rose-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Joint Limits"><Lock className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('muscles')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'muscles' ? 'bg-white text-teal-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Muscles"><Activity className="w-5 h-5" /></button>
+            <button onClick={() => setActiveTab('lengths')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'lengths' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Muscle Lengths"><Ruler className="w-5 h-5" /></button>
             <button onClick={() => setActiveTab('modifications')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'modifications' ? 'bg-white text-amber-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Cross-Joint Modifications"><Link2 className="w-5 h-5" /></button>
+            <button onClick={() => setActiveTab('preview')} className={`flex-1 min-w-[3rem] flex items-center justify-center p-2 rounded-lg transition-all ${activeTab === 'preview' ? 'bg-white text-pink-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="User-Facing Preview"><Search className="w-5 h-5" /></button>
           </div>
 
           <div className="flex items-center gap-3 mb-6 shrink-0">
@@ -9010,7 +10645,9 @@ const BioModelPage: React.FC = () => {
             {activeTab === 'capacities' && <Gauge className="w-5 h-5 text-purple-600" />}
             {activeTab === 'limits' && <Lock className="w-5 h-5 text-rose-600" />}
             {activeTab === 'muscles' && <Activity className="w-5 h-5 text-teal-600" />}
+            {activeTab === 'lengths' && <Ruler className="w-5 h-5 text-indigo-600" />}
             {activeTab === 'modifications' && <Link2 className="w-5 h-5 text-amber-600" />}
+            {activeTab === 'preview' && <Search className="w-5 h-5 text-pink-600" />}
             <h3 className="text-lg font-bold text-gray-900">
                 {activeTab === 'kinematics' ? 'Motion Editor' :
                  activeTab === 'constraints' ? 'Constraints' :
@@ -9018,7 +10655,9 @@ const BioModelPage: React.FC = () => {
                  activeTab === 'capacities' ? 'Joint Capacities' :
                  activeTab === 'limits' ? 'Joint Limits' :
                  activeTab === 'muscles' ? 'Muscles' :
+                 activeTab === 'lengths' ? 'Muscle Lengths' :
                  activeTab === 'modifications' ? 'Cross-Joint Modifications' :
+                 activeTab === 'preview' ? 'Exercise Preview' :
                  activeTab === 'timeline' ? 'Timeline Peaks' : 'Joint Analysis'}
             </h3>
           </div>
@@ -9045,16 +10684,59 @@ const BioModelPage: React.FC = () => {
                         <div className="flex items-center justify-between"><span className="font-bold text-gray-900 text-sm">{BONE_NAMES[selectedBone]}</span><span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{poseMode === 'start' ? 'Start' : 'End'} Editing</span></div>
 
                         {isHinge ? (
-                            <div>
+                            <div className="space-y-6">
                                 {(() => {
                                     const cfg = getHingeConfig(selectedBone);
                                     if (!cfg) return null;
                                     const currentAngle = getCurrentHingeAngle(selectedBone);
                                     return (
-                                        <>
+                                        <div>
                                             <div className="flex justify-between mb-2"><label className="font-bold text-gray-700 text-xs flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-indigo-500"></span>{cfg.label}</label><span className="font-mono text-gray-500 font-bold text-xs">{currentAngle}°</span></div>
                                             <input type="range" min={cfg.min} max={cfg.max} step="1" value={currentAngle} onChange={(e) => handleHingeChange(parseInt(e.target.value))} className="bio-range w-full text-indigo-600"/>
-                                        </>
+                                        </div>
+                                    );
+                                })()}
+                                {/* Forearm pronation / supination — second DOF
+                                    on the forearm bone, stored as a twist
+                                    (twists['lForearm']/['rForearm']). Mirrored
+                                    on the right side via the same negation
+                                    convention used by Shoulder.IR/ER, so
+                                    increasing slider = supination on both
+                                    arms. Limits read from the Forearm joint
+                                    group (handleRotationChange uses
+                                    getBoneRotationGroup to resolve correctly
+                                    even though Forearm bones also belong to
+                                    the hinge-only Elbow group). */}
+                                {selectedBone && /Forearm/.test(selectedBone) && (() => {
+                                    const rotGroup = getBoneRotationGroup(selectedBone);
+                                    const dims = rotGroup ? limitDimensionsForGroup(rotGroup) : [];
+                                    const twistDim = dims.find(d => d.kind === 'action' && d.action?.isBoneAxis);
+                                    const eff = twistDim ? getEffectiveLimit(twistDim.key, selectedBone, posture, twists) : null;
+                                    const rmin = eff?.min ?? -85;
+                                    const rmax = eff?.max ?? 85;
+                                    return (
+                                        <div className="pt-4 border-t border-gray-100">
+                                            <div className="flex justify-between mb-2">
+                                                <label className="font-bold text-gray-700 text-xs flex items-center gap-2">
+                                                    <RefreshCw className="w-3 h-3 text-orange-500" />
+                                                    Pronation / Supination
+                                                </label>
+                                                <span className="font-mono font-bold text-gray-500 text-xs">{displayTwist}°</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min={rmin}
+                                                max={rmax}
+                                                step="1"
+                                                value={displayTwist}
+                                                onChange={(e) => handleRotationChange(parseFloat(e.target.value))}
+                                                className="bio-range w-full text-orange-500"
+                                            />
+                                            <div className="flex justify-between mt-1">
+                                                <span className="text-[9px] font-bold text-gray-400">{rmin}° (Pron)</span>
+                                                <span className="text-[9px] font-bold text-gray-400">{rmax}° (Sup)</span>
+                                            </div>
+                                        </div>
                                     );
                                 })()}
                             </div>
@@ -10501,6 +12183,104 @@ const BioModelPage: React.FC = () => {
               </div>
           )}
 
+          {activeTab === 'lengths' && (
+              <div className="flex-1 flex flex-col animate-in fade-in slide-in-from-right-4 duration-300">
+                  <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100 mb-6">
+                      <p className="text-xs text-indigo-900 font-medium leading-relaxed">
+                          Per-muscle length across the timeline. Computed purely from pose using each muscle's shorteningPattern in the catalog — independent of forces, capacities, or activation. Positive = shortened relative to neutral; negative = lengthened (toward passive insufficiency).
+                      </p>
+                      <p className="text-[10px] text-indigo-500 font-mono mt-2">
+                          Use this to sanity-check the shorteningPattern coefficients. Drag the timeline scrubber and watch each muscle's length update in real time.
+                      </p>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto pr-2">
+                      {!lengthAnalysis ? (
+                          <p className="text-xs text-gray-400 text-center py-8">Length analysis not available.</p>
+                      ) : lengthAnalysis.muscleLengths.length === 0 ? (
+                          <div className="bg-white border border-gray-100 rounded-2xl p-6 text-center">
+                              <p className="text-xs text-gray-400">No muscles with shorteningPattern in MUSCLE_CATALOG. Add per-action shortening coefficients to enable length analysis.</p>
+                          </div>
+                      ) : (() => {
+                          // Sort by total length swing (max − min)
+                          // descending — biggest movers up top. Static
+                          // muscles sink to the bottom.
+                          const sorted = [...lengthAnalysis.muscleLengths].sort(
+                              (a, b) => (b.maxLength - b.minLength) - (a.maxLength - a.minLength)
+                          );
+
+                          const renderLengthSparkline = (values: number[], minVal: number, maxVal: number) => {
+                              if (values.length < 2) return null;
+                              const profPts = lengthAnalysis.profile;
+                              const W = 260, H = 28, PAD = 2;
+                              const plotW = W - PAD * 2, plotH = H - PAD * 2;
+                              // Symmetric y-axis around 0 so the zero line
+                              // is geometrically meaningful (above = shortened,
+                              // below = lengthened).
+                              const absMax = Math.max(Math.abs(minVal), Math.abs(maxVal), 0.01);
+                              const yMid = PAD + plotH / 2;
+                              const pathD = values.map((v, i) => {
+                                  const t = profPts[i] ? profPts[i].t : (i / (values.length - 1));
+                                  const x = PAD + t * plotW;
+                                  const y = yMid - (v / absMax) * (plotH / 2);
+                                  return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+                              }).join(' ');
+                              return (
+                                  <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ display: 'block', height: `${H}px` }} preserveAspectRatio="none">
+                                      {/* Zero-length baseline. */}
+                                      <line x1={PAD} x2={PAD + plotW} y1={yMid} y2={yMid} stroke="#d1d5db" strokeWidth="0.5" strokeDasharray="2 2" />
+                                      <path d={pathD} fill="none" stroke="#6366f1" strokeWidth="1.25" strokeLinejoin="round" />
+                                      {/* Current ROM position indicator. */}
+                                      <line
+                                          x1={PAD + currentRomT * plotW}
+                                          x2={PAD + currentRomT * plotW}
+                                          y1={PAD}
+                                          y2={PAD + plotH}
+                                          stroke="#0d9488" strokeWidth="0.75" opacity="0.85"
+                                      />
+                                  </svg>
+                              );
+                          };
+
+                          return (
+                              <div className="bg-white border border-gray-100 rounded-2xl p-4">
+                                  <p className="text-[10px] text-gray-400 mb-3 leading-snug">
+                                      Sorted by length swing (biggest movers first). Units are arbitrary, calibrated so typical full ROM produces ±1 to ±1.5.
+                                  </p>
+                                  <div className="space-y-2.5">
+                                      {sorted.map((ml, i) => {
+                                          const swing = ml.maxLength - ml.minLength;
+                                          return (
+                                              <div key={`${ml.side}-${ml.muscleId}-${i}`}>
+                                                  <div className="flex justify-between items-center mb-0.5">
+                                                      <div className="flex items-center gap-2 min-w-0">
+                                                          <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: muscleColor(ml.muscleId) }} />
+                                                          <span className="font-bold text-gray-700 text-xs truncate">
+                                                              <span className="text-gray-400 font-mono">{ml.side[0]} </span>
+                                                              {ml.muscleName}
+                                                          </span>
+                                                      </div>
+                                                      <div className="flex items-center gap-2 flex-shrink-0">
+                                                          <span className="text-[9px] font-mono font-semibold text-rose-400" title="Min length (most lengthened)">{ml.minLength.toFixed(2)}</span>
+                                                          <span className="text-[9px] font-mono text-gray-300">→</span>
+                                                          <span className="text-[9px] font-mono font-semibold text-emerald-500" title="Max length (most shortened)">{ml.maxLength.toFixed(2)}</span>
+                                                          <span className="text-[9px] font-mono text-gray-400" title="Length swing (max − min)">Δ {swing.toFixed(2)}</span>
+                                                      </div>
+                                                  </div>
+                                                  <div className="rounded overflow-hidden bg-gray-50">
+                                                      {renderLengthSparkline(ml.lengths, ml.minLength, ml.maxLength)}
+                                                  </div>
+                                              </div>
+                                          );
+                                      })}
+                                  </div>
+                              </div>
+                          );
+                      })()}
+                  </div>
+              </div>
+          )}
+
           {activeTab === 'limits' && (
               <div className="flex-1 flex flex-col animate-in fade-in slide-in-from-right-4 duration-300">
                   <div className="bg-rose-50 p-4 rounded-xl border border-rose-100 mb-6">
@@ -11003,7 +12783,14 @@ const BioModelPage: React.FC = () => {
                               const sections: { directionName: string; ax: ActionAxis; isPositive: boolean }[] = [];
                               for (const ax of acts) {
                                   sections.push({ directionName: ax.positiveAction, ax, isPositive: true });
-                                  sections.push({ directionName: ax.negativeAction, ax, isPositive: false });
+                                  // Linear-force actions (e.g. Forearm.grip) are
+                                  // unidirectional — there's no opposing muscle
+                                  // group. Skip the negative-direction section
+                                  // so it doesn't show up as a stale empty
+                                  // entry (e.g. "Slack").
+                                  if (!ax.isLinearForce) {
+                                      sections.push({ directionName: ax.negativeAction, ax, isPositive: false });
+                                  }
                               }
                               const groupExpanded = expandedMuscleSections.has(group);
                               // Total muscles assigned across this group, for the header summary.
@@ -11813,6 +13600,300 @@ const BioModelPage: React.FC = () => {
                           <Plus className="w-4 h-4" /> New Modification
                       </button>
                   </div>
+              </div>
+              );
+          })()}
+
+          {activeTab === 'preview' && (() => {
+              // The Preview tab renders what the user-facing app would
+              // show for this exercise — sourced live from the BioModel
+              // simulation rather than hardcoded data. Has its own
+              // noobie / advanced toggle so the author can sanity-check
+              // both views without touching their global settings.
+              //
+              // Data sources:
+              //   - Muscle activation %s come from timelineAnalysis
+              //     .musclePeaks (peak per muscle across the rep).
+              //   - Resistance / difficulty profiles come from
+              //     timelineAnalysis.profile.
+              //   - Per-muscle region / length / recovery and exercise-
+              //     level systemic demand come from `exerciseMetadata`,
+              //     which is loaded from preset.metadata at applyPreset
+              //     time.
+              //
+              // Anything pending future work (rest-time formula, days-
+              // to-recover formula) shows as an "— pending —" placeholder
+              // so the layout is locked in even though the math isn't
+              // wired up yet.
+              const peaks = timelineAnalysis?.musclePeaks ?? [];
+              // TEMP (testing): threshold dropped from 0.30 to 0 so every
+              // group with non-zero aggregated activation renders. Restore
+              // to 0.30 once the per-group values look sensible.
+              const ACT_THRESHOLD = 0;
+              const showAdvanced = previewLevel === 'advanced';
+
+              // Aggregation runs in two passes:
+              //
+              //   1. Reduce per-side bilateral entries to a single peak
+              //      activation per catalog muscleId — Left Quads Vasti
+              //      and Right Quads Vasti collapse to one number that
+              //      reflects how hard "quads-vasti" works at peak.
+              //
+              //   2. Apply the saturation formula
+              //         group_activation = 1 − Π(1 − w_i × a_i)
+              //      to each DisplayGroup (ADVANCED_GROUPS / NOOBIE_GROUPS)
+              //      via aggregateGroupActivation. This is a "noisy-OR" —
+              //      it lets us encode the user's spec where 100% of one
+              //      contributor doesn't necessarily mean 100% of the
+              //      group (Triceps with two heads at w=0.8 each tops out
+              //      around 96% with both maxed; Shoulders is ~side-delt-
+              //      driven but front/rear add small shares).
+              //
+              // Per-row metadata in advanced view follows the dominant
+              // contributor (max w·a) so region / length / recovery
+              // chips reflect the catalog entry actually carrying the
+              // group's load.
+              type GroupedRow = {
+                  label: string;
+                  activation: number;
+                  dominantMuscleId: string | null;
+                  contributors: string[];
+              };
+
+              // Pass 1: max activation per catalog muscleId across L/R
+              // (musclePeaks emits one entry per side per muscle).
+              const activationByMuscle = new Map<string, number>();
+              for (const p of peaks) {
+                  const cur = activationByMuscle.get(p.muscleId) ?? 0;
+                  if (p.peakActivation > cur) activationByMuscle.set(p.muscleId, p.peakActivation);
+              }
+
+              // Pass 2: apply the saturation formula per DisplayGroup,
+              // drop rows below threshold, sort high → low.
+              const aggregateAll = (groups: DisplayGroup[]): GroupedRow[] =>
+                  groups
+                      .map(g => {
+                          const r = aggregateGroupActivation(g, activationByMuscle);
+                          return {
+                              label: g.label,
+                              activation: r.activation,
+                              dominantMuscleId: r.dominantMuscleId,
+                              contributors: r.contributors,
+                          };
+                      })
+                      .filter(g => g.activation > ACT_THRESHOLD)
+                      .sort((a, b) => b.activation - a.activation);
+
+              const advancedList = aggregateAll(ADVANCED_GROUPS);
+              const noobieList = aggregateAll(NOOBIE_GROUPS);
+              const visibleList = showAdvanced ? advancedList : noobieList;
+
+              // Tiny inline mini-graph for the resistance / difficulty
+              // profile cards. Same Y-axis convention as the Timeline
+              // Peaks tab (0-100% normalized).
+              const renderProfileMini = (values: number[], color: string, fillColor: string) => {
+                  if (values.length < 2) return null;
+                  const W = 280, H = 50, PAD = 2;
+                  const plotW = W - PAD * 2, plotH = H - PAD * 2;
+                  const maxV = Math.max(...values, 1e-9);
+                  const path = values.map((v, i) => {
+                      const t = values.length > 1 ? i / (values.length - 1) : 0;
+                      const x = PAD + t * plotW;
+                      const y = PAD + plotH - (v / maxV) * plotH;
+                      return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+                  }).join(' ');
+                  const area = path + ` L${(PAD + plotW).toFixed(1)},${(PAD + plotH).toFixed(1)} L${PAD.toFixed(1)},${(PAD + plotH).toFixed(1)} Z`;
+                  return (
+                      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ display: 'block' }} preserveAspectRatio="none">
+                          <path d={area} fill={fillColor} />
+                          <path d={path} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+                      </svg>
+                  );
+              };
+
+              return (
+              <div className="flex-1 overflow-y-auto pr-2 animate-in fade-in slide-in-from-right-4 duration-300 space-y-5">
+                  {/* View toggle */}
+                  <div className="flex items-center gap-1 p-1 bg-gray-100 rounded-xl">
+                      <button
+                          onClick={() => setPreviewLevel('noobie')}
+                          className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${previewLevel === 'noobie' ? 'bg-white text-pink-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                      >
+                          Noobie View
+                      </button>
+                      <button
+                          onClick={() => setPreviewLevel('advanced')}
+                          className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${previewLevel === 'advanced' ? 'bg-white text-pink-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                      >
+                          Advanced View
+                      </button>
+                  </div>
+
+                  {/* Optional description from metadata */}
+                  {exerciseMetadata?.description && (
+                      <div className="bg-gray-50 border border-gray-100 rounded-xl p-4">
+                          <p className="text-sm text-gray-700 leading-relaxed">{exerciseMetadata.description}</p>
+                      </div>
+                  )}
+
+                  {/* Muscles trained */}
+                  <div className="bg-white border border-gray-100 rounded-2xl p-4">
+                      <div className="flex items-center gap-2 mb-3">
+                          <Activity className="w-4 h-4 text-pink-600" />
+                          <h4 className="font-bold text-gray-900 text-sm">Muscles Trained</h4>
+                      </div>
+                      {visibleList.length === 0 ? (
+                          <p className="text-xs text-gray-400 italic">
+                              {showAdvanced
+                                  ? 'No muscle activation detected. Add forces / constraints and switch to the Timeline tab to compute, then come back.'
+                                  : 'No muscles activated.'}
+                          </p>
+                      ) : (
+                          <div className="space-y-3">
+                              {visibleList.map(g => {
+                                  // Metadata follows the dominant contributor
+                                  // (max w·a). Only shown in advanced view;
+                                  // noobie keeps it simple (just name + bar).
+                                  const note = showAdvanced && g.dominantMuscleId
+                                      ? exerciseMetadata?.muscleNotes?.[g.dominantMuscleId]
+                                      : undefined;
+                                  const pct = Math.round(g.activation * 100);
+                                  const barColor = pct >= 80 ? 'bg-red-400' : pct >= 50 ? 'bg-amber-400' : 'bg-emerald-400';
+                                  return (
+                                      <div key={g.label}>
+                                          <div className="flex justify-between items-center mb-1">
+                                              <span className="font-bold text-gray-700 text-xs">{g.label}</span>
+                                              <span className="font-mono text-xs font-bold text-gray-500">{pct}%</span>
+                                          </div>
+                                          <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                              <div className={`h-full rounded-full ${barColor} transition-all duration-500`} style={{ width: `${pct}%` }} />
+                                          </div>
+                                          {showAdvanced && (note?.region || note?.lengthRange || note?.recoveryDemand !== undefined) && (
+                                              <div className="mt-1.5 flex flex-wrap gap-1">
+                                                  {note?.region && (
+                                                      <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 text-[9px] font-mono font-semibold uppercase">
+                                                          {note.region}
+                                                      </span>
+                                                  )}
+                                                  {note?.lengthRange && (
+                                                      <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-blue-50 text-blue-700 text-[9px] font-mono font-semibold uppercase">
+                                                          {note.lengthRange} length
+                                                      </span>
+                                                  )}
+                                                  {note?.recoveryDemand !== undefined && (
+                                                      <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-rose-50 text-rose-700 text-[9px] font-mono font-semibold">
+                                                          recovery × {note.recoveryDemand.toFixed(2)}
+                                                      </span>
+                                                  )}
+                                              </div>
+                                          )}
+                                          {showAdvanced && note?.note && (
+                                              <p className="text-[10px] text-gray-500 italic mt-1">{note.note}</p>
+                                          )}
+                                      </div>
+                                  );
+                              })}
+                          </div>
+                      )}
+                  </div>
+
+                  {/* Advanced-only sections below: profiles, systemic
+                      demand, recovery placeholders. Hidden in noobie view
+                      so end users only see the simplified breakdown. */}
+                  {showAdvanced && (
+                      <>
+                          <div className="bg-white border border-gray-100 rounded-2xl p-4">
+                              <div className="flex items-center gap-2 mb-2">
+                                  <TrendingUp className="w-4 h-4 text-blue-500" />
+                                  <h4 className="font-bold text-gray-900 text-sm">Resistance Profile</h4>
+                              </div>
+                              <p className="text-[10px] text-gray-500 mb-2">Total mechanical load on the chain across the ROM (start → end).</p>
+                              {timelineAnalysis?.profile && timelineAnalysis.profile.length > 1
+                                  ? renderProfileMini(timelineAnalysis.profile.map(p => p.resistance), '#3b82f6', 'rgba(59, 130, 246, 0.12)')
+                                  : <p className="text-xs text-gray-400 italic">Switch to Timeline Peaks once to compute, or wait — the analysis runs lazily.</p>
+                              }
+                          </div>
+
+                          <div className="bg-white border border-gray-100 rounded-2xl p-4">
+                              <div className="flex items-center gap-2 mb-2">
+                                  <Activity className="w-4 h-4 text-red-500" />
+                                  <h4 className="font-bold text-gray-900 text-sm">Difficulty Profile</h4>
+                              </div>
+                              <p className="text-[10px] text-gray-500 mb-2">Hardest joint action's effort (sticking points across the ROM).</p>
+                              {timelineAnalysis?.profile && timelineAnalysis.profile.length > 1
+                                  ? renderProfileMini(timelineAnalysis.profile.map(p => p.difficulty), '#ef4444', 'rgba(239, 68, 68, 0.12)')
+                                  : <p className="text-xs text-gray-400 italic">Pending timeline analysis.</p>
+                              }
+                          </div>
+
+                          <div className="bg-white border border-gray-100 rounded-2xl p-4">
+                              <div className="flex items-center gap-2 mb-2">
+                                  <Heart className="w-4 h-4 text-rose-500" />
+                                  <h4 className="font-bold text-gray-900 text-sm">Systemic Demand</h4>
+                              </div>
+                              <p className="text-[10px] text-gray-500 mb-2">Cardiovascular / CNS load from total muscle mass + bracing. Plugs into the suggested-rest and weekly-volume formulas (formulas pending).</p>
+                              {exerciseMetadata?.systemicDemand !== undefined ? (
+                                  <div className="flex items-center justify-between">
+                                      <span className="font-mono font-bold text-gray-700 text-sm">× {exerciseMetadata.systemicDemand.toFixed(2)}</span>
+                                      {exerciseMetadata.requiresBracing && (
+                                          <span className="text-[9px] font-mono font-semibold uppercase px-2 py-1 rounded-md bg-rose-50 text-rose-700">requires bracing</span>
+                                      )}
+                                  </div>
+                              ) : (
+                                  <p className="text-xs text-gray-400 italic">Not authored — defaults to 1.0 (baseline) when absent.</p>
+                              )}
+                          </div>
+
+                          {/* Rest & Recovery — formula placeholders. The
+                              schema is in place (per-muscle recoveryDemand,
+                              systemicDemand) so when the formulas come
+                              online these cells will populate without
+                              schema changes. */}
+                          <div className="bg-white border border-gray-100 rounded-2xl p-4">
+                              <div className="flex items-center gap-2 mb-2">
+                                  <Clock className="w-4 h-4 text-purple-500" />
+                                  <h4 className="font-bold text-gray-900 text-sm">Rest & Recovery</h4>
+                              </div>
+                              <p className="text-[10px] text-gray-500 mb-3">Formulas TBD. The schema (per-muscle recoveryDemand multiplier, exercise-level systemicDemand) is wired up so these populate as soon as the formulas land.</p>
+                              <div className="space-y-2">
+                                  <div className="flex items-center justify-between text-xs">
+                                      <span className="text-gray-500">Suggested rest between sets</span>
+                                      <span className="font-mono text-gray-300">— pending —</span>
+                                  </div>
+                                  <div className="flex items-center justify-between text-xs">
+                                      <span className="text-gray-500">Days to recover (limiting muscle)</span>
+                                      <span className="font-mono text-gray-300">— pending —</span>
+                                  </div>
+                                  <div className="flex items-center justify-between text-xs">
+                                      <span className="text-gray-500">Repeated-bout effect adjustment</span>
+                                      <span className="font-mono text-gray-300">— pending —</span>
+                                  </div>
+                              </div>
+                          </div>
+
+                          {/* Joint actions list — gives the advanced view
+                              a quick "what does this exercise do" summary
+                              without scanning the muscle list. */}
+                          {advancedList.length > 0 && (
+                              <div className="bg-white border border-gray-100 rounded-2xl p-4">
+                                  <div className="flex items-center gap-2 mb-2">
+                                      <Axis3d className="w-4 h-4 text-violet-500" />
+                                      <h4 className="font-bold text-gray-900 text-sm">Joint Actions</h4>
+                                  </div>
+                                  <p className="text-[10px] text-gray-500 mb-2">Joint actions producing demand at peak.</p>
+                                  <div className="flex flex-wrap gap-1">
+                                      {[...new Set((timelineAnalysis?.peaks ?? [])
+                                          .filter(p => p.peakEffort >= 0.20)
+                                          .map(p => p.action.replace(/^(Left|Right)\s+/, '')))]
+                                          .slice(0, 12)
+                                          .map(a => (
+                                              <span key={a} className="inline-flex items-center px-2 py-1 rounded-md bg-violet-50 text-violet-700 text-[10px] font-mono font-semibold">{a}</span>
+                                          ))}
+                                  </div>
+                              </div>
+                          )}
+                      </>
+                  )}
               </div>
               );
           })()}
